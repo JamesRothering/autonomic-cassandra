@@ -37,7 +37,7 @@ Change the physical layout of a table in response to a hot spot while clients th
 - [ ] Queries written against the logical schema return identical results before, during, and after a migration, in the compatibility test suite.
 - [ ] A migration that fails during backfill is rolled back to the old layout, and no acknowledged write is lost.
 
-Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 9 of [adaptive-schema.md](../architecture/adaptive-schema.md) (T6.1 to T6.16). D6 depends on T2.8 (cluster ledger) specifically. The scope above is the original outline.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 9 of [adaptive-schema.md](../architecture/adaptive-schema.md) (T6.1 to T6.17; T6.17 is reverse migration, required by ADR-024). D6 depends on T2.8 (cluster ledger) specifically. The scope above is the original outline.
 
 ## Status
 

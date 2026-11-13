@@ -25,8 +25,8 @@ Work is organized into deliverables D0 to D7. Each deliverable is developed on a
 | ID | Name | Status | Depends on | Doc link |
 |----|------|--------|------------|----------|
 | D0 | Foundation | Done | none | [D0-foundation.md](D0-foundation.md) |
-| D1 | Architecture | Done, awaiting owner review | D0 | [D1-architecture.md](D1-architecture.md) |
-| D2 | Autonomic framework | Not started | D1 | [D2-framework.md](D2-framework.md) |
+| D1 | Architecture | Done | D0 | [D1-architecture.md](D1-architecture.md) |
+| D2 | Autonomic framework | In progress | D1 | [D2-framework.md](D2-framework.md) |
 | D3 | Self-diagnosis | Not started | D2 | [D3-self-diagnosis.md](D3-self-diagnosis.md) |
 | D4 | Self-healing | Not started | D3 | [D4-self-healing.md](D4-self-healing.md) |
 | D5 | Elasticity | Not started | D4 | [D5-elasticity.md](D5-elasticity.md) |

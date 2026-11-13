@@ -43,7 +43,7 @@ Specify the autonomic architecture and the adaptive-schema design before any cod
 - No code was compiled or run in D1. Items the specs mark **unverified** are carried into the tasks that depend on them (overview R1, R9; adaptive-schema R2, R9).
 - The phase-agreement argument of adaptive-schema 4.3 (rules O1 and C1) was reviewed and accepted, conditional on assumption A1, which T6.6 tests and T6.15 model-checks.
 
-## Decisions waiting for the project owner
+## Questions put to the project owner (answered 2026-11-13; see ADR-024)
 
 Framework (overview section 12):
 
@@ -66,4 +66,4 @@ Adaptive schema (adaptive-schema section 10; ADR-020 stays Proposed until answer
 
 ## Status
 
-Specs complete and reviewed on 2026-11-12. Stopped for owner review before D2.
+Done. Specs reviewed on 2026-11-12; owner decisions recorded in ADR-024 on 2026-11-13. Tagged `D1`.

@@ -65,10 +65,11 @@ The log is append-only. Never edit a decided entry. If a decision changes, add a
 | [ADR-017](#adr-017-order-dual-writes-so-the-authoritative-copy-is-written-last-and-use-the-batchlog-only-where-atomicity-across-mutations-is-needed) | Order dual writes so the authoritative copy is written last, and use the batchlog only where atomicity across mutations is needed | Accepted | 2026-11-12 |
 | [ADR-018](#adr-018-backfill-from-every-base-replicas-local-unfiltered-data-and-verify-by-a-coordinator-level-comparison) | Backfill from every base replica's local unfiltered data, and verify by a coordinator-level comparison | Accepted | 2026-11-12 |
 | [ADR-019](#adr-019-keep-layouts-in-their-own-bounded-metadata-extension-create-companion-tables-by-ordinary-ddl-and-couple-client-ddl-in-alterschema) | Keep layouts in their own bounded metadata extension, create companion tables by ordinary DDL, and couple client DDL in AlterSchema | Accepted | 2026-11-12 |
-| [ADR-020](#adr-020-default-compatibility-contract-for-clients-of-an-adapted-table) | Default compatibility contract for clients of an adapted table | Proposed | 2026-11-12 |
+| [ADR-020](#adr-020-default-compatibility-contract-for-clients-of-an-adapted-table) | Default compatibility contract for clients of an adapted table | Accepted (by ADR-024) | 2026-11-12 |
 | [ADR-021](#adr-021-block-migration-for-tables-using-features-the-indirection-cannot-carry-and-reject-lwt-on-adapted-partitions) | Block migration for tables using features the indirection cannot carry, and reject LWT on adapted partitions | Accepted | 2026-11-12 |
 | [ADR-022](#adr-022-add-six-core-hooks-for-adaptive-schema-and-run-its-data-plane-unconditionally) | Add six core hooks for adaptive schema and run its data plane unconditionally | Accepted | 2026-11-12 |
 | [ADR-023](#adr-023-host-the-project-as-a-public-github-fork-of-apachecassandra) | Host the project as a public GitHub fork of apache/cassandra | Accepted | 2026-11-12 |
+| [ADR-024](#adr-024-owner-decisions-at-the-d1-review) | Owner decisions at the D1 review | Accepted | 2026-11-13 |
 
 ## ADR-001: Base the fork on a pinned Apache Cassandra trunk commit
 
@@ -339,7 +340,7 @@ The log is append-only. Never edit a decided entry. If a decision changes, add a
 ## ADR-020: Default compatibility contract for clients of an adapted table
 
 - **Date:** 2026-11-12
-- **Status:** Proposed
+- **Status:** Accepted (by ADR-024)
 - **Deliverable:** D6
 
 **Context.** The owner requires clients of the old schema to be satisfied "at least eventually" and has not yet quantified this. The design needs a precise default so that tests and eligibility rules have something to hold to.
@@ -391,3 +392,38 @@ The log is append-only. Never edit a decided entry. If a decision changes, add a
 **Alternatives considered.** A standalone repository with a squashed root commit was rejected because it loses upstream ancestry and makes every later rebase a manual diff. A standalone repository with full history was rejected because it duplicates what the fork network already stores. A private repository was not chosen because the owner asked for a public one.
 
 **Consequences.** The repository appears in the public fork network of Apache Cassandra, so the README states that the project is not affiliated with the ASF. Rebasing onto a newer upstream commit is an ordinary fetch from `upstream`. The fork's `trunk` branch is an untouched mirror of upstream at fork time and is not used for our work.
+
+## ADR-024: Owner decisions at the D1 review
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Deliverable:** D1
+
+**Context.** The D1 specs left thirteen questions and three scope calls for the project owner (listed in `docs/deliverables/D1-architecture.md`). ADR-020, the compatibility contract for clients of an adapted table, was Proposed until they were answered.
+
+**Decision.** The owner decided as follows.
+
+| # | Question | Decision |
+|---|----------|----------|
+| 1 | LWT on adapted partitions | Rejected on adapted partitions in the MVP. Add an operator setting that excludes named tables from ever being proposed |
+| 2 | Isolation of multi-row writes on an adapted partition | Weaker isolation accepted |
+| 3 | Writes whose outcome the client never learned | Proposed behaviour accepted |
+| 4 | Visible companion table | Accepted |
+| 5 | `ANY` treated as `ONE` on adapted partitions | Accepted |
+| 6 | Scope of "changes the schema on the fly" | Split only the hot partition now. Whole-table re-partitioning is a recorded follow-up for the case where many partitions of one table are hot |
+| 7 | No loss-free rollback after `NEW_ONLY` | **Not accepted as proposed.** If a split does not help there must be a way back; it may be slow. Reverse migration is therefore part of D6, not a later follow-up |
+| 8 | Approval before the commit point | A second manual approval by default (`commit_approval: manual`), configurable |
+| 9 | Stalling while a node is unreachable | Accepted |
+| 10 | Six more core hooks (H16 to H21) | Accepted |
+| 11 | DDL mirroring (T6.14) | Stays a follow-up; column DDL on an adapted table is rejected in the MVP |
+| 12 | Approval for cluster-scoped actions | Manual by default, configurable |
+| 13 | One-way `cluster enable` | Accepted |
+| - | Automatic scale-in | Out of scope |
+| - | Audit history | Node-local for now |
+| - | Kubernetes stub | Replaced by a documented example in the operator guide |
+
+ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo holds only until the reverse migration of this ADR exists; D6 is not complete without it.
+
+**Alternatives considered.** For decision 7 the proposed alternative was to ship the forward migration alone and build the reverse later; the owner requires the way back to exist, accepting that it takes longer than the pre-commit abort. For decision 6 whole-table re-partitioning was considered as the primary mechanism and deferred because its cost is proportional to the table, on a system that is already hot.
+
+**Consequences.** D6 gains task T6.17 (reverse migration), which must solve open issue O3 of the adaptive-schema design: the base partition tombstone written by cleanup shadows reverse-backfilled cells with older timestamps. The stage-B verdict `split_not_effective` becomes the trigger for proposing a reverse migration, under the same manual approval. D6 also gains an exclusion list in the `layout:` configuration (decision 1). T5.5 drops the Kubernetes stub. The forward path can be built and tested before T6.17, but the D6 tag requires it.
