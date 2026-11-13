@@ -83,6 +83,7 @@ import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.audit.AuditLogOptions;
 import org.apache.cassandra.auth.AuthCacheService;
 import org.apache.cassandra.auth.AuthSchemaChangeListener;
+import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.ExecutorLocals;
 import org.apache.cassandra.concurrent.FutureTask;
@@ -3981,6 +3982,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
             // AutoRepair has to stop before flushes and CommitLog.shutdownBlocking(),
             // else in-flight repairs may block attempting to write to system tables
+            AutonomicService.instance.shutdownBlocking();
             AutoRepair.instance.shutdownBlocking();
 
             // count CFs first, since forceFlush could block for the flushWriter to get a queue slot empty

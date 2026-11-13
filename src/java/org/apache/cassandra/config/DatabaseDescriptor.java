@@ -81,6 +81,7 @@ import org.apache.cassandra.auth.IDefaultRoleInitializer;
 import org.apache.cassandra.auth.IInternodeAuthenticator;
 import org.apache.cassandra.auth.INetworkAuthorizer;
 import org.apache.cassandra.auth.IRoleManager;
+import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.config.Config.CommitLogSync;
 import org.apache.cassandra.config.Config.DiskAccessMode;
 import org.apache.cassandra.config.Config.PaxosOnLinearizabilityViolation;
@@ -6540,6 +6541,11 @@ public class DatabaseDescriptor
     public static AutoRepairConfig getAutoRepairConfig()
     {
         return conf.auto_repair;
+    }
+
+    public static AutonomicConfig getAutonomicConfig()
+    {
+        return conf.autonomic;
     }
 
     public static double getRepairDiskHeadroomRejectRatio()

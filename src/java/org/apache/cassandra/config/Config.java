@@ -38,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.audit.AuditLogOptions;
+import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.guardrails.CustomGuardrailConfig;
 import org.apache.cassandra.fql.FullQueryLoggerOptions;
@@ -1126,6 +1127,7 @@ public class Config
     public volatile CustomGuardrailConfig password_policy = new CustomGuardrailConfig();
     public volatile CustomGuardrailConfig role_name_policy = new CustomGuardrailConfig();
     public volatile AutoRepairConfig auto_repair = new AutoRepairConfig();
+    public final AutonomicConfig autonomic = new AutonomicConfig();
 
     /**
      * The variants of paxos implementation and semantics supported by Cassandra.

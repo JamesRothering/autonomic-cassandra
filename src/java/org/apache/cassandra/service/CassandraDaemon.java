@@ -54,6 +54,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCacheService;
 import org.apache.cassandra.auth.AuthenticatedUser;
+import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -433,6 +434,8 @@ public class CassandraDaemon
         AuditLogManager.instance.initialize();
 
         StorageService.instance.doAutoRepairSetup();
+
+        AutonomicService.instance.start();
 
         // schedule periodic background compaction task submission. this is simply a backstop against compactions stalling
         // due to scheduling errors or race conditions

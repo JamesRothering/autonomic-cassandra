@@ -60,6 +60,7 @@ import accord.utils.Invariants;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.audit.AuditLogManager;
 import org.apache.cassandra.auth.AuthCache;
+import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.ExecutorLocals;
@@ -944,6 +945,7 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
         StreamManager.instance.start();
         PaxosState.startAutoRepairs();
         StorageService.instance.doAutoRepairSetup();
+        AutonomicService.instance.start();
         CassandraDaemon.getInstanceForTesting().completeSetup();
     }
 
@@ -1056,6 +1058,7 @@ public class Instance extends IsolatedExecutor implements IInvokableInstance
             });
 
             // AutoRepair must stop before ActiveRepairService and commit log, else its repairs may block on writing to system tables
+            error = parallelRun(error, executor, () -> AutonomicService.instance.shutdownBlocking(1L, MINUTES));
             error = parallelRun(error, executor, () -> AutoRepair.instance.shutdownBlocking(1L, MINUTES));
 
             error = parallelRun(error, executor,
