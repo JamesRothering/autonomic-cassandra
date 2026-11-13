@@ -69,7 +69,8 @@ The log is append-only. Never edit a decided entry. If a decision changes, add a
 | [ADR-021](#adr-021-block-migration-for-tables-using-features-the-indirection-cannot-carry-and-reject-lwt-on-adapted-partitions) | Block migration for tables using features the indirection cannot carry, and reject LWT on adapted partitions | Accepted | 2026-11-12 |
 | [ADR-022](#adr-022-add-six-core-hooks-for-adaptive-schema-and-run-its-data-plane-unconditionally) | Add six core hooks for adaptive schema and run its data plane unconditionally | Accepted | 2026-11-12 |
 | [ADR-023](#adr-023-host-the-project-as-a-public-github-fork-of-apachecassandra) | Host the project as a public GitHub fork of apache/cassandra | Accepted | 2026-11-12 |
-| [ADR-024](#adr-024-owner-decisions-at-the-d1-review) | Owner decisions at the D1 review | Accepted | 2026-11-13 |
+| [ADR-024](#adr-024-owner-decisions-at-the-d1-review) | Owner decisions at the D1 review | Accepted (decision 7 amended by ADR-025) | 2026-11-13 |
+| [ADR-025](#adr-025-reverse-migration-is-a-follow-up-not-a-condition-of-d6) | Reverse migration is a follow-up, not a condition of D6 | Accepted | 2026-11-13 |
 
 ## ADR-001: Base the fork on a pinned Apache Cassandra trunk commit
 
@@ -396,7 +397,7 @@ The log is append-only. Never edit a decided entry. If a decision changes, add a
 ## ADR-024: Owner decisions at the D1 review
 
 - **Date:** 2026-11-13
-- **Status:** Accepted
+- **Status:** Accepted (decision 7 amended by ADR-025)
 - **Deliverable:** D1
 
 **Context.** The D1 specs left thirteen questions and three scope calls for the project owner (listed in `docs/deliverables/D1-architecture.md`). ADR-020, the compatibility contract for clients of an adapted table, was Proposed until they were answered.
@@ -427,3 +428,17 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** For decision 7 the proposed alternative was to ship the forward migration alone and build the reverse later; the owner requires the way back to exist, accepting that it takes longer than the pre-commit abort. For decision 6 whole-table re-partitioning was considered as the primary mechanism and deferred because its cost is proportional to the table, on a system that is already hot.
 
 **Consequences.** D6 gains task T6.17 (reverse migration), which must solve open issue O3 of the adaptive-schema design: the base partition tombstone written by cleanup shadows reverse-backfilled cells with older timestamps. The stage-B verdict `split_not_effective` becomes the trigger for proposing a reverse migration, under the same manual approval. D6 also gains an exclusion list in the `layout:` configuration (decision 1). T5.5 drops the Kubernetes stub. The forward path can be built and tested before T6.17, but the D6 tag requires it.
+
+## ADR-025: Reverse migration is a follow-up, not a condition of D6
+
+- **Date:** 2026-11-13
+- **Status:** Accepted
+- **Deliverable:** D6
+
+**Context.** ADR-024 recorded the owner's answer to question 7 as requiring reverse migration inside D6. The owner clarified the same day: a way back from a completed split should exist eventually; it does not have to ship with the first version.
+
+**Decision.** The forward partition split may ship with a commit point (`NEW_ONLY`) that has no undo, as ADR-020 originally proposed. Reverse migration (T6.17) is the first follow-up after D6 and is not required for the D6 tag. The second manual approval before the commit point (ADR-024, decision 8) stays the default.
+
+**Alternatives considered.** Keeping T6.17 inside D6, as ADR-024 had it, was dropped because the owner does not require it and it contains an unsolved design problem (open issue O3) that would delay the demonstrable forward path.
+
+**Consequences.** Until T6.17 exists, a split that verification finds ineffective stays split and raises `layout.split_not_effective`; the operator guide must say so. Nothing in D6 may make a later reverse migration harder: in particular the choice of how forward cleanup removes the base copy must be made with O3 in mind, and T6.9 must record that choice.
