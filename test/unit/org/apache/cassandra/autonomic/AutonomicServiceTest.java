@@ -122,7 +122,7 @@ public class AutonomicServiceTest
     {
         DatabaseDescriptor.getAutonomicConfig().enabled = true;
         service.start();
-        long graceMs = TimeUnit.SECONDS.toMillis(DatabaseDescriptor.getAutonomicConfig().startup_grace.toSeconds());
+        long graceMs = DatabaseDescriptor.getAutonomicConfig().startup_grace.toMilliseconds();
 
         // joined but grace not elapsed
         joined.set(true);

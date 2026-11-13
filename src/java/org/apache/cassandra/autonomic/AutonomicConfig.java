@@ -34,10 +34,10 @@ public class AutonomicConfig
     /** When true no action is applied; runtime-settable. */
     public volatile boolean dry_run = true;
 
-    public DurationSpec.IntSecondsBound monitor_interval = new DurationSpec.IntSecondsBound("5s");
-    public DurationSpec.IntSecondsBound analyze_interval = new DurationSpec.IntSecondsBound("15s");
-    public DurationSpec.IntSecondsBound startup_grace = new DurationSpec.IntSecondsBound("5m");
-    public DurationSpec.IntSecondsBound observation_retention = new DurationSpec.IntSecondsBound("30m");
+    public DurationSpec.IntMillisecondsBound monitor_interval = new DurationSpec.IntMillisecondsBound("5s");
+    public DurationSpec.IntMillisecondsBound analyze_interval = new DurationSpec.IntMillisecondsBound("15s");
+    public DurationSpec.IntMillisecondsBound startup_grace = new DurationSpec.IntMillisecondsBound("5m");
+    public DurationSpec.IntMillisecondsBound observation_retention = new DurationSpec.IntMillisecondsBound("30m");
     public int max_series = 5000;
     public DurationSpec.IntSecondsBound history_ttl = new DurationSpec.IntSecondsBound("30d");
 

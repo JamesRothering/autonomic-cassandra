@@ -79,8 +79,8 @@ public class AutonomicConfigTest
         AutonomicConfig c = new Config().autonomic;
         assertFalse(c.enabled);
         assertTrue(c.dry_run);
-        assertEquals(5, c.monitor_interval.toSeconds());
-        assertEquals(300, c.startup_grace.toSeconds());
+        assertEquals(5000, c.monitor_interval.toMilliseconds());
+        assertEquals(300_000, c.startup_grace.toMilliseconds());
         assertEquals(5000, c.max_series);
         assertEquals(50, c.slo.read_latency_p99.toMilliseconds());
         assertEquals("manual", c.safety.cluster_approval);
@@ -94,8 +94,8 @@ public class AutonomicConfigTest
         AutonomicConfig c = YamlConfigurationLoader.fromMap(map, true, Config.class).autonomic;
         assertTrue(c.enabled);
         assertFalse(c.dry_run);
-        assertEquals(7, c.monitor_interval.toSeconds());
-        assertEquals(600, c.startup_grace.toSeconds());
+        assertEquals(7000, c.monitor_interval.toMilliseconds());
+        assertEquals(600_000, c.startup_grace.toMilliseconds());
         assertEquals(1234, c.max_series);
         assertEquals(30L * 24 * 3600, c.history_ttl.toSeconds());
         assertEquals(80, c.slo.read_latency_p99.toMilliseconds());

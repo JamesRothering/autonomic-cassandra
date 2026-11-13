@@ -3080,7 +3080,7 @@ storage_compatibility_mode: NONE
 # autonomic:
 #   enabled: false
 #   dry_run: true
-#   monitor_interval: 5s
+#   monitor_interval: 5s          # millisecond resolution (min unit ms)
 #   analyze_interval: 15s
 #   startup_grace: 5m
 #   observation_retention: 30m
