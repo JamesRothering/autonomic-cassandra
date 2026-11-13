@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +42,7 @@ import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
+import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.monitor.Sensor;
@@ -147,6 +149,9 @@ public class AutonomicService implements AutonomicServiceMBean
     private final Map<Sensor, Long> lastCollected = new ConcurrentHashMap<>();
     private final Map<String, Diagnosis> selfDiagnoses = new ConcurrentHashMap<>();
     private volatile List<Diagnosis> detected = Collections.emptyList();
+    private final KnowledgeStore knowledgeStore;
+    /** Diagnoses as last written to the store, by id; guarded by {@code this}. */
+    private final Map<UUID, Diagnosis> persistedDiagnoses = new LinkedHashMap<>();
     private volatile long monitorHeartbeat;
     private volatile long controlHeartbeat;
 
@@ -160,14 +165,29 @@ public class AutonomicService implements AutonomicServiceMBean
     private AutonomicService()
     {
         this(org.apache.cassandra.utils.Clock.Global::currentTimeMillis,
-             () -> ClusterMetadata.current().myNodeState() == NodeState.JOINED);
+             () -> ClusterMetadata.current().myNodeState() == NodeState.JOINED,
+             new KnowledgeStore());
     }
 
     @VisibleForTesting
     AutonomicService(LongSupplier clock, BooleanSupplier nodeJoined)
     {
+        this(clock, nodeJoined, null);
+    }
+
+    /** {@code knowledgeStore} may be null, in which case nothing is persisted. */
+    @VisibleForTesting
+    AutonomicService(LongSupplier clock, BooleanSupplier nodeJoined, KnowledgeStore knowledgeStore)
+    {
         this.clock = clock;
         this.nodeJoined = nodeJoined;
+        this.knowledgeStore = knowledgeStore;
+    }
+
+    /** The node-local knowledge store; null if this instance does not persist. Usable while the layer is disabled. */
+    public KnowledgeStore knowledgeStore()
+    {
+        return knowledgeStore;
     }
 
     private static AutonomicConfig config()
@@ -205,6 +225,7 @@ public class AutonomicService implements AutonomicServiceMBean
         monitorHeartbeat = controlHeartbeat = startedAtMillis;
         detected = Collections.emptyList();
         selfDiagnoses.clear();
+        persistedDiagnoses.clear();
         health.clear();
         lastCollected.clear();
         for (Sensor sensor : sensors)
@@ -449,6 +470,41 @@ public class AutonomicService implements AutonomicServiceMBean
         List<Diagnosis> all = new ArrayList<>(detected);
         all.addAll(selfDiagnoses.values());
         v.setActiveDiagnoses(all);
+        persistDiagnoses(all);
+    }
+
+    /** Writes diagnoses that opened, changed severity or root cause, or cleared since the last call; off the calling thread. */
+    private void persistDiagnoses(List<Diagnosis> active)
+    {
+        ScheduledExecutorPlus writer = actuator;
+        if (knowledgeStore == null || writer == null)
+            return;
+        long now = clock.getAsLong();
+        List<Runnable> writes = new ArrayList<>();
+        Map<UUID, Diagnosis> current = new LinkedHashMap<>();
+        for (Diagnosis d : active)
+        {
+            current.put(d.id, d);
+            Diagnosis old = persistedDiagnoses.get(d.id);
+            if (old == null || old.severity != d.severity || !Objects.equals(old.rootCause, d.rootCause))
+                writes.add(() -> knowledgeStore.upsertDiagnosis(d));
+        }
+        for (Diagnosis old : persistedDiagnoses.values())
+            if (!current.containsKey(old.id))
+                writes.add(() -> knowledgeStore.clearDiagnosis(old, now));
+        if (writes.isEmpty())
+            return;
+        persistedDiagnoses.clear();
+        persistedDiagnoses.putAll(current);
+        try
+        {
+            // the actuator thread is idle until T2.6; store failures are absorbed inside KnowledgeStore
+            writer.execute(() -> writes.forEach(Runnable::run));
+        }
+        catch (Throwable t)
+        {
+            logger.debug("Could not schedule diagnosis persistence", t);
+        }
     }
 
     @VisibleForTesting

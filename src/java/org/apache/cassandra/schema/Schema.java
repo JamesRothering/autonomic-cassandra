@@ -30,6 +30,7 @@ import com.google.common.collect.ImmutableSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.autonomic.knowledge.AutonomicKeyspace;
 import org.apache.cassandra.config.CassandraRelevantProperties;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Keyspace;
@@ -81,6 +82,7 @@ public final class Schema implements SchemaProvider
         {
             initialLocal = Keyspaces.of(SchemaKeyspace.metadata(), SystemKeyspace.metadata());
             initialLocal = DatabaseDescriptor.getAccordTransactionsEnabled() ? initialLocal.with(AccordKeyspace.metadata()) : initialLocal;
+            initialLocal = initialLocal.with(AutonomicKeyspace.metadata());
         }
 
         Schema schema = new Schema(initialLocal);
