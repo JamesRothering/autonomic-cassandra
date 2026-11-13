@@ -17,6 +17,8 @@
  */
 package org.apache.cassandra.autonomic.execute;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 
@@ -24,7 +26,12 @@ import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 
-/** Execute. The verify/rollback contract is overview 7.3. Called on the actuator thread only. */
+/**
+ * Execute. The verify/rollback contract is overview 7.3. {@code apply}, {@code verify}, {@code rollback} and
+ * {@code overridden} are called on the actuator thread only; {@code validate}, {@code blastRadius} and {@code knobs}
+ * are called by the SafetyGovernor on the control thread (or a JMX thread for an operator approval) and must be
+ * cheap, side-effect free and thread-safe.
+ */
 public interface Actuator
 {
     String name();
@@ -36,11 +43,35 @@ public interface Actuator
     /** Cheap precondition check; no side effects. Returns a rejection reason, or empty if valid. */
     Optional<String> validate(Action action, KnowledgeView knowledge);
 
-    /** Makes the change. Must return what rollback needs. Must be idempotent for a given action id. */
+    /**
+     * Governor check {@code BLAST_RADIUS}: returns a rejection detail if the action steps a knob by more than
+     * {@code maxStepFraction} of its current value or leaves its envelope; empty if acceptable.
+     */
+    default Optional<String> blastRadius(Action action, KnowledgeView knowledge, double maxStepFraction)
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Names of the knobs the action changes, for governor check {@code CONFLICT} between different actuators. Actions
+     * with the same {@code dedupeKey} always conflict, so most actuators need not override this.
+     */
+    default Collection<String> knobs(Action action)
+    {
+        return Collections.emptyList();
+    }
+
+    /**
+     * Makes the change. Must return what rollback needs. Must be idempotent for a given action id. If it can throw
+     * after changing something it must have called {@link ActionContext#recordUndo} first.
+     */
     Applied apply(Action action, ActionContext ctx) throws Exception;
 
-    // TODO T2.6: make this a default method delegating to MetricVerifier.compare(action.verify, baseline, knowledge)
-    Verdict verify(Action action, Applied applied, Map<String, Double> baseline, KnowledgeView knowledge);
+    /** Verdict after the observation window; rule 6 of overview 7.3 by default. */
+    default Verdict verify(Action action, Applied applied, Map<String, Double> baseline, KnowledgeView knowledge)
+    {
+        return MetricVerifier.compare(action.verify, baseline, knowledge);
+    }
 
     /** Restores the state captured in applied. Must be idempotent. Must not throw for "already restored". */
     void rollback(Action action, Applied applied, ActionContext ctx) throws Exception;

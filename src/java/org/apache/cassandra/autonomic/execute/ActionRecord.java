@@ -28,8 +28,8 @@ import org.apache.cassandra.autonomic.plan.Action;
 /**
  * Local record of an action and its current state; immutable. Mirrors the columns of
  * {@code system_autonomic.actions} (overview 5.1). {@code Action.verify} is not persisted, so a record read back
- * from the store has a null verify spec.
- * TODO T2.6: per-transition timestamps and the executor's use of this class.
+ * from the store has a null verify spec. The time of each transition is in {@code action_events}; the record keeps
+ * only the proposal time and the time of the latest transition.
  */
 public final class ActionRecord
 {

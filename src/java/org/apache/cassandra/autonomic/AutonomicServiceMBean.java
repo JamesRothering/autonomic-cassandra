@@ -17,11 +17,13 @@
  */
 package org.apache.cassandra.autonomic;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Operator interface of the autonomic layer. Further operations (kill, revert, approve, history, ...) are added by
- * later tasks.
+ * Operator interface of the autonomic layer (overview 10.2). Cluster operations ({@code enableClusterActions},
+ * {@code releaseClaim}) are added with the cluster ledger. Records are returned as maps of strings so that any JMX
+ * client can read them.
  */
 public interface AutonomicServiceMBean
 {
@@ -45,5 +47,36 @@ public interface AutonomicServiceMBean
     /** Stops approval of new actions; sensors and detectors keep running. */
     void pause(String reason);
 
+    /** Allows new actions again; clears a kill, the circuit breaker and disabled components. */
     void resume();
+
+    /** Pause, plus immediate rollback of every in-flight node-scoped action. Survives a restart until resumed. */
+    void kill(String reason);
+
+    /** Restores every managed knob to its configured value. Not available until knob actuators exist. */
+    void revert();
+
+    /** Approves an action that is awaiting manual approval; the governor's other checks are evaluated again. */
+    void approve(String actionId);
+
+    /** Rejects an action that is awaiting manual approval. */
+    void reject(String actionId);
+
+    /** Per-actuator gate; overrides the configuration until restart. */
+    void setActuatorEnabled(String actuator, boolean enabled);
+
+    /** Actuator name to scope and gate. */
+    Map<String, String> getActuators();
+
+    /** Actions awaiting approval, queued or in flight on this node. */
+    List<Map<String, String>> getInFlightActions();
+
+    /** Most recent actions of this node, newest first, from the last seven days. */
+    List<Map<String, String>> getHistory(int limit);
+
+    /** Audit trail of one action, oldest first. */
+    List<Map<String, String>> getActionEvents(String actionId);
+
+    /** Diagnoses of the last day on this node, open and cleared. */
+    List<Map<String, String>> getDiagnosisHistory(int limit);
 }

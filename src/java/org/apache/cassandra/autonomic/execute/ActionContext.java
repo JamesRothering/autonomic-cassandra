@@ -17,12 +17,29 @@
  */
 package org.apache.cassandra.autonomic.execute;
 
+import java.util.Map;
+
 /**
- * Passed to {@code Actuator.apply} and {@code rollback}.
- * TODO T2.6: step deadline, kill flag, step rescheduling and the cluster-claim handle.
+ * Passed to {@code Actuator.apply} and {@code rollback}; valid for one step on the actuator thread only.
+ *
+ * <p>T2.8 seam: step rescheduling and the cluster-claim handle of cluster actuators are added here (or in a
+ * sub-interface handed to {@code ClusterActuator.step}); node-scoped actuators never need them.
  */
 public interface ActionContext
 {
-    /** Remaining time budget of the current step. */
+    /** Time on the layer's clock by which the current step must have returned ({@code action_step_timeout}). */
     long stepDeadlineMillis();
+
+    /** The layer's clock. */
+    long nowMillis();
+
+    /** True once kill or shutdown was requested; a long step should return or throw as soon as it safely can. */
+    boolean killed();
+
+    /**
+     * Write-ahead of undo information in memory. {@code apply} must call this with everything rollback needs
+     * <em>before</em> its first change if it can throw after changing something: when {@code apply} throws, the
+     * executor calls {@code rollback} with the last recorded undo, and assumes nothing changed if none was recorded.
+     */
+    void recordUndo(Map<String, String> undo);
 }

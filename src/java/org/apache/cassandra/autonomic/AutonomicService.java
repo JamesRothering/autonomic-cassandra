@@ -24,16 +24,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +45,11 @@ import org.apache.cassandra.autonomic.analyze.Correlator;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.execute.ActionExecutor;
+import org.apache.cassandra.autonomic.execute.ActionRecord;
+import org.apache.cassandra.autonomic.execute.Actuator;
+import org.apache.cassandra.autonomic.execute.ActuatorRegistry;
+import org.apache.cassandra.autonomic.execute.StepScheduler;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
@@ -50,19 +59,28 @@ import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
+import org.apache.cassandra.autonomic.safety.Reasons;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.ExecutorUtils;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.MBeanWrapper;
+import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
 
 /**
  * Entry point of the autonomic layer. Lifecycle: DISABLED, STARTING, RUNNING, PAUSED (overview 3.6).
  * When {@code autonomic.enabled} is false only the MBean is registered and no thread exists.
+ *
+ * <p>Threads: sensors run on the monitor thread; detectors, policies, the governor's evaluation and all
+ * non-critical persistence (diagnoses) on the control thread; actuators on the actuator thread, which does nothing
+ * else (see {@link ActionExecutor}). The lock on {@code this} guards lifecycle state only and is never held across
+ * a store write or a wait for another autonomic thread once the loops run.
  */
 public class AutonomicService implements AutonomicServiceMBean
 {
@@ -81,6 +99,7 @@ public class AutonomicService implements AutonomicServiceMBean
 
     private final LongSupplier clock;
     private final BooleanSupplier nodeJoined;
+    private final BooleanSupplier draining;
 
     private volatile State state = State.DISABLED;
     private volatile long startedAtMillis;
@@ -88,9 +107,22 @@ public class AutonomicService implements AutonomicServiceMBean
     // pause requested; also honoured when requested before the loop is armed
     private volatile boolean pauseRequested;
     private volatile String pauseReason;
+    // kill(): paused, and everything in flight is rolled back; cleared by resume()
+    private volatile boolean killed;
+    // shutdown in progress: nothing new is applied while in-flight actions are restored
+    private volatile boolean stopping;
+    // restart recovery (overview 7.6) has completed; the layer does not arm before
+    private volatile boolean recovered;
+    private volatile boolean diagnosesSwept;
 
     public static final String COMPONENT_FAILED = "autonomic.component_failed";
     public static final String LOOP_STALLED = "autonomic.loop_stalled";
+    public static final String ACTION_FAILED = "autonomic.action_failed";
+    public static final String CIRCUIT_BREAKER = "autonomic.circuit_breaker";
+    public static final String POLICY_QUARANTINED = "autonomic.policy_quarantined";
+    private static final String ACTUATOR_STALLED_KEY = LOOP_STALLED + ":actuator";
+    private static final String KILLED_PREFIX = "KILLED|";
+    private static final String PAUSED_PREFIX = "PAUSED|";
 
     // Static registration (overview 3.4). Empty in production until the sensors, detectors and policies of later
     // tasks are added here; tests register fakes through the package-private register* methods.
@@ -105,6 +137,11 @@ public class AutonomicService implements AutonomicServiceMBean
     }
 
     private static List<Policy> productionPolicies()
+    {
+        return Collections.emptyList();
+    }
+
+    private static List<Actuator> productionActuators()
     {
         return Collections.emptyList();
     }
@@ -142,8 +179,24 @@ public class AutonomicService implements AutonomicServiceMBean
     private final List<Detector> detectors = new CopyOnWriteArrayList<>(productionDetectors());
     private final List<Policy> policies = new CopyOnWriteArrayList<>(productionPolicies());
     private volatile Correlator correlator = productionCorrelator();
-    // TODO T2.6: replaced by a sink that goes through the SafetyGovernor to the ActionExecutor
-    private volatile PlanSink planSink = (plan, knowledge) -> logger.info("Plan produced (no executor yet): {}", plan);
+    private final ActuatorRegistry actuatorRegistry = new ActuatorRegistry();
+    /** Plans go through the SafetyGovernor to the ActionExecutor. */
+    private final PlanSink executorSink = (plan, knowledge) -> {
+        ActionExecutor ex = this.executor;
+        if (ex != null)
+            ex.accept(plan, knowledge);
+    };
+    private volatile PlanSink planSink = executorSink;
+    private volatile DefaultSafetyGovernor governor;
+    private volatile ActionExecutor executor;
+    /** Actions a shutdown of the loops left applied because their rollback did not complete in time. */
+    private final Set<UUID> notRestored = ConcurrentHashMap.newKeySet();
+    /** Orders writes of the pause flag; see persistPauseFlag. */
+    private final Object pausePersistLock = new Object();
+    /** Diagnosis writes, produced on any thread, executed by the control thread. */
+    private final ConcurrentLinkedQueue<Runnable> diagnosisWrites = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger queuedDiagnosisWrites = new AtomicInteger();
+    private static final int MAX_QUEUED_DIAGNOSIS_WRITES = 1024;
 
     private final Map<String, ComponentHealth> health = new ConcurrentHashMap<>();
     private final Map<Sensor, Long> lastCollected = new ConcurrentHashMap<>();
@@ -166,6 +219,7 @@ public class AutonomicService implements AutonomicServiceMBean
     {
         this(org.apache.cassandra.utils.Clock.Global::currentTimeMillis,
              () -> ClusterMetadata.current().myNodeState() == NodeState.JOINED,
+             () -> StorageService.instance.isDraining(),
              new KnowledgeStore());
     }
 
@@ -179,9 +233,17 @@ public class AutonomicService implements AutonomicServiceMBean
     @VisibleForTesting
     AutonomicService(LongSupplier clock, BooleanSupplier nodeJoined, KnowledgeStore knowledgeStore)
     {
+        this(clock, nodeJoined, () -> false, knowledgeStore);
+    }
+
+    private AutonomicService(LongSupplier clock, BooleanSupplier nodeJoined, BooleanSupplier draining, KnowledgeStore knowledgeStore)
+    {
         this.clock = clock;
         this.nodeJoined = nodeJoined;
+        this.draining = draining;
         this.knowledgeStore = knowledgeStore;
+        for (Actuator actuator : productionActuators())
+            actuatorRegistry.register(actuator);
     }
 
     /** The node-local knowledge store; null if this instance does not persist. Usable while the layer is disabled. */
@@ -217,8 +279,8 @@ public class AutonomicService implements AutonomicServiceMBean
             return;
         state = State.STARTING;
         armed = false;
+        stopping = false;
         startedAtMillis = clock.getAsLong();
-        // TODO T2.6: run restart recovery (overview 7.6) and read the persisted pause flag into pauseRequested
         AutonomicConfig config = config();
         store = new ObservationStore(seriesCapacity(config), config.max_series);
         view = new InMemoryKnowledgeView(store, clock);
@@ -228,13 +290,33 @@ public class AutonomicService implements AutonomicServiceMBean
         persistedDiagnoses.clear();
         health.clear();
         lastCollected.clear();
+        diagnosisWrites.clear();
+        queuedDiagnosisWrites.set(0);
         for (Sensor sensor : sensors)
             safely("start", sensor.name(), sensor::start);
         monitor = executorFactory().scheduled(false, MONITOR_THREAD);
         control = executorFactory().scheduled(false, CONTROL_THREAD);
         actuator = executorFactory().scheduled(false, ACTUATOR_THREAD);
-        // starts the actuator thread; real work is event-driven and arrives with T2.6
+        // starts the actuator thread; its work is event-driven
         actuator.execute(() -> {});
+        DefaultSafetyGovernor gov = new DefaultSafetyGovernor(new GovernorEnvironment(), new GovernorJournal());
+        ActionExecutor ex = new ActionExecutor(clock, AutonomicService::config, gov, knowledgeStore, actuatorRegistry,
+                                               StepScheduler.of(actuator), new ExecutorHost(), () -> view);
+        view.setActionSource(ex::recentActions);
+        governor = gov;
+        executor = ex;
+        // STARTING: recovery runs and the persisted pause flag is read before either loop exists (overview 3.6);
+        // if the store cannot be read yet the control thread retries and the layer stays unarmed
+        diagnosesSwept = false;
+        if (knowledgeStore == null && !notRestored.isEmpty())
+        {
+            // no store to record it in: an earlier stop in this process left changes applied
+            raiseSelfDiagnosis(ACTION_FAILED, ACTION_FAILED, Severity.CRITICAL,
+                               "the layer was stopped while actions were applied and their rollback did not complete",
+                               Map.of("actions", notRestored.toString()), startedAtMillis);
+            selfPause(Reasons.ACTION_FAILED);
+        }
+        recovered = runRecovery();
         monitor.scheduleWithFixedDelay(this::monitorTick, config.monitor_interval.toMilliseconds(), config.monitor_interval.toMilliseconds(), TimeUnit.MILLISECONDS);
         control.scheduleWithFixedDelay(this::controlTick, config.analyze_interval.toMilliseconds(), config.analyze_interval.toMilliseconds(), TimeUnit.MILLISECONDS);
         logger.info("Autonomic layer started (dry_run={})", config.dry_run);
@@ -308,8 +390,11 @@ public class AutonomicService implements AutonomicServiceMBean
             long now = clock.getAsLong();
             controlHeartbeat = now;
             checkHeartbeat("monitor", monitorHeartbeat, config().monitor_interval.toMilliseconds(), now);
+            if (!recovered)
+                recovered = runRecovery();
             if (!evaluateArmed())
                 return;
+            superviseExecution(view, now);
 
             List<Diagnosis> raw = new ArrayList<>();
             for (Detector detector : detectors)
@@ -368,6 +453,128 @@ public class AutonomicService implements AutonomicServiceMBean
         catch (Throwable t)
         {
             handleTickThrowable("control", t);
+        }
+        finally
+        {
+            drainDiagnosisWrites();
+        }
+    }
+
+    /**
+     * Control thread: verification triggers, early abort and proposal expiry (delegated to the executor), detection
+     * of a stalled actuator thread (overview 7.5), and the end of policy quarantines.
+     */
+    private void superviseExecution(KnowledgeView view, long now)
+    {
+        ActionExecutor ex = executor;
+        DefaultSafetyGovernor gov = governor;
+        if (ex == null || gov == null)
+            return;
+        ex.onControlTick(view);
+        String stalled = ex.stalledStep(config().safety.action_step_timeout.toMilliseconds());
+        if (stalled != null && !selfDiagnoses.containsKey(ACTUATOR_STALLED_KEY))
+        {
+            raiseSelfDiagnosis(ACTUATOR_STALLED_KEY, LOOP_STALLED, Severity.CRITICAL,
+                               "actuator thread has been in step '" + stalled + "' for longer than action_step_timeout",
+                               Map.of("loop", "actuator", "step", stalled), now);
+            selfPause(Reasons.ACTUATOR_STALLED);
+        }
+        Map<String, Long> quarantined = gov.quarantines();
+        String prefix = POLICY_QUARANTINED + ':';
+        if (selfDiagnoses.keySet().removeIf(k -> k.startsWith(prefix) && !quarantined.containsKey(k.substring(prefix.length()))))
+            refreshView();
+    }
+
+    /**
+     * Restart recovery (overview 7.6) and the persisted pause flag. Runs on the starting thread before the loops
+     * exist, then on the control thread until it has completed. Returns false if it must run again.
+     */
+    private boolean runRecovery()
+    {
+        ActionExecutor ex = executor;
+        if (ex == null)
+            return false;
+        ActionExecutor.Recovery recovery;
+        try
+        {
+            recovery = ex.recover(notRestored);
+        }
+        catch (Throwable t)
+        {
+            handleThrowable("restart recovery", t);
+            return false;
+        }
+        if (!recovery.scanned)
+        {
+            logger.warn("Autonomic restart recovery could not read local_state; the layer stays unarmed until it can");
+            return false;
+        }
+        if (recovery.paused != null)
+        {
+            synchronized (this)
+            {
+                pauseRequested = true;
+                killed |= recovery.paused.startsWith(KILLED_PREFIX);
+                int sep = recovery.paused.indexOf('|');
+                pauseReason = sep < 0 || sep == recovery.paused.length() - 1 ? null : recovery.paused.substring(sep + 1);
+                if (state == State.RUNNING)
+                    state = State.PAUSED;
+            }
+            logger.info("Autonomic layer is paused by a persisted flag: {}", recovery.paused);
+        }
+        if (recovery.rolledBack > 0)
+            logger.info("Autonomic restart recovery closed {} in-flight action(s)", recovery.rolledBack);
+        sweepDiagnoses();
+        if (recovery.complete)
+            notRestored.clear();
+        return recovery.complete;
+    }
+
+    /** Marks diagnoses a previous run left OPEN as cleared; once per start, best effort. */
+    private void sweepDiagnoses()
+    {
+        if (knowledgeStore == null || diagnosesSwept)
+            return;
+        diagnosesSwept = true;
+        try
+        {
+            long now = clock.getAsLong();
+            long since = now - TimeUnit.SECONDS.toMillis(Math.min(config().history_ttl.toSeconds(), TimeUnit.DAYS.toSeconds(31)));
+            int swept = 0;
+            for (KnowledgeStore.StoredDiagnosis stored : knowledgeStore.recentDiagnoses(since, now, 10_000))
+            {
+                Diagnosis d = stored.diagnosis;
+                if (stored.cleared || d.lastSeenMillis >= startedAtMillis)
+                    continue;
+                Map<String, String> evidence = new LinkedHashMap<>(d.evidence);
+                evidence.put("cleared_reason", Reasons.RESTART);
+                knowledgeStore.clearDiagnosis(new Diagnosis(d.id, d.type, d.subject, d.severity, d.confidence, d.firstSeenMillis,
+                                                            d.lastSeenMillis, d.summary, evidence, d.rootCause), now);
+                swept++;
+            }
+            if (swept > 0)
+                logger.info("Autonomic layer cleared {} diagnosis row(s) left open by a previous run", swept);
+        }
+        catch (Throwable t)
+        {
+            handleThrowable("diagnosis sweep", t);
+        }
+    }
+
+    private void drainDiagnosisWrites()
+    {
+        Runnable write;
+        while ((write = diagnosisWrites.poll()) != null)
+        {
+            queuedDiagnosisWrites.decrementAndGet();
+            try
+            {
+                write.run();
+            }
+            catch (Throwable t)
+            {
+                handleThrowable("diagnosis write", t);
+            }
         }
     }
 
@@ -473,11 +680,14 @@ public class AutonomicService implements AutonomicServiceMBean
         persistDiagnoses(all);
     }
 
-    /** Writes diagnoses that opened, changed severity or root cause, or cleared since the last call; off the calling thread. */
+    /**
+     * Queues writes for diagnoses that opened, changed severity or root cause, or cleared since the last call. The
+     * control thread executes them at the end of its tick (overview 3.5): never the monitor thread, which must not do
+     * I/O, and never the actuator thread, where a slow write could delay a rollback.
+     */
     private void persistDiagnoses(List<Diagnosis> active)
     {
-        ScheduledExecutorPlus writer = actuator;
-        if (knowledgeStore == null || writer == null)
+        if (knowledgeStore == null)
             return;
         long now = clock.getAsLong();
         List<Runnable> writes = new ArrayList<>();
@@ -496,14 +706,15 @@ public class AutonomicService implements AutonomicServiceMBean
             return;
         persistedDiagnoses.clear();
         persistedDiagnoses.putAll(current);
-        try
+        for (Runnable write : writes)
         {
-            // the actuator thread is idle until T2.6; store failures are absorbed inside KnowledgeStore
-            writer.execute(() -> writes.forEach(Runnable::run));
-        }
-        catch (Throwable t)
-        {
-            logger.debug("Could not schedule diagnosis persistence", t);
+            if (queuedDiagnosisWrites.incrementAndGet() > MAX_QUEUED_DIAGNOSIS_WRITES)
+            {
+                queuedDiagnosisWrites.decrementAndGet();
+                logger.debug("Autonomic diagnosis write dropped: the control thread is not draining them");
+                continue;
+            }
+            diagnosisWrites.add(write);
         }
     }
 
@@ -531,11 +742,29 @@ public class AutonomicService implements AutonomicServiceMBean
         policies.add(policy);
     }
 
-    /** Seam for T2.6: replaces the logging sink with the SafetyGovernor / ActionExecutor hand-over. */
+    @VisibleForTesting
+    void registerActuator(Actuator actuator)
+    {
+        actuatorRegistry.register(actuator);
+    }
+
+    /** Replaces the hand-over to the SafetyGovernor and ActionExecutor. */
     @VisibleForTesting
     void setPlanSink(PlanSink sink)
     {
         this.planSink = sink;
+    }
+
+    @VisibleForTesting
+    ActionExecutor executor()
+    {
+        return executor;
+    }
+
+    @VisibleForTesting
+    DefaultSafetyGovernor governor()
+    {
+        return governor;
     }
 
     @VisibleForTesting
@@ -568,7 +797,7 @@ public class AutonomicService implements AutonomicServiceMBean
         if (!armed)
         {
             long graceMillis = config().startup_grace.toMilliseconds();
-            if (clock.getAsLong() - startedAtMillis < graceMillis || !nodeJoined.getAsBoolean())
+            if (!recovered || clock.getAsLong() - startedAtMillis < graceMillis || !nodeJoined.getAsBoolean())
                 return false;
             armed = true;
             if (state == State.STARTING)
@@ -590,23 +819,60 @@ public class AutonomicService implements AutonomicServiceMBean
         }
     }
 
-    /** Stops the loops and releases all threads; the MBean stays registered so the layer can be re-enabled. */
-    public synchronized void shutdownBlocking(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
+    /**
+     * Stops the loops and releases all threads; the MBean stays registered so the layer can be re-enabled. In-flight
+     * node-scoped actions are rolled back first: the process may live on (runtime disable), in which case nothing
+     * else would restore them.
+     */
+    public void shutdownBlocking(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
     {
         // FC1: stop the always-on data-plane service here.
-        if (state == State.DISABLED)
-            return;
-        state = State.DISABLED;
-        armed = false;
-        List<ScheduledExecutorPlus> executors = new ArrayList<>();
-        executors.add(monitor);
-        executors.add(control);
-        executors.add(actuator);
-        monitor = control = actuator = null;
-        ExecutorUtils.shutdownNowAndWait(timeout, unit, executors);
-        for (Sensor sensor : sensors)
-            safely("stop", sensor.name(), sensor::stop);
-        logger.info("Autonomic layer stopped");
+        ActionExecutor ex;
+        synchronized (this)
+        {
+            if (state == State.DISABLED)
+                return;
+            stopping = true;
+            ex = executor;
+        }
+        if (ex != null)
+        {
+            // not under the lock: the rollback may raise a diagnosis or pause the layer
+            long waitMillis = Math.min(unit.toMillis(timeout), config().safety.action_step_timeout.toMilliseconds());
+            try
+            {
+                ex.rollbackAll(Reasons.SHUTDOWN).get(waitMillis, TimeUnit.MILLISECONDS);
+            }
+            catch (ExecutionException | TimeoutException e)
+            {
+                logger.error("Autonomic layer could not roll back in-flight actions while stopping", e);
+            }
+            Set<UUID> applied = ex.appliedActions();
+            if (!applied.isEmpty())
+            {
+                logger.error("Autonomic layer stopped with actions still applied: {}; they are reported as FAILED when it is next enabled", applied);
+                notRestored.addAll(applied);
+            }
+        }
+        synchronized (this)
+        {
+            if (state == State.DISABLED)
+                return;
+            state = State.DISABLED;
+            armed = false;
+            List<ScheduledExecutorPlus> executors = new ArrayList<>();
+            executors.add(monitor);
+            executors.add(control);
+            executors.add(actuator);
+            monitor = control = actuator = null;
+            executor = null;
+            governor = null;
+            ExecutorUtils.shutdownNowAndWait(timeout, unit, executors);
+            for (Sensor sensor : sensors)
+                safely("stop", sensor.name(), sensor::stop);
+            stopping = false;
+            logger.info("Autonomic layer stopped");
+        }
     }
 
     public State state()
@@ -634,6 +900,31 @@ public class AutonomicService implements AutonomicServiceMBean
         status.put("dry_run", String.valueOf(config().dry_run));
         status.put("armed", String.valueOf(armed));
         status.put("paused", String.valueOf(pauseRequested));
+        status.put("killed", String.valueOf(killed));
+        status.put("recovered", String.valueOf(recovered));
+        ActionExecutor ex = executor;
+        DefaultSafetyGovernor gov = governor;
+        if (ex != null && gov != null)
+        {
+            int awaitingApproval = 0;
+            int inFlight = 0;
+            for (ActionRecord r : ex.liveActions())
+            {
+                if (r.state == org.apache.cassandra.autonomic.execute.ActionState.PROPOSED)
+                    awaitingApproval++;
+                else
+                    inFlight++;
+            }
+            status.put("in_flight_actions", String.valueOf(inFlight));
+            status.put("awaiting_approval", String.valueOf(awaitingApproval));
+            status.put("cooldowns", String.valueOf(gov.cooldowns().size()));
+            status.put("quarantined_policies", String.join(",", gov.quarantines().keySet()));
+            String stalled = ex.stalledStep(config().safety.action_step_timeout.toMilliseconds());
+            if (stalled != null)
+                status.put("actuator_stalled_in", stalled);
+        }
+        if (knowledgeStore != null)
+            status.put("store_available", String.valueOf(knowledgeStore.isAvailable()));
         List<String> disabled = new ArrayList<>();
         for (ComponentHealth h : health.values())
             if (h.disabled)
@@ -684,32 +975,378 @@ public class AutonomicService implements AutonomicServiceMBean
     }
 
     @Override
-    public synchronized void pause(String reason)
+    public void pause(String reason)
     {
-        // TODO T2.6: persist the pause flag so a restart does not re-arm; add kill()
-        if (state == State.DISABLED)
-            throw new IllegalStateException("Autonomic layer is not enabled");
-        pauseRequested = true;
-        pauseReason = reason;
-        if (state == State.RUNNING)
-            state = State.PAUSED;
+        synchronized (this)
+        {
+            if (state == State.DISABLED)
+                throw new IllegalStateException("Autonomic layer is not enabled");
+            pauseRequested = true;
+            pauseReason = reason;
+            if (state == State.RUNNING)
+                state = State.PAUSED;
+        }
+        persistPauseFlag();
+    }
+
+    /** A pause the layer imposes on itself (overview 7.5); it lasts until an operator resumes. Any thread. */
+    private void selfPause(String reason)
+    {
+        synchronized (this)
+        {
+            if (state == State.DISABLED || pauseRequested)
+                return;
+            pauseRequested = true;
+            pauseReason = reason;
+            if (state == State.RUNNING)
+                state = State.PAUSED;
+        }
+        logger.warn("Autonomic layer paused itself: {}", reason);
+        persistPauseFlag();
     }
 
     @Override
-    public synchronized void resume()
+    public void kill(String reason)
     {
-        if (state == State.DISABLED)
-            throw new IllegalStateException("Autonomic layer is not enabled");
-        pauseRequested = false;
-        pauseReason = null;
-        if (state == State.PAUSED)
-            state = State.RUNNING;
-        for (ComponentHealth h : health.values())
+        ActionExecutor ex;
+        synchronized (this)
         {
-            h.disabled = false;
-            h.consecutiveFailures = 0;
+            if (state == State.DISABLED)
+                throw new IllegalStateException("Autonomic layer is not enabled");
+            killed = true;
+            pauseRequested = true;
+            pauseReason = reason;
+            if (state == State.RUNNING)
+                state = State.PAUSED;
+            ex = executor;
         }
-        selfDiagnoses.keySet().removeIf(k -> k.startsWith(COMPONENT_FAILED));
-        refreshView();
+        logger.warn("Autonomic layer killed: {}", reason);
+        // the rollback is requested before the flag is written: a slow store must not delay it
+        if (ex != null)
+            ex.rollbackAll(Reasons.KILL);
+        persistPauseFlag();
+    }
+
+    @Override
+    public void resume()
+    {
+        DefaultSafetyGovernor gov;
+        synchronized (this)
+        {
+            if (state == State.DISABLED)
+                throw new IllegalStateException("Autonomic layer is not enabled");
+            pauseRequested = false;
+            killed = false;
+            pauseReason = null;
+            if (state == State.PAUSED)
+                state = State.RUNNING;
+            for (ComponentHealth h : health.values())
+            {
+                h.disabled = false;
+                h.consecutiveFailures = 0;
+            }
+            selfDiagnoses.keySet().removeIf(k -> k.startsWith(COMPONENT_FAILED) || k.startsWith(ACTION_FAILED)
+                                                 || k.startsWith(CIRCUIT_BREAKER) || k.equals(ACTUATOR_STALLED_KEY));
+            refreshView();
+            gov = governor;
+        }
+        if (gov != null)
+            gov.resetBreaker();
+        persistPauseFlag();
+    }
+
+    /**
+     * Writes the current pause state to {@code local_state} so that a restart does not re-arm the layer. Writers are
+     * serialised by {@link #pausePersistLock}, each writing the state it reads after acquiring it, so the last write
+     * matches memory. Must not be called holding {@code this} once the loops run. A failed write is only logged:
+     * the pause is effective in memory.
+     */
+    private void persistPauseFlag()
+    {
+        if (knowledgeStore == null)
+            return;
+        synchronized (pausePersistLock)
+        {
+            boolean ok;
+            if (pauseRequested)
+            {
+                String reason = pauseReason;
+                ok = knowledgeStore.putState(ActionExecutor.PAUSED_KEY, (killed ? KILLED_PREFIX : PAUSED_PREFIX) + (reason == null ? "" : reason), clock.getAsLong());
+            }
+            else
+            {
+                ok = knowledgeStore.deleteState(ActionExecutor.PAUSED_KEY);
+            }
+            if (!ok)
+                logger.warn("Autonomic pause state could not be persisted; it will not survive a restart");
+        }
+    }
+
+    /** Check 1 of the governor: null if actions may be approved and applied. */
+    private String gate()
+    {
+        if (state == State.DISABLED || stopping)
+            return Reasons.NOT_ARMED;
+        if (killed)
+            return Reasons.KILLED;
+        if (pauseRequested || state == State.PAUSED)
+            return Reasons.PAUSED;
+        return armed && state == State.RUNNING ? null : Reasons.NOT_ARMED;
+    }
+
+    private final class GovernorEnvironment implements DefaultSafetyGovernor.Environment
+    {
+        @Override
+        public AutonomicConfig config()
+        {
+            return AutonomicService.config();
+        }
+
+        @Override
+        public long nowMillis()
+        {
+            return clock.getAsLong();
+        }
+
+        @Override
+        public String layerGate()
+        {
+            return gate();
+        }
+
+        @Override
+        public Actuator actuator(String name)
+        {
+            return actuatorRegistry.get(name);
+        }
+
+        @Override
+        public boolean actuatorEnabled(String name)
+        {
+            return actuatorRegistry.isEnabled(name, AutonomicService.config());
+        }
+
+        @Override
+        public boolean nodeReady()
+        {
+            return nodeJoined.getAsBoolean() && !draining.getAsBoolean();
+        }
+
+        @Override
+        public boolean storeAvailable()
+        {
+            return knowledgeStore == null || knowledgeStore.isAvailable();
+        }
+
+        // T2.8 seam: override clusterGate() with the ledger-backed gate
+    }
+
+    private final class GovernorJournal implements DefaultSafetyGovernor.Journal
+    {
+        @Override
+        public void putState(String key, String value)
+        {
+            if (knowledgeStore != null)
+                knowledgeStore.putState(key, value, clock.getAsLong());
+        }
+
+        @Override
+        public void deleteState(String key)
+        {
+            if (knowledgeStore != null)
+                knowledgeStore.deleteState(key);
+        }
+
+        @Override
+        public void quarantined(String policy, long untilMillis)
+        {
+            logger.warn("Autonomic policy {} quarantined until {}", policy, untilMillis);
+            raiseSelfDiagnosis(POLICY_QUARANTINED + ':' + policy, POLICY_QUARANTINED, Severity.WARN,
+                               "policy " + policy + " is quarantined after repeated rollbacks",
+                               Map.of("policy", policy, "until_millis", String.valueOf(untilMillis)), clock.getAsLong());
+        }
+
+        @Override
+        public void breakerTripped(int rollbacks, int window)
+        {
+            raiseSelfDiagnosis(CIRCUIT_BREAKER, CIRCUIT_BREAKER, Severity.CRITICAL,
+                               rollbacks + " of the last " + window + " actions rolled back or failed",
+                               Map.of("rollbacks", String.valueOf(rollbacks), "window", String.valueOf(window)), clock.getAsLong());
+            selfPause(Reasons.CIRCUIT_BREAKER);
+        }
+    }
+
+    private final class ExecutorHost implements ActionExecutor.Host
+    {
+        @Override
+        public String gate()
+        {
+            return AutonomicService.this.gate();
+        }
+
+        @Override
+        public boolean killed()
+        {
+            return killed || stopping || state == State.DISABLED;
+        }
+
+        @Override
+        public void actionFailed(ActionRecord record, String detail)
+        {
+            raiseSelfDiagnosis(ACTION_FAILED + ':' + record.id(), ACTION_FAILED, Severity.CRITICAL, detail,
+                               Map.of("action", record.id().toString(), "actuator", record.action.actuator,
+                                      "target", record.action.target.asString()), clock.getAsLong());
+            selfPause(Reasons.ACTION_FAILED);
+        }
+    }
+
+    // ---- operator interface ----
+
+    @Override
+    public void revert()
+    {
+        // TODO T4.1: restore every knob managed by a KnobActuator to its cassandra.yaml value (overview 7.3 rule 11).
+        // Stub: no concrete knob actuator exists yet, so there is nothing to revert.
+        throw new UnsupportedOperationException("revert is not available yet: no knob actuator is implemented (T4.1)");
+    }
+
+    @Override
+    public void approve(String actionId)
+    {
+        requireExecutor().approve(UUID.fromString(actionId));
+    }
+
+    @Override
+    public void reject(String actionId)
+    {
+        requireExecutor().reject(UUID.fromString(actionId));
+    }
+
+    private ActionExecutor requireExecutor()
+    {
+        ActionExecutor ex = executor;
+        if (ex == null)
+            throw new IllegalStateException("Autonomic layer is not enabled");
+        return ex;
+    }
+
+    @Override
+    public void setActuatorEnabled(String actuator, boolean enabled)
+    {
+        actuatorRegistry.setEnabled(actuator, enabled);
+    }
+
+    @Override
+    public Map<String, String> getActuators()
+    {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (Actuator a : actuatorRegistry.all())
+            out.put(a.name(), a.scope() + (a.reversible() ? "" : " irreversible") + (actuatorRegistry.isEnabled(a.name(), config()) ? " enabled" : " disabled"));
+        return out;
+    }
+
+    @Override
+    public List<Map<String, String>> getInFlightActions()
+    {
+        List<Map<String, String>> out = new ArrayList<>();
+        ActionExecutor ex = executor;
+        if (ex != null)
+            for (ActionRecord r : ex.liveActions())
+                out.add(describe(r));
+        return out;
+    }
+
+    @Override
+    public List<Map<String, String>> getHistory(int limit)
+    {
+        long now = clock.getAsLong();
+        List<ActionRecord> records;
+        if (knowledgeStore != null)
+        {
+            records = knowledgeStore.recentActions(now - TimeUnit.DAYS.toMillis(7), now, Math.max(0, limit));
+        }
+        else
+        {
+            ActionExecutor ex = executor;
+            records = ex == null ? new ArrayList<>() : new ArrayList<>(ex.recentActions(TimeUnit.DAYS.toMillis(7)));
+            records.sort((a, b) -> Long.compare(b.updatedMillis, a.updatedMillis));
+        }
+        List<Map<String, String>> out = new ArrayList<>();
+        for (ActionRecord r : records)
+            if (out.size() < limit)
+                out.add(describe(r));
+        return out;
+    }
+
+    @Override
+    public List<Map<String, String>> getActionEvents(String actionId)
+    {
+        List<Map<String, String>> out = new ArrayList<>();
+        if (knowledgeStore == null)
+            return out;
+        for (KnowledgeStore.ActionEvent e : knowledgeStore.actionEvents(UUID.fromString(actionId)))
+        {
+            Map<String, String> m = new LinkedHashMap<>();
+            m.put("at", String.valueOf(TimeUUID.fromUuid(e.at).unix(TimeUnit.MILLISECONDS)));
+            m.put("from_state", String.valueOf(e.fromState));
+            m.put("to_state", e.toState);
+            m.put("detail", e.detail == null ? "" : e.detail);
+            out.add(m);
+        }
+        return out;
+    }
+
+    @Override
+    public List<Map<String, String>> getDiagnosisHistory(int limit)
+    {
+        List<Map<String, String>> out = new ArrayList<>();
+        long now = clock.getAsLong();
+        if (knowledgeStore != null)
+        {
+            for (KnowledgeStore.StoredDiagnosis stored : knowledgeStore.recentDiagnoses(now - TimeUnit.DAYS.toMillis(1), now, Math.max(0, limit)))
+                out.add(describe(stored.diagnosis, stored.cleared));
+            return out;
+        }
+        InMemoryKnowledgeView v = view;
+        if (v != null)
+            for (Diagnosis d : v.activeDiagnoses())
+                if (out.size() < limit)
+                    out.add(describe(d, false));
+        return out;
+    }
+
+    private static Map<String, String> describe(ActionRecord r)
+    {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("id", r.id().toString());
+        m.put("state", r.state.name());
+        m.put("state_reason", r.stateReason == null ? "" : r.stateReason);
+        m.put("actuator", r.action.actuator);
+        m.put("scope", r.action.scope.name());
+        m.put("target", r.action.target.asString());
+        m.put("params", r.action.params.toString());
+        m.put("policy", r.policy == null ? "" : r.policy);
+        m.put("diagnosis_id", r.diagnosisId == null ? "" : r.diagnosisId.toString());
+        m.put("dry_run", String.valueOf(r.dryRun));
+        m.put("verdict", r.verdict == null ? "" : r.verdict.name());
+        m.put("baseline", r.baseline.toString());
+        m.put("result", r.result.toString());
+        m.put("proposed_at", String.valueOf(r.proposedMillis));
+        m.put("updated_at", String.valueOf(r.updatedMillis));
+        return m;
+    }
+
+    private static Map<String, String> describe(Diagnosis d, boolean cleared)
+    {
+        Map<String, String> m = new LinkedHashMap<>();
+        m.put("id", d.id.toString());
+        m.put("type", d.type);
+        m.put("subject", d.subject.asString());
+        m.put("severity", d.severity.name());
+        m.put("state", cleared ? KnowledgeStore.STATE_CLEARED : KnowledgeStore.STATE_OPEN);
+        m.put("first_seen", String.valueOf(d.firstSeenMillis));
+        m.put("last_seen", String.valueOf(d.lastSeenMillis));
+        m.put("summary", d.summary == null ? "" : d.summary);
+        return m;
     }
 }

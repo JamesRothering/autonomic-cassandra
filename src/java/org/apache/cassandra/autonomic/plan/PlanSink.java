@@ -22,7 +22,7 @@ import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 /**
  * Seam between the control loop and execution. Called on the control thread for every plan produced while the layer
  * is RUNNING. Must not block.
- * TODO T2.6: the implementation hands each action to the SafetyGovernor and the ActionExecutor.
+ * The production implementation is {@code ActionExecutor}, which hands each action to the SafetyGovernor.
  */
 public interface PlanSink
 {

@@ -1,0 +1,160 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.cassandra.autonomic.execute;
+
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Optional;
+
+import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.knowledge.Series;
+import org.apache.cassandra.autonomic.monitor.SignalId;
+import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.plan.VerifySpec;
+
+/**
+ * Baselines and verdicts of overview 7.3, rules 5, 6 and 8. Pure functions of a {@link KnowledgeView}; callable from
+ * any thread.
+ */
+public final class MetricVerifier
+{
+    /** Fewer observations than this in a window make its mean unusable. */
+    public static final int MIN_SAMPLES = 3;
+    /** {@code abort_tolerance}: a guard regressing by this multiple of its tolerance aborts verification early. */
+    public static final double ABORT_FACTOR = 2.0;
+
+    private MetricVerifier()
+    {
+    }
+
+    /** Key of a signal in the {@code baseline} and {@code result} maps. */
+    public static String key(SignalId signal, Subject subject)
+    {
+        return signal.name + '@' + subject.asString();
+    }
+
+    /**
+     * Mean of the goal and of every guard over the last {@code lookbackMillis}. A signal with fewer than
+     * {@link #MIN_SAMPLES} observations in the window is absent from the result.
+     */
+    public static Map<String, Double> means(VerifySpec spec, KnowledgeView knowledge, long lookbackMillis)
+    {
+        Map<String, Double> out = new LinkedHashMap<>();
+        putMean(out, spec.goal, spec.goalSubject, knowledge, lookbackMillis);
+        for (VerifySpec.Guard guard : spec.guards)
+            putMean(out, guard.signal, guard.subject, knowledge, lookbackMillis);
+        return out;
+    }
+
+    private static void putMean(Map<String, Double> out, SignalId signal, Subject subject, KnowledgeView knowledge, long lookbackMillis)
+    {
+        Series series = knowledge.series(signal, subject, lookbackMillis);
+        if (series.size() < MIN_SAMPLES)
+            return;
+        double sum = 0;
+        for (double v : series.values)
+            sum += v;
+        double mean = sum / series.size();
+        if (!Double.isNaN(mean) && !Double.isInfinite(mean))
+            out.put(key(signal, subject), mean);
+    }
+
+    /** Rule 5: the baseline over {@code baselineWindowMillis}; empty if the goal or any guard lacks samples. */
+    public static Optional<Map<String, Double>> baseline(VerifySpec spec, KnowledgeView knowledge)
+    {
+        Map<String, Double> means = means(spec, knowledge, spec.baselineWindowMillis);
+        return means.size() == expectedKeys(spec) ? Optional.of(means) : Optional.empty();
+    }
+
+    private static int expectedKeys(VerifySpec spec)
+    {
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        keys.add(key(spec.goal, spec.goalSubject));
+        for (VerifySpec.Guard guard : spec.guards)
+            keys.add(key(guard.signal, guard.subject));
+        return keys.size();
+    }
+
+    /** Rule 6, over the last {@code observationWindowMillis} of {@code knowledge}. */
+    public static Verdict compare(VerifySpec spec, Map<String, Double> baseline, KnowledgeView knowledge)
+    {
+        if (spec == null)
+            return Verdict.INCONCLUSIVE;
+        return verdict(spec, baseline, means(spec, knowledge, spec.observationWindowMillis));
+    }
+
+    /**
+     * Rule 6: REGRESSED if any guard worsened beyond its tolerance or the goal worsened by more than
+     * {@code minImprovement}; otherwise INCONCLUSIVE if any mean is missing; IMPROVED if the goal improved by at
+     * least {@code minImprovement}; otherwise NEUTRAL.
+     */
+    public static Verdict verdict(VerifySpec spec, Map<String, Double> baseline, Map<String, Double> result)
+    {
+        boolean missing = false;
+        for (VerifySpec.Guard guard : spec.guards)
+        {
+            Double change = improvement(baseline, result, key(guard.signal, guard.subject), guard.lowerIsBetter);
+            if (change == null)
+                missing = true;
+            else if (change < -guard.tolerance)
+                return Verdict.REGRESSED;
+        }
+        Double goal = improvement(baseline, result, key(spec.goal, spec.goalSubject), spec.lowerIsBetter);
+        if (goal == null)
+            return Verdict.INCONCLUSIVE;
+        if (goal < -spec.minImprovement)
+            return Verdict.REGRESSED;
+        if (missing)
+            return Verdict.INCONCLUSIVE;
+        return goal >= spec.minImprovement ? Verdict.IMPROVED : Verdict.NEUTRAL;
+    }
+
+    /**
+     * Rule 8: the guard, if any, whose mean since apply has regressed by more than {@link #ABORT_FACTOR} times its
+     * tolerance. Guards with fewer than {@link #MIN_SAMPLES} observations since apply are not judged.
+     */
+    public static Optional<String> guardBreached(VerifySpec spec, Map<String, Double> baseline, KnowledgeView knowledge, long sinceApplyMillis)
+    {
+        if (spec == null || sinceApplyMillis <= 0)
+            return Optional.empty();
+        Map<String, Double> current = new LinkedHashMap<>();
+        for (VerifySpec.Guard guard : spec.guards)
+            putMean(current, guard.signal, guard.subject, knowledge, sinceApplyMillis);
+        for (VerifySpec.Guard guard : spec.guards)
+        {
+            String key = key(guard.signal, guard.subject);
+            Double change = improvement(baseline, current, key, guard.lowerIsBetter);
+            if (change != null && change < -ABORT_FACTOR * guard.tolerance)
+                return Optional.of(key);
+        }
+        return Optional.empty();
+    }
+
+    /** Relative improvement (positive is better), or null if either mean is missing. */
+    private static Double improvement(Map<String, Double> baseline, Map<String, Double> result, String key, boolean lowerIsBetter)
+    {
+        Double before = baseline.get(key);
+        Double after = result.get(key);
+        if (before == null || after == null)
+            return null;
+        double delta = lowerIsBetter ? before - after : after - before;
+        if (before == 0)
+            return delta == 0 ? 0.0 : (delta > 0 ? Double.POSITIVE_INFINITY : Double.NEGATIVE_INFINITY);
+        return delta / Math.abs(before);
+    }
+}

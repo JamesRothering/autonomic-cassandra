@@ -21,6 +21,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.OptionalDouble;
+import java.util.function.LongFunction;
 import java.util.function.LongSupplier;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -34,6 +35,7 @@ public class InMemoryKnowledgeView implements KnowledgeView
     private final ObservationStore store;
     private final LongSupplier clock;
     private volatile List<Diagnosis> activeDiagnoses = Collections.emptyList();
+    private volatile LongFunction<Collection<ActionRecord>> actionSource = lookback -> Collections.emptyList();
 
     public InMemoryKnowledgeView(ObservationStore store, LongSupplier clock)
     {
@@ -50,6 +52,12 @@ public class InMemoryKnowledgeView implements KnowledgeView
     public void setActiveDiagnoses(Collection<Diagnosis> diagnoses)
     {
         activeDiagnoses = List.copyOf(diagnoses);
+    }
+
+    /** Source of {@link #recentActions}: the executor's in-memory records, by lookback in milliseconds. */
+    public void setActionSource(LongFunction<Collection<ActionRecord>> source)
+    {
+        actionSource = source;
     }
 
     @Override
@@ -79,8 +87,7 @@ public class InMemoryKnowledgeView implements KnowledgeView
     @Override
     public Collection<ActionRecord> recentActions(long lookbackMillis)
     {
-        // TODO T2.6: local actions from the executor / KnowledgeStore
-        return Collections.emptyList();
+        return actionSource.apply(lookbackMillis);
     }
 
     @Override

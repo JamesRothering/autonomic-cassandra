@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntSupplier;
 
 import com.google.common.annotations.VisibleForTesting;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -364,10 +365,18 @@ public class KnowledgeStore
      */
     public Map<String, String> scanState(String prefix)
     {
-        Map<String, String> out = new LinkedHashMap<>();
+        return tryScanState(prefix).orElseGet(LinkedHashMap::new);
+    }
+
+    /**
+     * As {@link #scanState}, but distinguishes "no entries" (an empty map) from "the read failed" (empty optional).
+     * Restart recovery must not arm the layer on a failed read.
+     */
+    public Optional<Map<String, String>> tryScanState(String prefix)
+    {
         UntypedResultSet rows = read("scan state " + prefix, "SELECT key, value FROM " + table(AutonomicKeyspace.LOCAL_STATE));
         if (rows == null)
-            return out;
+            return Optional.empty();
         java.util.TreeMap<String, String> sorted = new java.util.TreeMap<>();
         for (UntypedResultSet.Row row : rows)
         {
@@ -375,8 +384,7 @@ public class KnowledgeStore
             if (key.startsWith(prefix))
                 sorted.put(key, row.has("value") ? row.getString("value") : null);
         }
-        out.putAll(sorted);
-        return out;
+        return Optional.of(new LinkedHashMap<>(sorted));
     }
 
     // ---- helpers ----
