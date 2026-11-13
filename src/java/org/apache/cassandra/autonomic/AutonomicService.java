@@ -200,6 +200,51 @@ public class AutonomicService implements AutonomicServiceMBean
         return knowledgeStore;
     }
 
+    /** The observation store of the running layer; null while the layer is disabled. */
+    public ObservationStore observationStore()
+    {
+        return state == State.DISABLED ? null : store;
+    }
+
+    /** Diagnoses active in memory; empty while the layer is disabled. */
+    public List<Diagnosis> activeDiagnoses()
+    {
+        InMemoryKnowledgeView v = view;
+        if (state == State.DISABLED || v == null)
+            return Collections.emptyList();
+        return new ArrayList<>(v.activeDiagnoses());
+    }
+
+    /** Point-in-time copies of the failure accounting; empty while the layer is disabled. */
+    public List<ComponentSnapshot> componentSnapshots()
+    {
+        if (state == State.DISABLED)
+            return Collections.emptyList();
+        List<ComponentSnapshot> out = new ArrayList<>();
+        for (ComponentHealth h : health.values())
+            out.add(new ComponentSnapshot(h));
+        return out;
+    }
+
+    /** Read-only copy of one sensor's, detector's or policy's failure accounting. */
+    public static final class ComponentSnapshot
+    {
+        public final String kind;
+        public final String name;
+        public final boolean disabled;
+        public final int consecutiveFailures;
+        public final String lastError;
+
+        ComponentSnapshot(ComponentHealth h)
+        {
+            this.kind = h.kind;
+            this.name = h.name;
+            this.disabled = h.disabled;
+            this.consecutiveFailures = h.consecutiveFailures;
+            this.lastError = h.lastError;
+        }
+    }
+
     private static AutonomicConfig config()
     {
         return DatabaseDescriptor.getAutonomicConfig();
