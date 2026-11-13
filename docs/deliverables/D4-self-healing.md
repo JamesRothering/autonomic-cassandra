@@ -36,7 +36,7 @@ Act on diagnoses with local tuning changes, verify each change, and roll it back
 - [ ] A change whose verification fails is rolled back, and the rollback is recorded in the audit trail.
 - [ ] Automatic repair runs only when the rate and blast-radius limits allow it, verified by a two-node in-JVM test.
 
-Scope and acceptance criteria will be refined after D1.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 13 of [overview.md](../architecture/overview.md) (T4.1 to T4.5). Automatic repair scheduling already exists upstream (ADR-009), so that task is now auto-repair integration (T4.4). The scope above is the original outline.
 
 ## Status
 

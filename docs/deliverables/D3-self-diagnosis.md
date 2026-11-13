@@ -36,7 +36,7 @@ Detect known failure conditions on each node and explain them in terms an operat
 - [ ] An injected hot partition in a single-node in-JVM test produces a hot-partition diagnosis that names the partition.
 - [ ] Each diagnosis is written to `system_autonomic` and visible through `nodetool autonomic history`.
 
-Scope and acceptance criteria will be refined after D1.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 13 of [overview.md](../architecture/overview.md) (T3.1 to T3.6). The scope above is the original outline.
 
 ## Status
 

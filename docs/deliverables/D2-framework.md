@@ -38,7 +38,7 @@ Provide the MAPE-K framework skeleton, the knowledge store, the guardrails, and 
 - [ ] The kill switch stops all actuators within one control-loop interval, verified by a unit test.
 - [ ] `nodetool autonomic status`, `pause`, `resume`, and `history` work against a single-node in-JVM test.
 
-Scope and acceptance criteria will be refined after D1.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 13 of [overview.md](../architecture/overview.md) (T2.1 to T2.10), as amended by FC1 to FC10 in section 9.1 of [adaptive-schema.md](../architecture/adaptive-schema.md). The scope above is the original outline.
 
 ## Status
 

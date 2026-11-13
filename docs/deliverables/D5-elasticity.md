@@ -35,7 +35,7 @@ Adapt to load spikes within a node first, then provide a provider interface for 
 - [ ] Adaptive throttling reduces the rate of accepted requests when latency rises above the SLO and restores it when latency recovers.
 - [ ] The simulated provider can add and remove a node in a three-node in-JVM test, and the Kubernetes stub compiles and is covered by a unit test that checks its interface.
 
-Scope and acceptance criteria will be refined after D1.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 13 of [overview.md](../architecture/overview.md) (T5.1 to T5.5). Automatic scale-in is out of scope and the Kubernetes stub is reduced to a documented example unless the owner decides otherwise (ADR-010). The scope above is the original outline.
 
 ## Status
 

@@ -36,7 +36,7 @@ Show the autonomic behaviors end to end under realistic scenarios, and document 
 - [ ] For each scenario, the test asserts the expected diagnosis, action, and verification outcome.
 - [ ] The operator guide covers configuration, the kill switch, `nodetool autonomic`, and rollback, and each step is checked against a running node.
 
-Scope and acceptance criteria will be refined after D1.
+Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 13 of [overview.md](../architecture/overview.md) (T7.1 to T7.4), plus the D6 compatibility and failure suites (T6.12, T6.13). The scope above is the original outline.
 
 ## Status
 
