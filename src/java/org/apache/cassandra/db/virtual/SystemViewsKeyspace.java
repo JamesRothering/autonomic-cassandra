@@ -19,6 +19,7 @@ package org.apache.cassandra.db.virtual;
 
 import com.google.common.collect.ImmutableList;
 
+import org.apache.cassandra.autonomic.knowledge.AutonomicVirtualTables;
 import org.apache.cassandra.db.virtual.model.ThreadPoolRow;
 import org.apache.cassandra.db.virtual.walker.ThreadPoolRowWalker;
 import org.apache.cassandra.index.sai.virtual.StorageAttachedIndexTables;
@@ -73,6 +74,7 @@ public final class SystemViewsKeyspace extends VirtualKeyspace
                     .addAll(CIDRFilteringMetricsTable.getAll(VIRTUAL_VIEWS))
                     .addAll(StorageAttachedIndexTables.getAll(VIRTUAL_VIEWS))
                     .addAll(AccordVirtualTables.getAll(VIRTUAL_VIEWS))
+                    .addAll(AutonomicVirtualTables.getAll(VIRTUAL_VIEWS))
                     .add(new ExceptionsTable(VIRTUAL_VIEWS))
                     .build());
     }

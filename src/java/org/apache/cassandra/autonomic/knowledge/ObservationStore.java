@@ -112,6 +112,33 @@ public class ObservationStore implements ObservationSink
             }
             return new Series(java.util.Arrays.copyOf(t, n), java.util.Arrays.copyOf(v, n));
         }
+
+        synchronized SeriesSummary summary(SignalId signal, Subject subject)
+        {
+            if (size == 0)
+                return null;
+            int idx = (head + size - 1) % times.length;
+            return new SeriesSummary(signal, subject, times[idx], values[idx], size);
+        }
+    }
+
+    /** The newest point of one series and the number of points it holds. */
+    public static final class SeriesSummary
+    {
+        public final SignalId signal;
+        public final Subject subject;
+        public final long atMillis;
+        public final double value;
+        public final int samples;
+
+        SeriesSummary(SignalId signal, Subject subject, long atMillis, double value, int samples)
+        {
+            this.signal = signal;
+            this.subject = subject;
+            this.atMillis = atMillis;
+            this.value = value;
+            this.samples = samples;
+        }
     }
 
     private final int capacity;
@@ -186,6 +213,19 @@ public class ObservationStore implements ObservationSink
             if (k.signal.equals(signal))
                 result.add(k.subject);
         return result;
+    }
+
+    /** The newest point and point count of every non-empty series. */
+    public List<SeriesSummary> summaries()
+    {
+        List<SeriesSummary> out = new ArrayList<>();
+        for (Map.Entry<Key, Ring> e : series.entrySet())
+        {
+            SeriesSummary s = e.getValue().summary(e.getKey().signal, e.getKey().subject);
+            if (s != null)
+                out.add(s);
+        }
+        return out;
     }
 
     public int seriesCount()

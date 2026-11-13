@@ -18,6 +18,7 @@
 package org.apache.cassandra.autonomic;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,6 +56,14 @@ import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.monitor.Sensor;
+import org.apache.cassandra.autonomic.monitor.sensors.ClientRequestSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.CompactionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.GcSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.PeerSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.TableSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
@@ -124,11 +133,12 @@ public class AutonomicService implements AutonomicServiceMBean
     private static final String KILLED_PREFIX = "KILLED|";
     private static final String PAUSED_PREFIX = "PAUSED|";
 
-    // Static registration (overview 3.4). Empty in production until the sensors, detectors and policies of later
-    // tasks are added here; tests register fakes through the package-private register* methods.
+    // Static registration (overview 3.4). Detectors and policies of later tasks are added here; tests register
+    // fakes through the package-private register* methods.
     private static List<Sensor> productionSensors()
     {
-        return Collections.emptyList();
+        return Arrays.asList(new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
+                             new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor());
     }
 
     private static List<Detector> productionDetectors()
@@ -250,6 +260,51 @@ public class AutonomicService implements AutonomicServiceMBean
     public KnowledgeStore knowledgeStore()
     {
         return knowledgeStore;
+    }
+
+    /** The observation store of the running layer; null while the layer is disabled. */
+    public ObservationStore observationStore()
+    {
+        return state == State.DISABLED ? null : store;
+    }
+
+    /** Diagnoses active in memory; empty while the layer is disabled. */
+    public List<Diagnosis> activeDiagnoses()
+    {
+        InMemoryKnowledgeView v = view;
+        if (state == State.DISABLED || v == null)
+            return Collections.emptyList();
+        return new ArrayList<>(v.activeDiagnoses());
+    }
+
+    /** Point-in-time copies of the failure accounting; empty while the layer is disabled. */
+    public List<ComponentSnapshot> componentSnapshots()
+    {
+        if (state == State.DISABLED)
+            return Collections.emptyList();
+        List<ComponentSnapshot> out = new ArrayList<>();
+        for (ComponentHealth h : health.values())
+            out.add(new ComponentSnapshot(h));
+        return out;
+    }
+
+    /** Read-only copy of one sensor's, detector's or policy's failure accounting. */
+    public static final class ComponentSnapshot
+    {
+        public final String kind;
+        public final String name;
+        public final boolean disabled;
+        public final int consecutiveFailures;
+        public final String lastError;
+
+        ComponentSnapshot(ComponentHealth h)
+        {
+            this.kind = h.kind;
+            this.name = h.name;
+            this.disabled = h.disabled;
+            this.consecutiveFailures = h.consecutiveFailures;
+            this.lastError = h.lastError;
+        }
     }
 
     private static AutonomicConfig config()
