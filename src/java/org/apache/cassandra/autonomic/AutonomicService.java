@@ -18,6 +18,7 @@
 package org.apache.cassandra.autonomic;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,6 +45,14 @@ import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.monitor.Sensor;
+import org.apache.cassandra.autonomic.monitor.sensors.ClientRequestSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.CompactionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.GcSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.PeerSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.TableSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
@@ -90,11 +99,12 @@ public class AutonomicService implements AutonomicServiceMBean
     public static final String COMPONENT_FAILED = "autonomic.component_failed";
     public static final String LOOP_STALLED = "autonomic.loop_stalled";
 
-    // Static registration (overview 3.4). Empty in production until the sensors, detectors and policies of later
-    // tasks are added here; tests register fakes through the package-private register* methods.
+    // Static registration (overview 3.4). Detectors and policies of later tasks are added here; tests register
+    // fakes through the package-private register* methods.
     private static List<Sensor> productionSensors()
     {
-        return Collections.emptyList();
+        return Arrays.asList(new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
+                             new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor());
     }
 
     private static List<Detector> productionDetectors()

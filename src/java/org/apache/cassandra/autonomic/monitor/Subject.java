@@ -29,7 +29,7 @@ public final class Subject
     public final String keyspace;
     /** Nullable. */
     public final String table;
-    /** Partition key as CQL literal, pool name or peer host id; nullable. */
+    /** Partition key as lowercase hex of the raw key bytes (see sensors.PartitionKeys), pool name or peer host id; nullable. */
     public final String detail;
 
     public Subject(Kind kind, String keyspace, String table, String detail)
