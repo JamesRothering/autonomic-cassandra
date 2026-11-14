@@ -49,6 +49,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 
+import org.apache.cassandra.autonomic.AutonomicMetrics;
 import org.apache.cassandra.db.virtual.CollectionVirtualTableAdapter;
 import org.apache.cassandra.db.virtual.VirtualTable;
 import org.apache.cassandra.db.virtual.model.CounterMetricRow;
@@ -160,6 +161,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
                                    .add(TrieMemtableMetricsView.TYPE_NAME)
                                    .add(UnweightedCacheMetrics.TYPE_NAME)
                                    .add(AutoRepairMetrics.TYPE_NAME)
+                                   .add(AutonomicMetrics.TYPE_NAME)
                                    .build();
     }
 

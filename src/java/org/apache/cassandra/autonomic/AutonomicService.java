@@ -55,6 +55,7 @@ import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
+import org.apache.cassandra.autonomic.monitor.ObservationSink;
 import org.apache.cassandra.autonomic.monitor.Sensor;
 import org.apache.cassandra.autonomic.monitor.sensors.ClientRequestSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.CompactionSensor;
@@ -220,6 +221,8 @@ public class AutonomicService implements AutonomicServiceMBean
 
     private volatile ObservationStore store;
     private volatile InMemoryKnowledgeView view;
+    /** Null while the layer is disabled; created by startLoops, released by shutdownBlocking. */
+    private volatile AutonomicMetrics metrics;
 
     private ScheduledExecutorPlus monitor;
     private ScheduledExecutorPlus control;
@@ -337,6 +340,7 @@ public class AutonomicService implements AutonomicServiceMBean
         stopping = false;
         startedAtMillis = clock.getAsLong();
         AutonomicConfig config = config();
+        metrics = new AutonomicMetrics(this);
         store = new ObservationStore(seriesCapacity(config), config.max_series);
         view = new InMemoryKnowledgeView(store, clock);
         monitorHeartbeat = controlHeartbeat = startedAtMillis;
@@ -359,6 +363,7 @@ public class AutonomicService implements AutonomicServiceMBean
                                                StepScheduler.of(actuator), new ExecutorHost(), () -> view);
         view.setActionSource(ex::recentActions);
         governor = gov;
+        ex.addListener(metrics);
         executor = ex;
         // STARTING: recovery runs and the persisted pause flag is read before either loop exists (overview 3.6);
         // if the store cannot be read yet the control thread retries and the layer stays unarmed
@@ -387,6 +392,7 @@ public class AutonomicService implements AutonomicServiceMBean
     @VisibleForTesting
     void monitorTick()
     {
+        long began = System.nanoTime();
         try
         {
             ObservationStore store = this.store;
@@ -395,6 +401,12 @@ public class AutonomicService implements AutonomicServiceMBean
             long now = clock.getAsLong();
             monitorHeartbeat = now;
             long budget = config().safety.sensor_budget.toMilliseconds();
+            ObservationSink sink = o -> {
+                store.accept(o);
+                AutonomicMetrics m = metrics;
+                if (m != null)
+                    m.observationAccepted();
+            };
             for (Sensor sensor : sensors)
             {
                 ComponentHealth h = health("sensor", sensor.name());
@@ -405,14 +417,21 @@ public class AutonomicService implements AutonomicServiceMBean
                     continue;
                 lastCollected.put(sensor, now);
                 long begin = clock.getAsLong();
+                long collectBegin = System.nanoTime();
                 try
                 {
-                    sensor.collect(store, now);
+                    sensor.collect(sink, now);
                 }
                 catch (Throwable t)
                 {
                     recordFailure(h, t);
                     continue;
+                }
+                finally
+                {
+                    AutonomicMetrics m = metrics;
+                    if (m != null)
+                        m.sensorCollected(sensor.name(), System.nanoTime() - collectBegin);
                 }
                 long took = clock.getAsLong() - begin;
                 if (took > budget)
@@ -431,12 +450,19 @@ public class AutonomicService implements AutonomicServiceMBean
         {
             handleTickThrowable("monitor", t);
         }
+        finally
+        {
+            AutonomicMetrics m = metrics;
+            if (m != null)
+                m.monitorTick(System.nanoTime() - began);
+        }
     }
 
     /** Runs on the AutonomicControl thread. Must never throw. */
     @VisibleForTesting
     void controlTick()
     {
+        long began = System.nanoTime();
         try
         {
             InMemoryKnowledgeView view = this.view;
@@ -512,6 +538,9 @@ public class AutonomicService implements AutonomicServiceMBean
         finally
         {
             drainDiagnosisWrites();
+            AutonomicMetrics m = metrics;
+            if (m != null)
+                m.controlTick(System.nanoTime() - began, state);
         }
     }
 
@@ -653,6 +682,9 @@ public class AutonomicService implements AutonomicServiceMBean
     private void recordFailure(ComponentHealth h, Throwable t)
     {
         handleThrowable(h.kind + ' ' + h.name, t);
+        AutonomicMetrics m = metrics;
+        if (m != null && "sensor".equals(h.kind))
+            m.sensorFailed(h.name);
         h.totalFailures++;
         h.lastError = t.toString();
         if (++h.consecutiveFailures >= config().safety.component_failure_threshold && !h.disabled)
@@ -732,6 +764,9 @@ public class AutonomicService implements AutonomicServiceMBean
         List<Diagnosis> all = new ArrayList<>(detected);
         all.addAll(selfDiagnoses.values());
         v.setActiveDiagnoses(all);
+        AutonomicMetrics m = metrics;
+        if (m != null)
+            m.diagnoses(all);
         persistDiagnoses(all);
     }
 
@@ -820,6 +855,12 @@ public class AutonomicService implements AutonomicServiceMBean
     DefaultSafetyGovernor governor()
     {
         return governor;
+    }
+
+    @VisibleForTesting
+    AutonomicMetrics metrics()
+    {
+        return metrics;
     }
 
     @VisibleForTesting
@@ -925,6 +966,10 @@ public class AutonomicService implements AutonomicServiceMBean
             ExecutorUtils.shutdownNowAndWait(timeout, unit, executors);
             for (Sensor sensor : sensors)
                 safely("stop", sensor.name(), sensor::stop);
+            AutonomicMetrics m = metrics;
+            metrics = null;
+            if (m != null)
+                m.release();
             stopping = false;
             logger.info("Autonomic layer stopped");
         }
