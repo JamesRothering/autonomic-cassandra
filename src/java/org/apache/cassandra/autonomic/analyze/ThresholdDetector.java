@@ -209,6 +209,12 @@ public abstract class ThresholdDetector implements Detector
      */
     protected OptionalDouble measure(Subject subject, KnowledgeView knowledge)
     {
+        return latestWithin(signal, subject, knowledge);
+    }
+
+    /** The newest point of {@code signal} younger than {@code max_signal_age_ms}, if any. */
+    protected final OptionalDouble latestWithin(SignalId signal, Subject subject, KnowledgeView knowledge)
+    {
         Series s = knowledge.series(signal, subject, settings.maxSignalAgeMillis);
         return s.isEmpty() ? OptionalDouble.empty() : OptionalDouble.of(s.values[s.size() - 1]);
     }
@@ -220,7 +226,7 @@ public abstract class ThresholdDetector implements Detector
     }
 
     /** Default WARN. */
-    protected Severity severity(Subject subject, double value)
+    protected Severity severity(Subject subject, double value, KnowledgeView knowledge)
     {
         return Severity.WARN;
     }
@@ -235,7 +241,7 @@ public abstract class ThresholdDetector implements Detector
      * Adds evidence (signal name to formatted value) to an open diagnosis. The default records the measured
      * signal with its thresholds; subclasses call super and add their own entries, for example {@code key_hex}.
      */
-    protected void addEvidence(Subject subject, double value, Map<String, String> evidence)
+    protected void addEvidence(Subject subject, double value, Map<String, String> evidence, KnowledgeView knowledge)
     {
         evidence.put(signal.name, format(value) + " (raise " + format(settings.raise) + ", clear " + format(settings.clear) + ')');
     }
@@ -337,14 +343,14 @@ public abstract class ThresholdDetector implements Detector
                 st.lastValue = value;
             }
         }
-        return diagnosis(subject, st, now);
+        return diagnosis(subject, st, now, knowledge);
     }
 
-    private Diagnosis diagnosis(Subject subject, State st, long now)
+    private Diagnosis diagnosis(Subject subject, State st, long now, KnowledgeView knowledge)
     {
         Map<String, String> evidence = new LinkedHashMap<>();
-        addEvidence(subject, st.lastValue, evidence);
-        return new Diagnosis(st.id, type, subject, severity(subject, st.lastValue), confidence(subject, st.lastValue),
+        addEvidence(subject, st.lastValue, evidence, knowledge);
+        return new Diagnosis(st.id, type, subject, severity(subject, st.lastValue, knowledge), confidence(subject, st.lastValue),
                              st.firstSeenMillis, now, summary(subject, st.lastValue), evidence, null);
     }
 

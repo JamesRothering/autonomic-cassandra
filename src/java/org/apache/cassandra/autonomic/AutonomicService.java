@@ -46,6 +46,7 @@ import org.apache.cassandra.autonomic.analyze.Correlator;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.detectors.Detectors;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
@@ -155,11 +156,6 @@ public class AutonomicService implements AutonomicServiceMBean
                              new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor());
     }
 
-    private static List<Detector> productionDetectors()
-    {
-        return Collections.emptyList();
-    }
-
     private static List<Policy> productionPolicies()
     {
         return Collections.emptyList();
@@ -200,7 +196,9 @@ public class AutonomicService implements AutonomicServiceMBean
     }
 
     private final List<Sensor> sensors = new CopyOnWriteArrayList<>(productionSensors());
-    private final List<Detector> detectors = new CopyOnWriteArrayList<>(productionDetectors());
+    private final List<Detector> detectors = new CopyOnWriteArrayList<>();
+    /** Built from the configuration at each start, so nothing exists while the layer is disabled. */
+    private volatile List<Detector> builtinDetectors = Collections.emptyList();
     private final List<Policy> policies = new CopyOnWriteArrayList<>(productionPolicies());
     private volatile Correlator correlator = productionCorrelator();
     private final ActuatorRegistry actuatorRegistry = new ActuatorRegistry();
@@ -378,6 +376,7 @@ public class AutonomicService implements AutonomicServiceMBean
         lastCollected.clear();
         diagnosisWrites.clear();
         queuedDiagnosisWrites.set(0);
+        builtinDetectors = Detectors.build(config);
         for (Sensor sensor : sensors)
             safely("start", sensor.name(), sensor::start);
         monitor = executorFactory().scheduled(false, MONITOR_THREAD);
@@ -533,7 +532,9 @@ public class AutonomicService implements AutonomicServiceMBean
             superviseExecution(view, now);
 
             List<Diagnosis> raw = new ArrayList<>();
-            for (Detector detector : detectors)
+            List<Detector> allDetectors = new ArrayList<>(builtinDetectors);
+            allDetectors.addAll(detectors);
+            for (Detector detector : allDetectors)
             {
                 ComponentHealth h = health("detector", detector.name());
                 if (h.disabled)

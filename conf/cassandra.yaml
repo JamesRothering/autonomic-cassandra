@@ -3103,6 +3103,12 @@ storage_compatibility_mode: NONE
 #   coordination:
 #     lease: 10m
 #     lease_safety_margin: 60s
+#   detectors:                     # all enabled when the layer is enabled; options per detector
+#     hot_partition: { enabled: true, share_of_table_ops: 0.3, for_evaluations: 4 }
+#     latency_slo_breach: { enabled: true, slo_multiple: 1.0, for_evaluations: 4 }
+#     tombstone_overload: { enabled: true, tombstones_scanned_p99: 1000, failure_threshold: 100000 }
+#     # every detector also accepts clear_threshold (default 80% of its raise value),
+#     # max_signal_age_ms (default 120000) and max_subjects (default 1000)
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

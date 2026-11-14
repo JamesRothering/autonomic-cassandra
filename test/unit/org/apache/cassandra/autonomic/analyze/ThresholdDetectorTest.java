@@ -70,15 +70,15 @@ public class ThresholdDetectorTest
         }
 
         @Override
-        protected Severity severity(Subject subject, double value)
+        protected Severity severity(Subject subject, double value, KnowledgeView knowledge)
         {
             return value >= 200 ? Severity.CRITICAL : Severity.WARN;
         }
 
         @Override
-        protected void addEvidence(Subject subject, double value, Map<String, String> evidence)
+        protected void addEvidence(Subject subject, double value, Map<String, String> evidence, KnowledgeView knowledge)
         {
-            super.addEvidence(subject, value, evidence);
+            super.addEvidence(subject, value, evidence, knowledge);
             evidence.put("key_hex", "cafe");
         }
     }
