@@ -83,6 +83,7 @@ import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.plan.policies.Policies;
 import org.apache.cassandra.autonomic.safety.ClusterGate;
 import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
 import org.apache.cassandra.autonomic.safety.Reasons;
@@ -160,11 +161,6 @@ public class AutonomicService implements AutonomicServiceMBean
                              new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor());
     }
 
-    private static List<Policy> productionPolicies()
-    {
-        return Collections.emptyList();
-    }
-
     private static Correlator productionCorrelator()
     {
         return RuleCorrelator.defaults();
@@ -198,7 +194,8 @@ public class AutonomicService implements AutonomicServiceMBean
     private final List<Detector> detectors = new CopyOnWriteArrayList<>();
     /** Built from the configuration at each start, so nothing exists while the layer is disabled. */
     private volatile List<Detector> builtinDetectors = Collections.emptyList();
-    private final List<Policy> policies = new CopyOnWriteArrayList<>(productionPolicies());
+    private final List<Policy> policies = new CopyOnWriteArrayList<>();
+    private volatile List<Policy> builtinPolicies = Collections.emptyList();
     private volatile Correlator correlator = productionCorrelator();
     private final ActuatorRegistry actuatorRegistry = new ActuatorRegistry();
     /** Plans go through the SafetyGovernor to the ActionExecutor. */
@@ -400,6 +397,7 @@ public class AutonomicService implements AutonomicServiceMBean
         queuedDiagnosisWrites.set(0);
         registerProductionActuators(config);
         builtinDetectors = productionDetectors(config);
+        builtinPolicies = Policies.build(config, actuatorRegistry::get);
         for (Sensor sensor : sensors)
             safely("start", sensor.name(), sensor::start);
         monitor = executorFactory().scheduled(false, MONITOR_THREAD);
@@ -587,12 +585,14 @@ public class AutonomicService implements AutonomicServiceMBean
             // PAUSED: diagnoses are recorded, no plan is produced
             if (state != State.RUNNING)
                 return;
+            List<Policy> allPolicies = new ArrayList<>(builtinPolicies);
+            allPolicies.addAll(policies);
             for (Diagnosis diagnosis : correlated)
             {
                 // an effect with a root cause is recorded but not acted on: the policies get the root
                 if (diagnosis.rootCause != null)
                     continue;
-                for (Policy policy : policies)
+                for (Policy policy : allPolicies)
                 {
                     ComponentHealth h = health("policy", policy.name());
                     if (h.disabled)
@@ -890,10 +890,18 @@ public class AutonomicService implements AutonomicServiceMBean
         }
     }
 
+    /** Public only for distributed tests, which cannot reach package-private members. */
     @VisibleForTesting
-    void registerSensor(Sensor sensor)
+    public void registerSensor(Sensor sensor)
     {
         sensors.add(sensor);
+    }
+
+    /** As {@link #registerSensor}: lets a distributed test replace a production sensor with an injected one. */
+    @VisibleForTesting
+    public void removeSensor(String name)
+    {
+        sensors.removeIf(s -> s.name().equals(name));
     }
 
     @VisibleForTesting

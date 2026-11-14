@@ -3120,6 +3120,8 @@ storage_compatibility_mode: NONE
 #     # max_signal_age_ms (default 120000) and max_subjects (default 1000)
 #     baseline_drift: { enabled: true }   # INFO diagnosis while a knob differs from this file
 #   actuators:                     # each is off until enabled; the layer moves a knob only inside its envelope
+#     # every actuator also accepts baseline_window (default 2m) and observation_window (default 5m), the
+#     # windows over which its policy verifies a change; durations or milliseconds
 #     # envelope = configured value * min_factor .. max_factor; a configured 0 (unthrottled) is not managed
 #     compaction_throughput: { enabled: false, min_factor: 0.25, max_factor: 4.0 }
 #     # envelope 1 .. half the available processors (at least the configured value)
