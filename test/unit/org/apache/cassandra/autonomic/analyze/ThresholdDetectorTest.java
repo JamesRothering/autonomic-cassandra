@@ -111,6 +111,40 @@ public class ThresholdDetectorTest
     }
 
     @Test
+    public void oneSampleReReadOnSeveralTicksCountsOnce()
+    {
+        ThresholdDetector d = new Fixture(settings(4));
+        store.accept(new Observation(SIG, T1, now, 150));
+        for (int i = 0; i < 3; i++)
+        {
+            now += TICK;
+            assertTrue(d.analyze(view).isEmpty());
+        }
+        assertEquals(1, d.trackedSubjects()); // still pending, not dropped while the sample is fresh
+        // three more distinct samples complete the four
+        assertTrue(tick(d, T1, 150).isEmpty());
+        assertTrue(tick(d, T1, 150).isEmpty());
+        assertEquals(1, tick(d, T1, 150).size());
+    }
+
+    @Test
+    public void repeatedSampleDoesNotClearButRefreshesLastSeen()
+    {
+        ThresholdDetector d = new Fixture(settings(2));
+        tick(d, T1, 150);
+        tick(d, T1, 150);
+        tick(d, T1, 10); // one clearing sample
+        for (int i = 0; i < 3; i++)
+        {
+            now += TICK;
+            List<Diagnosis> out = d.analyze(view);
+            assertEquals(1, out.size());
+            assertEquals(now, out.get(0).lastSeenMillis);
+        }
+        assertTrue(tick(d, T1, 10).isEmpty()); // second distinct clearing sample
+    }
+
+    @Test
     public void exactlyAtRaiseThresholdBreaches()
     {
         ThresholdDetector d = new Fixture(settings(1));

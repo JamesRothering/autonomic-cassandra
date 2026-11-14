@@ -43,6 +43,9 @@ import org.apache.cassandra.utils.TimeUUID;
  *
  * <p>Per subject, one {@link #analyze} call is one evaluation:
  * <ul>
+ * <li>Only a measurement newer than the last one counted advances a count, so a slow sensor does not satisfy
+ * {@code for_evaluations} by being re-read; a repeat is a no-op (an open diagnosis is still returned, with a fresh
+ * {@code lastSeenMillis}). A missing or stale measurement counts once per evaluation.</li>
  * <li>A diagnosis opens after {@code for_evaluations} consecutive evaluations that breach the raise threshold
  * (at or beyond it). An evaluation that does not breach, including a missing or stale measurement, resets the count.</li>
  * <li>An open diagnosis keeps its id and {@code firstSeenMillis} and is returned on every evaluation, with
@@ -156,6 +159,7 @@ public abstract class ThresholdDetector implements Detector
         long touchedMillis;
         UUID id;                 // non-null while open
         long firstSeenMillis;
+        long countedAtMillis = Long.MIN_VALUE;   // observation time of the last measurement that was counted
     }
 
     private final String name;
@@ -163,6 +167,8 @@ public abstract class ThresholdDetector implements Detector
     private final SignalId signal;
     private final Settings settings;
     private final Map<Subject, State> states = new LinkedHashMap<>();
+    /** Newest observation time read by {@link #latestWithin} during the current {@link #measure}; -1 if none. */
+    private long observedAt;
 
     /**
      * @param name       detector name (health accounting and logs)
@@ -216,7 +222,10 @@ public abstract class ThresholdDetector implements Detector
     protected final OptionalDouble latestWithin(SignalId signal, Subject subject, KnowledgeView knowledge)
     {
         Series s = knowledge.series(signal, subject, settings.maxSignalAgeMillis);
-        return s.isEmpty() ? OptionalDouble.empty() : OptionalDouble.of(s.values[s.size() - 1]);
+        if (s.isEmpty())
+            return OptionalDouble.empty();
+        observedAt = Math.max(observedAt, s.times[s.size() - 1]);
+        return OptionalDouble.of(s.values[s.size() - 1]);
     }
 
     /** Subjects to evaluate this round, in addition to those already tracked. Default: subjects of the signal. */
@@ -290,6 +299,7 @@ public abstract class ThresholdDetector implements Detector
 
     private Diagnosis evaluate(Subject subject, KnowledgeView knowledge, long now)
     {
+        observedAt = -1;
         OptionalDouble measured = measure(subject, knowledge);
         State st = states.get(subject);
         boolean wasOpen = st != null && st.id != null;
@@ -297,6 +307,20 @@ public abstract class ThresholdDetector implements Detector
         double value = present ? measured.getAsDouble() : 0;
         boolean breach = present && (settings.breachWhenAbove ? value >= settings.raise : value <= settings.raise);
         boolean beyondClear = present && (settings.breachWhenAbove ? value < settings.clear : value > settings.clear);
+
+        // Persistence counts independent observations: a measurement already counted is a no-op. A measure that
+        // did not go through latestWithin has no observation time and counts on every evaluation.
+        long at = observedAt >= 0 ? observedAt : now;
+        if (present && st != null && at <= st.countedAtMillis)
+        {
+            if (!wasOpen)
+                return null;
+            st.touchedMillis = now;
+            st.lastValue = value;
+            return diagnosis(subject, st, now, knowledge);
+        }
+        if (present && st != null)
+            st.countedAtMillis = at;
 
         if (!wasOpen)
         {
@@ -308,6 +332,7 @@ public abstract class ThresholdDetector implements Detector
             }
             if (st == null && (st = admit(subject)) == null)
                 return null;
+            st.countedAtMillis = at;
             st.breaches++;
             st.lastValue = value;
             st.touchedMillis = now;

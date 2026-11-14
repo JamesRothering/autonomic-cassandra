@@ -87,6 +87,8 @@ public class DetectorsTest
         put(Signals.PARTITION_READ_OPS_PER_SEC, p, 900);
         assertTrue(d.analyze(view).isEmpty());
         now += TICK;
+        put(Signals.PARTITION_READ_SHARE, p, 0.5);
+        put(Signals.PARTITION_READ_OPS_PER_SEC, p, 900);
         List<Diagnosis> out = d.analyze(view);
         assertEquals(1, out.size());
         Diagnosis x = out.get(0);
@@ -97,6 +99,26 @@ public class DetectorsTest
         assertEquals("0.5000", x.evidence.get("partition.read_share"));
         assertEquals("900", x.evidence.get("partition.read_ops_per_sec"));
         assertTrue(x.summary.contains("50%"));
+    }
+
+    @Test
+    public void hotPartitionSampleReReadOnFourTicksDoesNotOpenButFourSamplesDo()
+    {
+        Detector d = HotPartitionDetector.fromConfig(opts("for_evaluations", 4));
+        Subject p = hot("k1");
+        now += TICK;
+        put(Signals.PARTITION_READ_SHARE, p, 0.5);
+        for (int i = 0; i < 4; i++)
+        {
+            assertTrue(d.analyze(view).isEmpty());
+            now += TICK;
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            now += 60_000 - TICK; // the sampler emits once a minute
+            put(Signals.PARTITION_READ_SHARE, p, 0.5);
+            assertTrue(d.analyze(view).isEmpty() == (i < 2));
+        }
     }
 
     @Test
