@@ -90,6 +90,7 @@ import org.apache.cassandra.auth.PermissionsCacheMBean;
 import org.apache.cassandra.auth.RolesCache;
 import org.apache.cassandra.auth.RolesCacheMBean;
 import org.apache.cassandra.auth.jmx.AuthorizationProxy;
+import org.apache.cassandra.autonomic.AutonomicServiceMBean;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.batchlog.BatchlogManagerMBean;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
@@ -197,6 +198,7 @@ public class NodeProbe implements AutoCloseable
     protected PermissionsCacheMBean pcProxy;
     protected RolesCacheMBean rcProxy;
     protected AutoRepairServiceMBean autoRepairProxy;
+    protected AutonomicServiceMBean autonomicProxy;
     protected AsyncProfilerMBean asyncProfilerProxy;
     protected GuardrailsMBean grProxy;
     protected volatile Output output;
@@ -345,6 +347,9 @@ public class NodeProbe implements AutoCloseable
 
             name = new ObjectName(AutoRepairService.MBEAN_NAME);
             autoRepairProxy = JMX.newMBeanProxy(mbeanServerConn, name, AutoRepairServiceMBean.class);
+
+            name = new ObjectName(AutonomicServiceMBean.MBEAN_NAME);
+            autonomicProxy = JMX.newMBeanProxy(mbeanServerConn, name, AutonomicServiceMBean.class);
 
             name = new ObjectName(AsyncProfilerService.MBEAN_NAME);
             asyncProfilerProxy = JMX.newMBeanProxy(mbeanServerConn, name, AsyncProfilerMBean.class);
@@ -1350,6 +1355,11 @@ public class NodeProbe implements AutoCloseable
     public CMSOperationsMBean getCMSOperationsProxy()
     {
         return cmsProxy;
+    }
+
+    public AutonomicServiceMBean getAutonomicProxy()
+    {
+        return autonomicProxy;
     }
 
     public AccordOperationsMBean getAccordOperationsProxy()

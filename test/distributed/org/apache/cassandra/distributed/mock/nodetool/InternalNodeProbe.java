@@ -24,6 +24,7 @@ import java.util.Map;
 
 import com.google.common.collect.Multimap;
 
+import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
@@ -92,6 +93,7 @@ public class InternalNodeProbe extends NodeProbe
         memProxy = ManagementFactory.getMemoryMXBean();
         runtimeProxy = ManagementFactory.getRuntimeMXBean();
         asyncProfilerProxy = AsyncProfilerService.instance();
+        autonomicProxy = AutonomicService.instance;
     }
 
     @Override

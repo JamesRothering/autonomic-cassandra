@@ -62,6 +62,7 @@ import static org.apache.cassandra.tools.nodetool.Help.printTopCommandUsage;
                          Assassinate.class,
                          AsyncProfileCommandGroup.class,
                          AutoRepairStatus.class,
+                         Autonomic.class,
                          Bootstrap.class,
                          CIDRFilteringStats.class,
                          CMSAdmin.class,

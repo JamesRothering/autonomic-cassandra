@@ -11,6 +11,7 @@ The most commonly used nodetool commands are:
     accord                              Manage the operation of Accord
     altertopology                       Modify the datacenter and/or rack of one or more nodes
     assassinate                         Forcefully remove a dead node without re-replicating any data.  Use as a last resort if you cannot removenode
+    autonomic                           Operate the autonomic layer
     autorepairstatus                    Print autorepair status
     bootstrap                           Monitor/manage node's bootstrap process
     cidrfilteringstats                  Print statistics on CIDR filtering
