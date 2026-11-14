@@ -135,7 +135,7 @@ public final class Signals
     public static final SignalId GC_HEAP_USED_FRACTION = def("gc.heap_used_fraction", "fraction", "Used heap divided by max heap (committed when max is undefined)");
 
     // ---- PeerSensor (subject PEER, detail is the host id, or the address when the host id is unknown) ----
-    public static final SignalId PEER_LOAD_BYTES = def("peer.load_bytes", "bytes", "LOAD the peer last gossiped (can be stale)");
+    public static final SignalId PEER_LOAD_BYTES = def("peer.load_bytes", "bytes", "LOAD the peer last gossiped (can be stale); also emitted for this node under its own peer subject");
     public static final SignalId PEER_SEVERITY = def("peer.severity", "score", "SEVERITY the peer last gossiped");
     public static final SignalId PEER_ALIVE = def("peer.alive", "bool", "1 if gossip considers the peer alive, 0 if not");
     public static final SignalId PEER_SNITCH_SCORE = def("peer.snitch_score", "score", "Dynamic snitch score of the endpoint (lower is better); absent without a dynamic snitch");

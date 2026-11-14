@@ -28,6 +28,7 @@ import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.monitor.Observation;
@@ -94,8 +95,23 @@ public class PeerDetectorsTest
         assertEquals(PEERS[3], x.subject);
         assertEquals(Severity.WARN, x.severity);
         assertEquals("p4", x.evidence.get("peer"));
+        assertEquals("false", x.evidence.get("local"));
         assertEquals(Long.toString(8 * GIB), x.evidence.get("peer.load_bytes"));
         assertEquals(Long.toString(5 * GIB), x.evidence.get("mean_peer_load_bytes"));
+    }
+
+    @Test
+    public void localNodeCanBeTheOutlier()
+    {
+        ThresholdDetector d = new NodeImbalanceDetector(ThresholdDetector.Settings.above(1.5), 3, GIB, () -> "p1");
+        List<Diagnosis> out = tick(d, Signals.PEER_LOAD_BYTES, 12 * GIB, 4 * GIB, 4 * GIB);
+        assertTrue(out.isEmpty());
+        for (int i = 0; i < 3; i++)
+            out = tick(d, Signals.PEER_LOAD_BYTES, 12 * GIB, 4 * GIB, 4 * GIB);
+        assertEquals(1, out.size());
+        assertEquals(PEERS[0], out.get(0).subject);
+        assertEquals("true", out.get(0).evidence.get("local"));
+        assertTrue(out.get(0).summary.startsWith("This node"));
     }
 
     @Test

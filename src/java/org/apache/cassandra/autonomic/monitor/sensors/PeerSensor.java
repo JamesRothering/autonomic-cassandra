@@ -44,6 +44,7 @@ import static org.apache.cassandra.autonomic.monitor.sensors.SensorSupport.emit;
 /**
  * Per remote endpoint: gossiped LOAD and SEVERITY, gossip liveness and dynamic snitch score. Reads only local gossip
  * state (no messages). Gossiped values can be stale; a peer that never gossiped a value gets no observation for it.
+ * This node's own gossiped LOAD is emitted too (under its own peer subject, {@link #localPeerId}), and nothing else about it.
  * Endpoints are identified by host id (from the cluster directory) or, when unknown there, by address.
  */
 public class PeerSensor implements Sensor
@@ -78,10 +79,14 @@ public class PeerSensor implements Sensor
         for (Map.Entry<InetAddressAndPort, EndpointState> e : Gossiper.instance.getEndpointStates().entrySet())
         {
             InetAddressAndPort endpoint = e.getKey();
-            if (endpoint.equals(self))
-                continue;
             EndpointState state = e.getValue();
             Subject peer = Subject.peer(peerId(directory, endpoint));
+            if (endpoint.equals(self))
+            {
+                // this node's gossiped load, so it can be compared with its peers; nothing else about itself
+                emit(sink, Signals.PEER_LOAD_BYTES, peer, now, parse(state, ApplicationState.LOAD));
+                continue;
+            }
             emit(sink, Signals.PEER_ALIVE, peer, now, state.isAlive() ? 1 : 0);
             emit(sink, Signals.PEER_LOAD_BYTES, peer, now, parse(state, ApplicationState.LOAD));
             emit(sink, Signals.PEER_SEVERITY, peer, now, parse(state, ApplicationState.SEVERITY));
@@ -98,6 +103,19 @@ public class PeerSensor implements Sensor
         if (proximity instanceof DynamicEndpointSnitch)
             return ((DynamicEndpointSnitch) proximity).getScoresWithPort();
         return Collections.emptyMap();
+    }
+
+    /** The subject detail this node's own load is emitted under, or null if it cannot be determined. */
+    public static String localPeerId()
+    {
+        try
+        {
+            return peerId(ClusterMetadata.current().directory, FBUtilities.getBroadcastAddressAndPort());
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     private static String peerId(Directory directory, InetAddressAndPort endpoint)

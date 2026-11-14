@@ -33,6 +33,7 @@ import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.gms.HeartBeatState;
 import org.apache.cassandra.gms.VersionedValue;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.utils.FBUtilities;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -171,8 +172,9 @@ public class NodeSensorsTest extends CQLTester
         PeerSensor sensor = new PeerSensor();
         RecordingSink sink = new RecordingSink();
         sensor.collect(sink, 1_000);
-        // a single node has no remote peers
-        assertTrue(sink.observations.isEmpty());
+        // a single node has no remote peers; its own load, if gossiped, is the only thing emitted
+        assertTrue(sink.observations.stream().allMatch(o -> o.signal.equals(Signals.PEER_LOAD_BYTES)));
+        assertTrue(sink.observations.size() <= 1);
 
         InetAddressAndPort fake = InetAddressAndPort.getByAddress(InetAddress.getByAddress(new byte[]{ 127, 9, 9, 9 }));
         EndpointState state = new EndpointState(HeartBeatState.empty());
@@ -197,6 +199,31 @@ public class NodeSensorsTest extends CQLTester
         finally
         {
             Gossiper.instance.endpointStateMap.remove(fake);
+        }
+    }
+
+    @Test
+    public void peerSensorEmitsOnlyTheLoadOfThisNode() throws Throwable
+    {
+        InetAddressAndPort self = FBUtilities.getBroadcastAddressAndPort();
+        EndpointState state = new EndpointState(HeartBeatState.empty());
+        state.addApplicationState(ApplicationState.LOAD, VersionedValue.unsafeMakeVersionedValue("777.0", 1));
+        state.addApplicationState(ApplicationState.SEVERITY, VersionedValue.unsafeMakeVersionedValue("0.5", 2));
+        EndpointState previous = Gossiper.instance.endpointStateMap.put(self, state);
+        try
+        {
+            RecordingSink sink = new RecordingSink();
+            new PeerSensor().collect(sink, 1_000);
+            assertEquals(1, sink.observations.size());
+            Subject local = Subject.peer(PeerSensor.localPeerId());
+            assertEquals(777.0, sink.value(Signals.PEER_LOAD_BYTES, local), 0.0);
+        }
+        finally
+        {
+            if (previous == null)
+                Gossiper.instance.endpointStateMap.remove(self);
+            else
+                Gossiper.instance.endpointStateMap.put(self, previous);
         }
     }
 
