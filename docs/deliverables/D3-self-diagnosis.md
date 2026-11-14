@@ -40,7 +40,7 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Implemented, awaiting owner review (2026-11-14). T3.1 to T3.6 are committed on `deliverable/D3-self-diagnosis`.
+Done. Approved by the owner on 2026-11-14. Tagged `D3`.
 
 - Criterion 1: `DetectorsTest`, `NodeDetectorsTest`, `PeerDetectorsTest` (a triggering and a non-triggering fixture for each of the eleven detectors) and `ThresholdDetectorTest`.
 - Criterion 2: `HotPartitionDiagnosisTest` (single-node dtest; the summary names the key as a CQL literal and the evidence carries `key_hex`). The same class shows `tombstone_overload` from tombstone-heavy reads.
