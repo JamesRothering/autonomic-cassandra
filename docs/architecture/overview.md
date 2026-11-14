@@ -659,6 +659,8 @@ Every actuator must satisfy all of the following; T2.6 provides an abstract test
 | Quarantine | governor check 7 | repeated rollbacks disable the policy for hours and raise a diagnosis |
 | One change at a time | governor check 10 | a second action cannot start while one is verifying, so effects are attributable |
 
+**As built in D3.** `ThresholdDetector` counts independent observations: a measurement already counted for a subject changes no counter, so a sensor slower than `analyze_interval` (the partition sampler, gossiped load) needs `for_evaluations` distinct samples, not `for_evaluations` ticks. An open diagnosis clears after `for_evaluations` observations below its clear threshold, or the same number of evaluations with no measurement younger than `max_signal_age_ms`. `degraded_self` is defined as own coordinator p99 above the SLO while no live peer's snitch score is `score_ratio` times the peer median, because no sensor exposes a node's own snitch score. The correlator's rule table is in `RuleCorrelator`; an effect keeps its row in `system_autonomic.diagnoses` with `root_cause` set and is not passed to policies.
+
 ### 7.5 When the autonomic layer is the problem
 
 | Failure | Detection | Response |
@@ -841,7 +843,17 @@ autonomic:
     lease_safety_margin: 60s
   detectors:                          # name -> options; all enabled when the layer is enabled
     hot_partition: { enabled: true, share_of_table_ops: 0.3, for_evaluations: 4 }
+    latency_slo_breach: { enabled: true, slo_multiple: 1.0, for_evaluations: 4 }
+    tombstone_overload: { enabled: true, tombstones_scanned_p99: 1000, failure_threshold: 100000 }
     compaction_backlog: { enabled: true, pending_tasks: 100 }
+    disk_pressure: { enabled: true, used_fraction: 0.85 }   # clear defaults to 95% of raise
+    gc_pressure: { enabled: true, time_fraction: 0.1 }
+    pool_saturation: { enabled: true, pending_tasks: 50 }   # per thread pool
+    node_imbalance: { enabled: true, load_ratio: 1.5, min_peers: 3, min_load_bytes: 1073741824 }
+    degraded_peer: { enabled: true, score_ratio: 2.0, min_peers: 3 }
+    degraded_self: { enabled: true, slo_multiple: 1.0, score_ratio: 2.0, min_peers: 3 }
+    # every detector also accepts clear_threshold (default 80% of its raise value),
+    # for_evaluations (default 4), max_signal_age_ms (default 120000) and max_subjects (default 1000)
   actuators:                          # name -> options; each disabled by default
     compaction_throughput: { enabled: false, min_factor: 0.25, max_factor: 4.0 }
     request_pools: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
