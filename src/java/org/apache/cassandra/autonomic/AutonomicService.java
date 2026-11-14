@@ -94,6 +94,7 @@ import org.apache.cassandra.utils.MBeanWrapper;
 import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
+import static org.apache.cassandra.utils.Clock.Global.nanoTime;
 
 /**
  * Entry point of the autonomic layer. Lifecycle: DISABLED, STARTING, RUNNING, PAUSED (overview 3.6).
@@ -446,7 +447,7 @@ public class AutonomicService implements AutonomicServiceMBean
     @VisibleForTesting
     void monitorTick()
     {
-        long began = System.nanoTime();
+        long began = nanoTime();
         try
         {
             ObservationStore store = this.store;
@@ -471,7 +472,7 @@ public class AutonomicService implements AutonomicServiceMBean
                     continue;
                 lastCollected.put(sensor, now);
                 long begin = clock.getAsLong();
-                long collectBegin = System.nanoTime();
+                long collectBegin = nanoTime();
                 try
                 {
                     sensor.collect(sink, now);
@@ -485,7 +486,7 @@ public class AutonomicService implements AutonomicServiceMBean
                 {
                     AutonomicMetrics m = metrics;
                     if (m != null)
-                        m.sensorCollected(sensor.name(), System.nanoTime() - collectBegin);
+                        m.sensorCollected(sensor.name(), nanoTime() - collectBegin);
                 }
                 long took = clock.getAsLong() - begin;
                 if (took > budget)
@@ -508,7 +509,7 @@ public class AutonomicService implements AutonomicServiceMBean
         {
             AutonomicMetrics m = metrics;
             if (m != null)
-                m.monitorTick(System.nanoTime() - began);
+                m.monitorTick(nanoTime() - began);
         }
     }
 
@@ -516,7 +517,7 @@ public class AutonomicService implements AutonomicServiceMBean
     @VisibleForTesting
     void controlTick()
     {
-        long began = System.nanoTime();
+        long began = nanoTime();
         try
         {
             InMemoryKnowledgeView view = this.view;
@@ -594,7 +595,7 @@ public class AutonomicService implements AutonomicServiceMBean
             drainDiagnosisWrites();
             AutonomicMetrics m = metrics;
             if (m != null)
-                m.controlTick(System.nanoTime() - began, state);
+                m.controlTick(nanoTime() - began, state);
         }
     }
 
