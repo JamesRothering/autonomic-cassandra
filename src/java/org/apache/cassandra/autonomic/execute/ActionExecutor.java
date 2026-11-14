@@ -905,6 +905,12 @@ public class ActionExecutor implements PlanSink
         return written;
     };
 
+    /** How the cluster execution reports transitions it starts itself (takeover of an expired claim). */
+    public Reporter clusterReporter()
+    {
+        return reporter;
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // records: any thread, one writer per action at a time
     // ---------------------------------------------------------------------------------------------------------
@@ -977,15 +983,20 @@ public class ActionExecutor implements PlanSink
             return true;
         try
         {
-            Action a = record.action;
-            String value = "v1|" + record.proposedMillis + '|' + a.scope + '|' + (record.policy == null ? "" : record.policy) + '|' + a.dedupeKey;
-            return store.putState(INFLIGHT_PREFIX + a.id, value, clock.getAsLong());
+            return store.putState(INFLIGHT_PREFIX + record.id(), inflightValue(record), clock.getAsLong());
         }
         catch (Throwable t)
         {
             handle("inflight key of " + record, t);
             return false;
         }
+    }
+
+    /** Value of the {@code inflight/<id>} key: {@code v1|proposedMillis|scope|policy|dedupeKey}. */
+    public static String inflightValue(ActionRecord record)
+    {
+        Action a = record.action;
+        return "v1|" + record.proposedMillis + '|' + a.scope + '|' + (record.policy == null ? "" : record.policy) + '|' + a.dedupeKey;
     }
 
     private boolean deleteInflight(UUID id)

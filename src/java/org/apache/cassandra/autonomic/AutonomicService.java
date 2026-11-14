@@ -46,16 +46,26 @@ import org.apache.cassandra.autonomic.analyze.Correlator;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.coord.Claim;
+import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
+import org.apache.cassandra.autonomic.coord.ClusterLedger;
+import org.apache.cassandra.autonomic.coord.Lane;
+import org.apache.cassandra.autonomic.coord.LedgerClusterGate;
+import org.apache.cassandra.autonomic.coord.Recent;
+import org.apache.cassandra.autonomic.coord.TcmEnvironment;
 import org.apache.cassandra.autonomic.execute.ActionExecutor;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.ActuatorRegistry;
+import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
+import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepScheduler;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.monitor.Sensor;
+import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.ClientRequestSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.CompactionSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
@@ -64,19 +74,21 @@ import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.PeerSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.TableSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
-import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.safety.ClusterGate;
 import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
 import org.apache.cassandra.autonomic.safety.Reasons;
 import org.apache.cassandra.concurrent.ScheduledExecutorPlus;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.ExecutorUtils;
 import org.apache.cassandra.utils.JVMStabilityInspector;
+import org.apache.cassandra.utils.LocalizeString;
 import org.apache.cassandra.utils.MBeanWrapper;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -199,6 +211,14 @@ public class AutonomicService implements AutonomicServiceMBean
     private volatile PlanSink planSink = executorSink;
     private volatile DefaultSafetyGovernor governor;
     private volatile ActionExecutor executor;
+    /**
+     * This node's side of the cluster ledger. It exists while the layer is disabled too: the operator commands and
+     * the ledger views work then. It creates no thread and commits nothing by itself; it is registered as a metadata
+     * listener only while the loops run.
+     */
+    private final ClusterCoordinator coordinator;
+    private final ClusterGate clusterGate;
+    private volatile ClusterActionExecution clusterExecution;
     /** Actions a shutdown of the loops left applied because their rollback did not complete in time. */
     private final Set<UUID> notRestored = ConcurrentHashMap.newKeySet();
     /** Orders writes of the pause flag; see persistPauseFlag. */
@@ -254,6 +274,11 @@ public class AutonomicService implements AutonomicServiceMBean
         this.knowledgeStore = knowledgeStore;
         for (Actuator actuator : productionActuators())
             actuatorRegistry.register(actuator);
+        this.coordinator = new ClusterCoordinator(new TcmEnvironment(clock, AutonomicService::config));
+        this.clusterGate = new LedgerClusterGate(coordinator, name -> {
+            Actuator actuator = actuatorRegistry.get(name);
+            return actuator instanceof ClusterActuator ? ((ClusterActuator) actuator).lane() : null;
+        });
     }
 
     /** The node-local knowledge store; null if this instance does not persist. Usable while the layer is disabled. */
@@ -339,6 +364,7 @@ public class AutonomicService implements AutonomicServiceMBean
         AutonomicConfig config = config();
         store = new ObservationStore(seriesCapacity(config), config.max_series);
         view = new InMemoryKnowledgeView(store, clock);
+        view.setLedgerSource(coordinator::ledger);
         monitorHeartbeat = controlHeartbeat = startedAtMillis;
         detected = Collections.emptyList();
         selfDiagnoses.clear();
@@ -355,11 +381,21 @@ public class AutonomicService implements AutonomicServiceMBean
         // starts the actuator thread; its work is event-driven
         actuator.execute(() -> {});
         DefaultSafetyGovernor gov = new DefaultSafetyGovernor(new GovernorEnvironment(), new GovernorJournal());
+        ExecutorHost host = new ExecutorHost();
+        StepScheduler steps = StepScheduler.of(actuator);
         ActionExecutor ex = new ActionExecutor(clock, AutonomicService::config, gov, knowledgeStore, actuatorRegistry,
-                                               StepScheduler.of(actuator), new ExecutorHost(), () -> view);
+                                               steps, host, () -> view);
+        // cluster-scoped actions: set before recovery, which hands cluster inflight rows to it
+        ClusterActionExecution cx = new ClusterActionExecution(clock, AutonomicService::config, coordinator, actuatorRegistry,
+                                                               steps, knowledgeStore, host, ex::clusterReporter);
+        ex.setClusterExecution(cx);
         view.setActionSource(ex::recentActions);
         governor = gov;
         executor = ex;
+        clusterExecution = cx;
+        coordinator.setPhaseListener(cx);
+        setLedgerListener(true);
+        cx.start();
         // STARTING: recovery runs and the persisted pause flag is read before either loop exists (overview 3.6);
         // if the store cannot be read yet the control thread retries and the layer stays unarmed
         diagnosesSwept = false;
@@ -375,6 +411,24 @@ public class AutonomicService implements AutonomicServiceMBean
         monitor.scheduleWithFixedDelay(this::monitorTick, config.monitor_interval.toMilliseconds(), config.monitor_interval.toMilliseconds(), TimeUnit.MILLISECONDS);
         control.scheduleWithFixedDelay(this::controlTick, config.analyze_interval.toMilliseconds(), config.analyze_interval.toMilliseconds(), TimeUnit.MILLISECONDS);
         logger.info("Autonomic layer started (dry_run={})", config.dry_run);
+    }
+
+    /** Phase changes of the ledger are dispatched only while the loops run (overview 3.6: no listeners when disabled). */
+    private void setLedgerListener(boolean registered)
+    {
+        try
+        {
+            ClusterMetadataService service = ClusterMetadataService.instance();
+            if (service == null)
+                return;
+            service.log().removeListener(coordinator);
+            if (registered)
+                service.log().addListener(coordinator);
+        }
+        catch (Throwable t)
+        {
+            handleThrowable("ledger listener registration", t);
+        }
     }
 
     private static int seriesCapacity(AutonomicConfig config)
@@ -797,8 +851,12 @@ public class AutonomicService implements AutonomicServiceMBean
         policies.add(policy);
     }
 
+    /**
+     * Registration is static (overview 3.4); this is public only so that distributed tests, which cannot reach
+     * package-private members, can register a fake. Must be called before the layer is enabled.
+     */
     @VisibleForTesting
-    void registerActuator(Actuator actuator)
+    public void registerActuator(Actuator actuator)
     {
         actuatorRegistry.register(actuator);
     }
@@ -915,6 +973,12 @@ public class AutonomicService implements AutonomicServiceMBean
                 return;
             state = State.DISABLED;
             armed = false;
+            ClusterActionExecution cx = clusterExecution;
+            if (cx != null)
+                cx.stop();
+            clusterExecution = null;
+            coordinator.setPhaseListener(null);
+            setLedgerListener(false);
             List<ScheduledExecutorPlus> executors = new ArrayList<>();
             executors.add(monitor);
             executors.add(control);
@@ -980,6 +1044,7 @@ public class AutonomicService implements AutonomicServiceMBean
         }
         if (knowledgeStore != null)
             status.put("store_available", String.valueOf(knowledgeStore.isAvailable()));
+        status.put("cluster_actions_enabled", String.valueOf(coordinator.enabled()));
         List<String> disabled = new ArrayList<>();
         for (ComponentHealth h : health.values())
             if (h.disabled)
@@ -1193,7 +1258,11 @@ public class AutonomicService implements AutonomicServiceMBean
             return knowledgeStore == null || knowledgeStore.isAvailable();
         }
 
-        // T2.8 seam: override clusterGate() with the ledger-backed gate
+        @Override
+        public ClusterGate clusterGate()
+        {
+            return clusterGate;
+        }
     }
 
     private final class GovernorJournal implements DefaultSafetyGovernor.Journal
@@ -1367,6 +1436,118 @@ public class AutonomicService implements AutonomicServiceMBean
             for (Diagnosis d : v.activeDiagnoses())
                 if (out.size() < limit)
                     out.add(describe(d, false));
+        return out;
+    }
+
+    // ---- cluster ledger (overview 6.5, 10.2) ----
+
+    @VisibleForTesting
+    ClusterCoordinator coordinator()
+    {
+        return coordinator;
+    }
+
+    @VisibleForTesting
+    ClusterActionExecution clusterExecution()
+    {
+        return clusterExecution;
+    }
+
+    @Override
+    public void enableClusterActions(boolean enabled)
+    {
+        if (coordinator.setEnabled(enabled))
+            logger.warn("Autonomic cluster actions {} by operator command", enabled ? "enabled" : "disabled");
+    }
+
+    @Override
+    public boolean isClusterActionsEnabled()
+    {
+        return coordinator.enabled();
+    }
+
+    @Override
+    public String releaseClaim(String lane)
+    {
+        Lane l;
+        try
+        {
+            l = Lane.valueOf(LocalizeString.toUpperCaseLocalized(lane.trim(), java.util.Locale.ROOT));
+        }
+        catch (RuntimeException e)
+        {
+            throw new IllegalStateException("Unknown lane '" + lane + "'; lanes are " + Arrays.toString(Lane.values()));
+        }
+        UUID released = coordinator.forceRelease(l);
+        logger.warn("Autonomic claim {} on lane {} released by operator command", released, l);
+        return released.toString();
+    }
+
+    @Override
+    public Map<String, String> getClusterStatus()
+    {
+        Map<String, String> status = new LinkedHashMap<>();
+        ClusterMetadata metadata = ClusterMetadata.currentNullable();
+        ClusterLedger ledger = ClusterLedger.of(metadata);
+        long now = clock.getAsLong();
+        status.put("cluster_actions_enabled", String.valueOf(coordinator.enabled()));
+        status.put("ledger_present", String.valueOf(ClusterLedger.present(metadata)));
+        status.put("ledger_format", String.valueOf(ledger.formatVersion));
+        status.put("epoch", metadata == null ? "" : String.valueOf(metadata.epoch.getEpoch()));
+        status.put("node_id", coordinator.self() == null ? "" : String.valueOf(coordinator.self().id()));
+        status.put("preferred_proposer", String.valueOf(coordinator.preferredProposer()));
+        status.put("recent_actions", String.valueOf(ledger.recent.size()));
+        for (Lane lane : Lane.values())
+        {
+            Claim claim = ledger.claims.get(lane);
+            status.put("lane." + lane, claim == null ? "free"
+                                                     : claim.actuator + ' ' + claim.target + " action " + claim.actionId + " owner " + claim.owner.id()
+                                                       + " phase " + claim.phase + " step " + claim.step
+                                                       + (claim.leaseExpiresAtMillis < now ? " lease EXPIRED at " : " lease until ") + claim.leaseExpiresAtMillis);
+        }
+        return status;
+    }
+
+    @Override
+    public List<Map<String, String>> getClusterClaims()
+    {
+        List<Map<String, String>> out = new ArrayList<>();
+        long now = clock.getAsLong();
+        for (Map.Entry<Lane, Claim> e : coordinator.ledger().claims.entrySet())
+        {
+            Claim claim = e.getValue();
+            Map<String, String> m = new LinkedHashMap<>();
+            m.put("lane", e.getKey().name());
+            m.put("action_id", claim.actionId.toString());
+            m.put("actuator", claim.actuator);
+            m.put("target", claim.target);
+            m.put("owner", String.valueOf(claim.owner.id()));
+            m.put("phase", claim.phase);
+            m.put("step", String.valueOf(claim.step));
+            m.put("claimed_at", String.valueOf(claim.claimedAtMillis));
+            m.put("lease_expires_at", String.valueOf(claim.leaseExpiresAtMillis));
+            m.put("expired", String.valueOf(claim.leaseExpiresAtMillis < now));
+            m.put("state", claim.state.toString());
+            out.add(m);
+        }
+        return out;
+    }
+
+    @Override
+    public List<Map<String, String>> getClusterRecentActions()
+    {
+        List<Map<String, String>> out = new ArrayList<>();
+        for (Recent r : coordinator.ledger().recent)
+        {
+            Map<String, String> m = new LinkedHashMap<>();
+            m.put("lane", r.lane.name());
+            m.put("action_id", r.actionId.toString());
+            m.put("actuator", r.actuator);
+            m.put("target", r.target);
+            m.put("final_state", r.finalState);
+            m.put("ended_at", String.valueOf(r.endedAtMillis));
+            out.add(m);
+        }
         return out;
     }
 
