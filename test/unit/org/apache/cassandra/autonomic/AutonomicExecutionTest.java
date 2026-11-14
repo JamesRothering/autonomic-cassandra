@@ -589,14 +589,8 @@ public class AutonomicExecutionTest
         awaitState(a, ActionState.VERIFYING);
         service.reject(b.id.toString());
         assertEquals(Reasons.OPERATOR_REJECTED, store.actions.get(b.id).stateReason);
-        try
-        {
-            service.revert();
-            fail("revert is a stub until T4.1");
-        }
-        catch (UnsupportedOperationException expected)
-        {
-        }
+        // nothing drifted: revert has nothing to restore and leaves the fake knob alone
+        service.revert();
         assertEquals("NODE enabled", service.getActuators().get("knob"));
     }
 

@@ -47,6 +47,7 @@ import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.RuleCorrelator;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.detectors.BaselineDriftDetector;
 import org.apache.cassandra.autonomic.analyze.detectors.Detectors;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
@@ -62,6 +63,8 @@ import org.apache.cassandra.autonomic.execute.ActuatorRegistry;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
 import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepScheduler;
+import org.apache.cassandra.autonomic.execute.actuators.Actuators;
+import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
@@ -158,11 +161,6 @@ public class AutonomicService implements AutonomicServiceMBean
     }
 
     private static List<Policy> productionPolicies()
-    {
-        return Collections.emptyList();
-    }
-
-    private static List<Actuator> productionActuators()
     {
         return Collections.emptyList();
     }
@@ -275,13 +273,36 @@ public class AutonomicService implements AutonomicServiceMBean
         this.nodeJoined = nodeJoined;
         this.draining = draining;
         this.knowledgeStore = knowledgeStore;
-        for (Actuator actuator : productionActuators())
-            actuatorRegistry.register(actuator);
         this.coordinator = new ClusterCoordinator(new TcmEnvironment(clock, AutonomicService::config));
         this.clusterGate = new LedgerClusterGate(coordinator, name -> {
             Actuator actuator = actuatorRegistry.get(name);
             return actuator instanceof ClusterActuator ? ((ClusterActuator) actuator).lane() : null;
         });
+    }
+
+    /** Built when the layer starts, not before: nothing of the actuators exists while the layer is disabled. */
+    private void registerProductionActuators(AutonomicConfig config)
+    {
+        for (Actuator actuator : Actuators.build(config))
+            if (actuatorRegistry.get(actuator.name()) == null)
+                actuatorRegistry.register(actuator);
+    }
+
+    private List<Detector> productionDetectors(AutonomicConfig config)
+    {
+        List<Detector> out = new ArrayList<>(Detectors.build(config));
+        if (Detectors.enabled(config, BaselineDriftDetector.NAME))
+            out.add(new BaselineDriftDetector(this::knobActuators, BaselineDriftDetector.LOOKBACK_MILLIS));
+        return out;
+    }
+
+    private List<KnobActuator> knobActuators()
+    {
+        List<KnobActuator> knobs = new ArrayList<>();
+        for (Actuator a : actuatorRegistry.all())
+            if (a instanceof KnobActuator)
+                knobs.add((KnobActuator) a);
+        return knobs;
     }
 
     /** The node-local knowledge store; null if this instance does not persist. Usable while the layer is disabled. */
@@ -377,7 +398,8 @@ public class AutonomicService implements AutonomicServiceMBean
         lastCollected.clear();
         diagnosisWrites.clear();
         queuedDiagnosisWrites.set(0);
-        builtinDetectors = Detectors.build(config);
+        registerProductionActuators(config);
+        builtinDetectors = productionDetectors(config);
         for (Sensor sensor : sensors)
             safely("start", sensor.name(), sensor::start);
         monitor = executorFactory().scheduled(false, MONITOR_THREAD);
@@ -1380,9 +1402,24 @@ public class AutonomicService implements AutonomicServiceMBean
     @Override
     public void revert()
     {
-        // TODO T4.1: restore every knob managed by a KnobActuator to its cassandra.yaml value (overview 7.3 rule 11).
-        // Stub: no concrete knob actuator exists yet, so there is nothing to revert.
-        throw new UnsupportedOperationException("revert is not available yet: no knob actuator is implemented (T4.1)");
+        // overview 7.3 rule 11; an action in flight on a reverted knob ends SUPERSEDED, as for any operator change
+        List<String> failed = new ArrayList<>();
+        for (KnobActuator knob : knobActuators())
+        {
+            try
+            {
+                if (knob.revert())
+                    logger.info("Autonomic revert: {} restored to {}", knob.name(), KnobActuator.format(knob.configured()));
+            }
+            catch (Throwable t)
+            {
+                JVMStabilityInspector.inspectThrowable(t);
+                logger.warn("Autonomic revert of {} failed", knob.name(), t);
+                failed.add(knob.name());
+            }
+        }
+        if (!failed.isEmpty())
+            throw new IllegalStateException("revert failed for " + failed);
     }
 
     @Override

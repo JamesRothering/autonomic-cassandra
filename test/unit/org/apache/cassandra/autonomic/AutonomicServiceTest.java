@@ -29,6 +29,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.MBeanWrapper;
 
 import static org.junit.Assert.assertEquals;
@@ -69,6 +70,25 @@ public class AutonomicServiceTest
                      .filter(n -> n.startsWith("Autonomic"))
                      .map(n -> n.replaceAll(":\\d+$", ""))
                      .collect(Collectors.toSet());
+    }
+
+    /** Production knob actuators are built when the layer starts; revert restores their configured values. */
+    @Test
+    public void revertRestoresEveryKnobToItsConfiguredValue()
+    {
+        assertTrue(service.getActuators().isEmpty());
+        DatabaseDescriptor.getAutonomicConfig().enabled = true;
+        service.start();
+        assertEquals("NODE disabled", service.getActuators().get("compaction_throughput"));
+        assertTrue(service.getActuators().containsKey("concurrent_compactors"));
+
+        int throughput = StorageService.instance.getCompactionThroughputMbPerSec();
+        int compactors = StorageService.instance.getConcurrentCompactors();
+        StorageService.instance.setCompactionThroughputMbPerSec(throughput + 5);
+        StorageService.instance.setConcurrentCompactors(compactors + 1);
+        service.revert();
+        assertEquals(throughput, StorageService.instance.getCompactionThroughputMbPerSec());
+        assertEquals(compactors, StorageService.instance.getConcurrentCompactors());
     }
 
     @Test
