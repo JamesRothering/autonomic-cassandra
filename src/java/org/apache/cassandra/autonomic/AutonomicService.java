@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.autonomic.analyze.Correlator;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.analyze.RuleCorrelator;
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.detectors.Detectors;
 import org.apache.cassandra.autonomic.coord.Claim;
@@ -168,7 +169,7 @@ public class AutonomicService implements AutonomicServiceMBean
 
     private static Correlator productionCorrelator()
     {
-        return (raw, knowledge) -> raw;
+        return RuleCorrelator.defaults();
     }
 
     /** Failure accounting of one sensor, detector or policy. */
@@ -566,6 +567,9 @@ public class AutonomicService implements AutonomicServiceMBean
                 return;
             for (Diagnosis diagnosis : correlated)
             {
+                // an effect with a root cause is recorded but not acted on: the policies get the root
+                if (diagnosis.rootCause != null)
+                    continue;
                 for (Policy policy : policies)
                 {
                     ComponentHealth h = health("policy", policy.name());

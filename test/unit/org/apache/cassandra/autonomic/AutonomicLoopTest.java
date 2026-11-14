@@ -36,6 +36,7 @@ import org.junit.Test;
 import org.apache.cassandra.autonomic.analyze.Correlator;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.analyze.RuleCorrelator;
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.monitor.InjectedSensor;
@@ -370,6 +371,32 @@ public class AutonomicLoopTest
         assertEquals(0, symptomPolicy.calls.get());
         assertEquals(Collections.singletonList("cause"),
                      service.view().activeDiagnoses().stream().map(d -> d.type).collect(java.util.stream.Collectors.toList()));
+    }
+
+    @Test
+    public void ruleCorrelatorMarksEffectsKeepsThemActiveAndPoliciesGetOnlyTheRoot()
+    {
+        FakeDetector effect = new FakeDetector("latency_slo_breach");
+        FakeDetector cause = new FakeDetector("compaction_backlog");
+        FakePolicy effectPolicy = new FakePolicy("latency_slo_breach");
+        FakePolicy causePolicy = new FakePolicy("compaction_backlog");
+        List<Plan> plans = new ArrayList<>();
+        service.registerDetector(effect);
+        service.registerDetector(cause);
+        service.registerPolicy(effectPolicy);
+        service.registerPolicy(causePolicy);
+        service.setCorrelator(RuleCorrelator.defaults());
+        service.setPlanSink((p, k) -> plans.add(p));
+        startAndArm();
+        assertEquals(1, plans.size());
+        assertEquals(cause.id, plans.get(0).diagnosisId);
+        assertEquals(0, effectPolicy.calls.get());
+        Map<UUID, Diagnosis> active = new java.util.HashMap<>();
+        for (Diagnosis d : service.view().activeDiagnoses())
+            active.put(d.id, d);
+        assertEquals(2, active.size());
+        assertEquals(cause.id, active.get(effect.id).rootCause);
+        assertEquals(null, active.get(cause.id).rootCause);
     }
 
     @Test
