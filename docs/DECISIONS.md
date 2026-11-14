@@ -442,3 +442,17 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Keeping T6.17 inside D6, as ADR-024 had it, was dropped because the owner does not require it and it contains an unsolved design problem (open issue O3) that would delay the demonstrable forward path.
 
 **Consequences.** Until T6.17 exists, a split that verification finds ineffective stays split and raises `layout.split_not_effective`; the operator guide must say so. Nothing in D6 may make a later reverse migration harder: in particular the choice of how forward cleanup removes the base copy must be made with O3 in mind, and T6.9 must record that choice.
+
+## ADR-026: The `repair_overdue` detector reads auto-repair history on the control thread
+
+- **Date:** 2026-11-14
+- **Status:** Proposed (for the D4 owner review)
+- **Deliverable:** D4
+
+**Context.** `repair_overdue` (T4.4) needs the last successful repair time of each host, which exists only in `system_distributed` through `AutoRepairUtils.getAutoRepairHistory`. Overview 3.4 says a detector is a pure function of knowledge with no I/O, and overview 3.5 forbids disk or network I/O on the monitor thread, where sensors run. No component of the design may therefore read this table.
+
+**Decision.** The detector performs the read itself, on the control thread, as a bounded exception. The result is cached for `refresh_ms` (default 30 s), so the read happens at most that often. The read is local and read-only. A failed read leaves no measurement, which the base class treats as a missing signal; it never throws into the loop.
+
+**Alternatives considered.** A sensor on the monitor thread was rejected because it breaks the same rule on a thread whose stall delays every other sensor. A dedicated reader thread was rejected because the layer is specified as three threads and a fourth would be created just for this table. Reading the history in the executor was rejected because detection would then depend on an action having been proposed.
+
+**Consequences.** A slow `system_distributed` read can delay one control tick by the duration of the read. The kill switch, which must act within one control interval (D2 criterion 2), is the property at risk; the D4 review should confirm the exception is acceptable or ask for a different shape. The exception applies to this detector only and must not be copied without a new ADR.

@@ -852,10 +852,19 @@ autonomic:
     node_imbalance: { enabled: true, load_ratio: 1.5, min_peers: 3, min_load_bytes: 1073741824 }
     degraded_peer: { enabled: true, score_ratio: 2.0, min_peers: 3 }
     degraded_self: { enabled: true, slo_multiple: 1.0, score_ratio: 2.0, min_peers: 3 }
+    repair_overdue: { enabled: true, interval_multiple: 2.0, critical_multiple: 4.0, repair_type: FULL, refresh_ms: 30000 }   # see ADR-026
     # every detector also accepts clear_threshold (default 80% of its raise value),
     # for_evaluations (default 4), max_signal_age_ms (default 120000) and max_subjects (default 1000)
   actuators:                          # name -> options; each disabled by default
     compaction_throughput: { enabled: false, min_factor: 0.25, max_factor: 4.0 }
+    concurrent_compactors: { enabled: false }          # envelope: 1 to half the processors, widened to include the configured value
+    stream_throughput: { enabled: false, min_factor: 0.25, max_factor: 2.0 }
+    hint_throttle: { enabled: false, min_factor: 0.25, max_factor: 1.0 }
+    key_cache_capacity: { enabled: false, min_factor: 0.5, max_factor: 2.0 }   # also row_cache_capacity, counter_cache_capacity
+    advertised_severity: { enabled: false }            # envelope 0 to 1, steps of at least 0.1
+    garbage_collect: { enabled: false }                # irreversible; CRITICAL only, one per target per day
+    repair_priority: { enabled: false }                # irreversible cluster action (MAINTENANCE lane)
+    # knob actuators also take baseline_window (default 2m) and observation_window (default 5m)
     request_pools: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
     request_throttle: { enabled: false, min_requests_per_second: 1000 }
     scale_out: { enabled: false }
