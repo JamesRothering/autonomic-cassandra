@@ -20,7 +20,6 @@ package org.apache.cassandra.autonomic.monitor.sensors;
 import java.io.IOException;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -29,6 +28,7 @@ import org.apache.cassandra.autonomic.monitor.Sensor;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.File;
 
 import static org.apache.cassandra.autonomic.monitor.sensors.SensorSupport.emit;
 
@@ -69,7 +69,7 @@ public class DiskSensor implements Sensor
         {
             Set<FileStore> found = new LinkedHashSet<>();
             for (String dir : DatabaseDescriptor.getAllDataFileLocations())
-                found.add(Files.getFileStore(Paths.get(dir)));
+                found.add(Files.getFileStore(new File(dir).toPath()));
             stores = found;
         }
         double total = 0;
