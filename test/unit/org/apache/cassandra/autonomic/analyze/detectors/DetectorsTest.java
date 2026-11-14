@@ -259,11 +259,12 @@ public class DetectorsTest
     public void buildHonoursEnabledFlags()
     {
         AutonomicConfig c = new AutonomicConfig();
-        assertEquals(10, Detectors.build(c).size());
+        assertEquals(11, Detectors.build(c).size());
+        assertTrue(Detectors.build(c).stream().anyMatch(x -> x.name().equals("repair_overdue")));
         c.detectors.get("hot_partition").put("enabled", false);
         c.detectors.put("tombstone_overload", opts("enabled", "false"));
         List<Detector> built = Detectors.build(c);
-        assertEquals(8, built.size());
+        assertEquals(9, built.size());
         assertEquals("latency_slo_breach", built.get(0).name());
     }
 }

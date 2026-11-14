@@ -55,6 +55,8 @@ public final class Detectors
             out.add(DegradedPeerDetector.fromConfig(options(config, DegradedPeerDetector.NAME)));
         if (enabled(config, DegradedSelfDetector.NAME))
             out.add(DegradedSelfDetector.fromConfig(options(config, DegradedSelfDetector.NAME), config.slo));
+        if (enabled(config, RepairOverdueDetector.NAME))
+            out.add(RepairOverdueDetector.fromConfig(options(config, RepairOverdueDetector.NAME)));
         return out;
     }
 

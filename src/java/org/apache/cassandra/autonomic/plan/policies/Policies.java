@@ -48,6 +48,7 @@ public final class Policies
         out.add(new TombstoneOverloadPolicy(actuators, windows));
         out.add(new GcPressurePolicy(actuators, windows));
         out.add(new DegradedSelfPolicy(actuators, windows));
+        out.add(new RepairOverduePolicy(windows));
         return out;
     }
 }

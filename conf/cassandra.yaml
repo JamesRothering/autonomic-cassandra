@@ -3119,6 +3119,9 @@ storage_compatibility_mode: NONE
 #     # every detector also accepts clear_threshold (default 80% of its raise value),
 #     # max_signal_age_ms (default 120000) and max_subjects (default 1000)
 #     baseline_drift: { enabled: true }   # INFO diagnosis while a knob differs from this file
+#     # a host whose last auto-repair finished interval_multiple * min_repair_interval ago (CRITICAL from
+#     # critical_multiple); INFO and no action while auto-repair is disabled; the history is read every refresh_ms
+#     repair_overdue: { enabled: true, interval_multiple: 2.0, critical_multiple: 4.0, repair_type: FULL, refresh_ms: 30000 }
 #   actuators:                     # each is off until enabled; the layer moves a knob only inside its envelope
 #     # every actuator also accepts baseline_window (default 2m) and observation_window (default 5m), the
 #     # windows over which its policy verifies a change; durations or milliseconds
@@ -3135,6 +3138,9 @@ storage_compatibility_mode: NONE
 #     advertised_severity: { enabled: false }   # envelope 0 to 1, steps of at least 0.1
 #     # irreversible: one garbage-collecting compaction of one table, only at severity CRITICAL, once a day per table
 #     garbage_collect: { enabled: false }
+#     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default): puts an overdue host
+#     # first in the auto-repair priority; irreversible, nothing to roll back; only while auto-repair is enabled
+#     repair_priority: { enabled: false }
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

@@ -43,6 +43,7 @@ public final class Actuators
         out.add(CacheCapacityActuator.counter(options(config, CacheCapacityActuator.COUNTER)));
         out.add(AdvertisedSeverityActuator.create());
         out.add(GarbageCollectActuator.create());
+        out.add(RepairPriorityActuator.create());
         return out;
     }
 

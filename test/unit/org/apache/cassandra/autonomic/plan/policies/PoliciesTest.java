@@ -317,13 +317,13 @@ public class PoliciesTest
     }
 
     @Test
-    public void buildCreatesTheFourPoliciesWithConfiguredWindows()
+    public void buildCreatesThePoliciesWithConfiguredWindows()
     {
         AutonomicConfig config = new AutonomicConfig();
         config.actuators.get("compaction_throughput").put("baseline_window", "30s");
         config.actuators.get("compaction_throughput").put("observation_window", 90_000);
         List<Policy> built = Policies.build(config, actuators::get);
-        assertEquals(List.of("compaction_backlog", "tombstone_overload", "gc_pressure", "degraded_self"),
+        assertEquals(List.of("compaction_backlog", "tombstone_overload", "gc_pressure", "degraded_self", "repair_overdue"),
                      built.stream().map(Policy::name).collect(java.util.stream.Collectors.toList()));
         Diagnosis d = diagnosis("compaction_backlog", NODE, Severity.WARN);
         VerifySpec spec = only(built.get(0).plan(d, view), d, "compaction_backlog").verify;
@@ -332,5 +332,25 @@ public class PoliciesTest
         // other actuators keep the defaults
         Diagnosis g = diagnosis("gc_pressure", NODE, Severity.WARN);
         assertEquals(Windows.DEFAULT_OBSERVATION_MILLIS, only(built.get(2).plan(g, view), g, "gc_pressure").verify.observationWindowMillis);
+    }
+
+    @Test
+    public void repairOverdueAsksForTheRepairPriorityOfTheHostOnlyWhileAutoRepairIsEnabled()
+    {
+        RepairOverduePolicy policy = new RepairOverduePolicy(name -> WINDOWS);
+        Subject host = Subject.peer("00000000-0000-0000-0000-00000000000a");
+        Diagnosis d = diagnosis("repair_overdue", host, Severity.CRITICAL, Map.of("repair_type", "FULL", "auto_repair_enabled", "true"));
+        Plan plan = policy.plan(d, view).get();
+        assertEquals(d.id, plan.diagnosisId);
+        Action a = plan.actions.get(0);
+        assertEquals("repair_priority", a.actuator);
+        assertEquals(ActionScope.CLUSTER, a.scope);
+        assertEquals(host, a.target);
+        assertEquals(Map.of("repair_type", "FULL", "host_id", host.detail), a.params);
+        assertEquals("repair.overdue_ratio", a.verify.goal.name);
+        assertTrue(a.id.version() == 1);
+
+        Diagnosis off = diagnosis("repair_overdue", host, Severity.INFO, Map.of("repair_type", "FULL", "auto_repair_enabled", "false"));
+        assertFalse(policy.plan(off, view).isPresent());
     }
 }
