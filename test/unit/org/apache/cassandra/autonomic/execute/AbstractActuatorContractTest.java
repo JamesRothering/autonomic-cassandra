@@ -82,7 +82,9 @@ public abstract class AbstractActuatorContractTest
         assertEquals("a second apply of the same action must change nothing", afterFirst, snapshot());
         assertEquals("a second apply of the same action must return the same undo", first, second);
 
-        // the undo still describes the state before the first apply
+        // the undo still describes the state before the first apply; an irreversible change has nothing to restore
+        if (!actuator().reversible())
+            return;
         actuator().rollback(action, second, context());
         assertEquals(before, snapshot());
     }
@@ -129,6 +131,8 @@ public abstract class AbstractActuatorContractTest
     @Test
     public void rule4_operatorOverrideIsDetectedAndLeftAlone() throws Exception
     {
+        // an irreversible change leaves no live value to compare
+        Assume.assumeTrue(actuator().reversible());
         Action action = newAction();
         Applied applied = actuator().apply(action, context());
         assertFalse("not overridden right after apply", actuator().overridden(action, applied));

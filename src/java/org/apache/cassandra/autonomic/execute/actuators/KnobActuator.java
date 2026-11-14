@@ -205,6 +205,8 @@ public abstract class KnobActuator implements Actuator
         double target = direction == Direction.UP ? current + step : current - step;
         if (integral)
             target = direction == Direction.UP ? Math.ceil(target - EPSILON) : Math.floor(target + EPSILON);
+        else
+            target = Math.round(target * 1000) / 1000.0;
         target = Math.max(min, Math.min(max, target));
         return differs(target, current) ? Optional.of(target) : Optional.empty();
     }

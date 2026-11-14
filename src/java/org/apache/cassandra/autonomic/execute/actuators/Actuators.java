@@ -36,6 +36,13 @@ public final class Actuators
         List<Actuator> out = new ArrayList<>();
         out.add(CompactionThroughputActuator.create(options(config, CompactionThroughputActuator.NAME)));
         out.add(ConcurrentCompactorsActuator.create());
+        out.add(StreamThroughputActuator.create(options(config, StreamThroughputActuator.NAME)));
+        out.add(HintThrottleActuator.create(options(config, HintThrottleActuator.NAME)));
+        out.add(CacheCapacityActuator.key(options(config, CacheCapacityActuator.KEY)));
+        out.add(CacheCapacityActuator.row(options(config, CacheCapacityActuator.ROW)));
+        out.add(CacheCapacityActuator.counter(options(config, CacheCapacityActuator.COUNTER)));
+        out.add(AdvertisedSeverityActuator.create());
+        out.add(GarbageCollectActuator.create());
         return out;
     }
 

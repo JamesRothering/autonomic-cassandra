@@ -26,7 +26,7 @@ import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.utils.TimeUUID;
 
-/** Contract test of one knob over a {@link FakeHandle}; the action moves the knob one step up. */
+/** Contract test of one knob over a {@link FakeHandle}; the action moves the knob one step in {@link #direction()}. */
 public abstract class AbstractKnobContractTest extends AbstractActuatorContractTest
 {
     private long ids;
@@ -34,6 +34,12 @@ public abstract class AbstractKnobContractTest extends AbstractActuatorContractT
     protected abstract KnobActuator knob();
 
     protected abstract FakeHandle handle();
+
+    /** Direction in which the knob has headroom. */
+    protected KnobActuator.Direction direction()
+    {
+        return KnobActuator.Direction.UP;
+    }
 
     @Override
     protected Actuator actuator()
@@ -44,7 +50,7 @@ public abstract class AbstractKnobContractTest extends AbstractActuatorContractT
     @Override
     protected Action newAction()
     {
-        double target = knob().nextTarget(KnobActuator.Direction.UP, 0.25, null).orElseThrow(AssertionError::new);
+        double target = knob().nextTarget(direction(), 0.25, null).orElseThrow(AssertionError::new);
         UUID id = TimeUUID.atUnixMicrosWithLsbAsUUID(1_000_000L + ids++, 42L);
         return new Action(id, knob().name(), ActionScope.NODE, Subject.node(), KnobActuator.params(target, null), null);
     }
