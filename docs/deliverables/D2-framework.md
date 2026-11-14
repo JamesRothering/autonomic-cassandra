@@ -42,7 +42,7 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Implemented, awaiting owner review (2026-11-14). T2.1 to T2.10 are committed on `deliverable/D2-framework`.
+Done. Approved by the owner on 2026-11-14. Tagged `D2`.
 
 - Criterion 1: `AutonomicFrameworkTest#defaultConfigurationHasNothingActive` and `AutonomicLifecycleTest`.
 - Criterion 2: `AutonomicExecutionTest#killRollsBackInFlightActionsAndSurvivesRestart` (unit), and the operator view in `AutonomicFrameworkTest#operatorCommandsAndKill`.
