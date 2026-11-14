@@ -244,7 +244,7 @@ public interface KnowledgeView
     long nowMillis();
 }
 
-/** Analyze. Pure function of knowledge. No side effects, no I/O. */
+/** Analyze. Pure function of knowledge. No side effects, no I/O. A detector that needs a slow read starts a background task in start() and analyzes only its last snapshot (ADR-026). */
 public interface Detector
 {
     String name();

@@ -48,7 +48,7 @@ Implemented, awaiting owner review (2026-11-14). T4.1 to T4.5 are committed on `
 
 Points for the review:
 
-- ADR-026 (Proposed): the `repair_overdue` detector reads `system_distributed` on the control thread, against the no-I/O rule for detectors.
+- ADR-026 (Accepted): the `repair_overdue` detector reads `system_distributed` in a background task on a core executor, and `analyze` only reads the last snapshot. `Detector` gained default `start()` and `stop()` methods for this.
 - `repair_priority` is irreversible: no public API removes a priority entry, so the action commits after reading the entry back and needs a CRITICAL diagnosis under automatic approval. Under the default manual approval that rule is waived.
 - A host with no repair history counts as overdue, so a cluster that never enabled auto-repair gets an INFO diagnosis per host.
 - The rate window is the governor's fixed one hour; the dtest uses `max_cluster_actions_per_hour: 1`.
