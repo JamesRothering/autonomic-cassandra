@@ -342,6 +342,7 @@ Policy (ADR-011): each hook is one statement where possible, placed next to the 
 | H9 | `src/java/org/apache/cassandra/tcm/transformations/CustomTransformation.java` | static initializer, after the `PokeString`/`PokeInt`/`ClearInt` registrations | add `AutonomicTransformations.register();` which calls `registerExtension(name, serializer)` for each of our transformations | 1 line | T2.8 |
 | H10 | `src/java/org/apache/cassandra/tools/nodetool/NodetoolCommand.java` | `subcommands` list | add `Autonomic.class` | 1 line | T2.7 |
 | H11 | `src/java/org/apache/cassandra/tools/NodeProbe.java` | next to `autoRepairProxy` | add `AutonomicServiceMBean autonomicProxy`, its initialization, and an accessor | about 8 lines | T2.7 |
+| H11a | `test/distributed/org/apache/cassandra/distributed/mock/nodetool/InternalNodeProbe.java` | constructor, next to `asyncProfilerProxy` | add `autonomicProxy = AutonomicService.instance;`. Required because in-JVM dtests run nodetool through `InternalNodeProbe`, which sets its proxies without JMX | 1 line + import | T2.7 |
 | H12 | `src/java/org/apache/cassandra/metrics/CassandraMetricsRegistry.java` | metric group list, after `.add(AutoRepairMetrics.TYPE_NAME)` | add `.add(AutonomicMetrics.TYPE_NAME)` | 1 line | T2.9 |
 | H13 | `conf/cassandra.yaml` | after the commented `auto_repair:` block | add a commented `autonomic:` block (section 10.1) | comments only | T2.1 |
 | H14 | `test/unit/org/apache/cassandra/config/DatabaseDescriptorRefTest.java` | allowed class list | add `AutonomicConfig` and its nested classes (the test fails when `DatabaseDescriptor` loads an unlisted class) | few lines | T2.1 |
@@ -349,7 +350,7 @@ Policy (ADR-011): each hook is one statement where possible, placed next to the 
 
 Why H9 must be a static registration and unconditional: the metadata log is replayed in `Startup.initialize(...)`, which `CassandraDaemon.setup()` calls long before H3. `CustomTransformation.Serializer.deserialize` looks up the child serializer by name; a missing registration fails replay. It must also run on nodes where `autonomic.enabled` is false and in offline tools that read the log, because the log is shared by the whole cluster. `AutonomicTransformations.register()` must therefore depend only on serializer classes, not on `AutonomicService` or `DatabaseDescriptor`.
 
-Total: 12 upstream source files, one config file, two upstream test files, plus fixtures. H12 is **unverified** as strictly required (the list was read, the failure mode when a type is missing was not); follow the `AutoRepairMetrics` precedent.
+Total: 12 upstream source files, one config file, three upstream test files, plus fixtures. H12 is **unverified** as strictly required (the list was read, the failure mode when a type is missing was not); follow the `AutoRepairMetrics` precedent.
 
 ### 4.2 Core APIs read (no modification)
 
