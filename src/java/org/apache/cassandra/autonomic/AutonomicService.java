@@ -398,6 +398,8 @@ public class AutonomicService implements AutonomicServiceMBean
         registerProductionActuators(config);
         builtinDetectors = productionDetectors(config);
         builtinPolicies = Policies.build(config, actuatorRegistry::get);
+        for (Detector detector : builtinDetectors)
+            safely("start", detector.name(), detector::start);
         for (Sensor sensor : sensors)
             safely("start", sensor.name(), sensor::start);
         monitor = executorFactory().scheduled(false, MONITOR_THREAD);
@@ -1064,6 +1066,8 @@ public class AutonomicService implements AutonomicServiceMBean
             executor = null;
             governor = null;
             ExecutorUtils.shutdownNowAndWait(timeout, unit, executors);
+            for (Detector detector : builtinDetectors)
+                safely("stop", detector.name(), detector::stop);
             for (Sensor sensor : sensors)
                 safely("stop", sensor.name(), sensor::stop);
             AutonomicMetrics m = metrics;

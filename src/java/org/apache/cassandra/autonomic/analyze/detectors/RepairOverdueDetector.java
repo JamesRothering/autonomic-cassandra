@@ -27,6 +27,9 @@ import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,9 +39,12 @@ import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.repair.autorepair.AutoRepairConfig.RepairType;
 import org.apache.cassandra.repair.autorepair.AutoRepairUtils;
 import org.apache.cassandra.service.AutoRepairService;
+import org.apache.cassandra.utils.Clock;
+import org.apache.cassandra.utils.JVMStabilityInspector;
 
 /**
  * A host whose last successful auto-repair finished more than {@code interval_multiple} (default 2.0) repair
@@ -49,9 +55,11 @@ import org.apache.cassandra.service.AutoRepairService;
  * <p>With auto-repair disabled in configuration the detector still reports, at INFO, with evidence
  * {@code auto_repair_enabled=false}; the policy takes no action then.
  *
- * <p>The measurement is read from {@code system_distributed} through {@link AutoRepairUtils}, not from the signal
- * store, so it is cached for {@code refresh_ms} (default 30000) and the control thread pays one history read at
- * most, plus one per host while some host is not known to be fresh. A failed read leaves the measurement missing.
+ * <p>The measurement comes from {@code system_distributed} through {@link AutoRepairUtils}, a replicated read that can
+ * block for the read timeout. It therefore never runs in {@link #analyze}: {@link #start} schedules a background task
+ * on {@code ScheduledExecutors.optionalTasks} that reads the history into an immutable snapshot, then schedules the
+ * next read {@code refresh_ms} (default 30000) after this one completed, so one read is in flight at most. A failed
+ * read keeps the previous snapshot, which counts as no measurement once older than {@code max_signal_age_ms}.
  */
 public class RepairOverdueDetector extends ThresholdDetector
 {
@@ -147,31 +155,64 @@ public class RepairOverdueDetector extends ThresholdDetector
         }
     }
 
+    /** Runs a task once after a delay; the production one is a shared core executor. */
+    public interface Scheduler
+    {
+        Future<?> schedule(Runnable task, long delayMillis);
+    }
+
+    /** What the last completed read found. */
+    private static final class Snapshot
+    {
+        static final Snapshot NONE = new Snapshot(Long.MIN_VALUE, false, DEFAULT_INTERVAL_MILLIS, Collections.emptyMap());
+
+        final long readAtMillis;
+        final boolean enabled;
+        final long intervalMillis;
+        final Map<UUID, Long> lastFinish;
+
+        Snapshot(long readAtMillis, boolean enabled, long intervalMillis, Map<UUID, Long> lastFinish)
+        {
+            this.readAtMillis = readAtMillis;
+            this.enabled = enabled;
+            this.intervalMillis = intervalMillis;
+            this.lastFinish = lastFinish;
+        }
+    }
+
     private final History history;
     private final RepairType type;
     private final double criticalMultiple;
     private final long refreshMillis;
+    private final Scheduler scheduler;
+    private final LongSupplier clock;
 
-    private long refreshedAtMillis = Long.MIN_VALUE;
-    private boolean enabled;
-    private long intervalMillis = DEFAULT_INTERVAL_MILLIS;
-    private Map<UUID, Long> lastFinish = Collections.emptyMap();
+    private volatile Snapshot snapshot = Snapshot.NONE;
+    private boolean running;
+    private Future<?> pending;
 
-    public RepairOverdueDetector(Settings settings, History history, RepairType type, double criticalMultiple, long refreshMillis)
+    // control thread only, copied from the snapshot at the start of an evaluation
+    private Snapshot current = Snapshot.NONE;
+
+    public RepairOverdueDetector(Settings settings, History history, RepairType type, double criticalMultiple, long refreshMillis,
+                                 Scheduler scheduler, LongSupplier clock)
     {
         super(NAME, NAME, OVERDUE_RATIO, settings);
         this.history = history;
         this.type = type;
         this.criticalMultiple = criticalMultiple;
         this.refreshMillis = refreshMillis;
+        this.scheduler = scheduler;
+        this.clock = clock;
     }
 
     public static RepairOverdueDetector fromConfig(Map<String, Object> options)
     {
-        return fromConfig(options, new Production());
+        return fromConfig(options, new Production(), (task, delay) -> ScheduledExecutors.optionalTasks.schedule(task, delay, TimeUnit.MILLISECONDS),
+                          Clock.Global::currentTimeMillis);
     }
 
-    public static RepairOverdueDetector fromConfig(Map<String, Object> options, History history)
+    public static RepairOverdueDetector fromConfig(Map<String, Object> options, History history, Scheduler scheduler, LongSupplier clock)
     {
         Settings settings = Settings.fromConfig(options, MULTIPLE_KEY, DEFAULT_MULTIPLE);
         RepairType type = RepairType.FULL;
@@ -193,7 +234,7 @@ public class RepairOverdueDetector extends ThresholdDetector
         {
             logger.warn("Invalid {} options {}: {}; using defaults", NAME, options, e.getMessage());
         }
-        return new RepairOverdueDetector(settings, history, type, Math.max(critical, settings.raise), Math.max(0, refresh));
+        return new RepairOverdueDetector(settings, history, type, Math.max(critical, settings.raise), Math.max(0, refresh), scheduler, clock);
     }
 
     @Override
@@ -202,33 +243,84 @@ public class RepairOverdueDetector extends ThresholdDetector
         return Collections.emptySet();
     }
 
+    /** Starts the background reads, the first one at once. */
+    @Override
+    public synchronized void start()
+    {
+        if (running)
+            return;
+        running = true;
+        scheduleRead(0);
+    }
+
+    /** Cancels the pending read and schedules nothing further; a read already running finishes and is dropped. */
+    @Override
+    public synchronized void stop()
+    {
+        running = false;
+        if (pending != null)
+            pending.cancel(false);
+        pending = null;
+        snapshot = Snapshot.NONE;
+    }
+
+    private synchronized void scheduleRead(long delayMillis)
+    {
+        if (!running)
+            return;
+        try
+        {
+            pending = scheduler.schedule(this::read, delayMillis);
+        }
+        catch (RuntimeException e)
+        {
+            // the executor is shutting down
+            logger.debug("Detector {} could not schedule a history read", NAME, e);
+        }
+    }
+
+    /** Background thread. Never throws; reschedules after it completed, so at most one read is in flight. */
+    private void read()
+    {
+        try
+        {
+            boolean enabled = history.enabled(type);
+            long interval = history.intervalMillis(type);
+            if (interval <= 0)
+                interval = DEFAULT_INTERVAL_MILLIS;
+            long now = clock.getAsLong();
+            Map<UUID, Long> finished = history.lastFinishMillis(type, now - (long) (settings().raise * interval));
+            synchronized (this)
+            {
+                if (running)
+                    snapshot = new Snapshot(clock.getAsLong(), enabled, interval, Map.copyOf(finished));
+            }
+        }
+        catch (Throwable t)
+        {
+            if (t instanceof Error)
+                JVMStabilityInspector.inspectThrowable(t);
+            logger.debug("Detector {} could not read the {} repair history", NAME, type, t);
+        }
+        finally
+        {
+            scheduleRead(refreshMillis);
+        }
+    }
+
+    /** Uses the last completed read, unless it is older than {@code max_signal_age_ms}. No I/O. */
     @Override
     protected void beginEvaluation(KnowledgeView knowledge)
     {
-        long now = knowledge.nowMillis();
-        if (refreshedAtMillis != Long.MIN_VALUE && now - refreshedAtMillis < refreshMillis)
-            return;
-        refreshedAtMillis = now;
-        try
-        {
-            enabled = history.enabled(type);
-            intervalMillis = history.intervalMillis(type);
-            if (intervalMillis <= 0)
-                intervalMillis = DEFAULT_INTERVAL_MILLIS;
-            lastFinish = history.lastFinishMillis(type, now - (long) (settings().raise * intervalMillis));
-        }
-        catch (Exception | LinkageError e)
-        {
-            logger.debug("Detector {} could not read the {} repair history", NAME, type, e);
-            lastFinish = Collections.emptyMap();
-        }
+        Snapshot s = snapshot;
+        current = knowledge.nowMillis() - s.readAtMillis > settings().maxSignalAgeMillis ? Snapshot.NONE : s;
     }
 
     @Override
     protected Collection<Subject> subjects(KnowledgeView knowledge)
     {
         Set<Subject> out = new LinkedHashSet<>();
-        for (UUID host : lastFinish.keySet())
+        for (UUID host : current.lastFinish.keySet())
             out.add(Subject.peer(host.toString()));
         return out;
     }
@@ -236,16 +328,17 @@ public class RepairOverdueDetector extends ThresholdDetector
     @Override
     protected OptionalDouble measure(Subject subject, KnowledgeView knowledge)
     {
-        Long finished = lastFinish.get(UUID.fromString(subject.detail));
+        Long finished = current.lastFinish.get(UUID.fromString(subject.detail));
         if (finished == null)
             return OptionalDouble.empty();
-        return OptionalDouble.of(Math.max(0, knowledge.nowMillis() - finished) / (double) intervalMillis);
+        observedAt(current.readAtMillis);
+        return OptionalDouble.of(Math.max(0, knowledge.nowMillis() - finished) / (double) current.intervalMillis);
     }
 
     @Override
     protected Severity severity(Subject subject, double value, KnowledgeView knowledge)
     {
-        if (!enabled)
+        if (!current.enabled)
             return Severity.INFO;
         return value >= criticalMultiple ? Severity.CRITICAL : Severity.WARN;
     }
@@ -254,7 +347,7 @@ public class RepairOverdueDetector extends ThresholdDetector
     protected String summary(Subject subject, double value)
     {
         return String.format(Locale.ROOT, "Host %s last finished a %s repair %.1f repair intervals ago%s", subject.detail, type, value,
-                             enabled ? "" : "; auto-repair is disabled");
+                             current.enabled ? "" : "; auto-repair is disabled");
     }
 
     @Override
@@ -262,9 +355,9 @@ public class RepairOverdueDetector extends ThresholdDetector
     {
         evidence.put(OVERDUE_RATIO.name, format(value) + " (raise " + format(settings().raise) + ", clear " + format(settings().clear) + ')');
         evidence.put(EVIDENCE_TYPE, type.name());
-        evidence.put(EVIDENCE_ENABLED, Boolean.toString(enabled));
-        evidence.put("repair_interval_ms", Long.toString(intervalMillis));
-        Long finished = lastFinish.get(UUID.fromString(subject.detail));
+        evidence.put(EVIDENCE_ENABLED, Boolean.toString(current.enabled));
+        evidence.put("repair_interval_ms", Long.toString(current.intervalMillis));
+        Long finished = current.lastFinish.get(UUID.fromString(subject.detail));
         evidence.put("last_repair_finish_ms", finished == null || finished == 0 ? "never" : Long.toString(finished));
     }
 }

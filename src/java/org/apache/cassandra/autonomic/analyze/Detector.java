@@ -23,7 +23,7 @@ import java.util.Set;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 
-/** Analyze. Pure function of knowledge. No side effects, no I/O. */
+/** Analyze. Pure function of knowledge. No side effects, no I/O: state from elsewhere is read in the background. */
 public interface Detector
 {
     String name();
@@ -32,4 +32,14 @@ public interface Detector
 
     /** Returns the conditions currently true, after hysteresis. */
     List<Diagnosis> analyze(KnowledgeView knowledge);
+
+    /** Called when the layer starts, before the first {@link #analyze}; a detector that reads state in the background starts here. */
+    default void start()
+    {
+    }
+
+    /** Called when the layer stops; must cancel anything {@link #start} scheduled. */
+    default void stop()
+    {
+    }
 }

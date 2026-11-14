@@ -230,6 +230,12 @@ public abstract class ThresholdDetector implements Detector
         return latestWithin(signal, subject, knowledge);
     }
 
+    /** Records the observation time of a measurement that does not come from the signal store. */
+    protected final void observedAt(long atMillis)
+    {
+        observedAt = Math.max(observedAt, atMillis);
+    }
+
     /** The newest point of {@code signal} younger than {@code max_signal_age_ms}, if any. */
     protected final OptionalDouble latestWithin(SignalId signal, Subject subject, KnowledgeView knowledge)
     {
