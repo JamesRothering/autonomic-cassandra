@@ -117,8 +117,14 @@ public abstract class ThresholdDetector implements Detector
          */
         public static Settings fromConfig(Map<String, Object> options, String raiseKey, double defaultRaise)
         {
+            return fromConfig(options, raiseKey, defaultRaise, DEFAULT_CLEAR_FRACTION);
+        }
+
+        /** As above, with a detector-specific default clear threshold as a fraction of raise. */
+        public static Settings fromConfig(Map<String, Object> options, String raiseKey, double defaultRaise, double defaultClearFraction)
+        {
             double raise = number(options, raiseKey, defaultRaise);
-            double clear = number(options, CLEAR_THRESHOLD, raise * DEFAULT_CLEAR_FRACTION);
+            double clear = number(options, CLEAR_THRESHOLD, raise * defaultClearFraction);
             int n = (int) number(options, FOR_EVALUATIONS, DEFAULT_FOR_EVALUATIONS);
             long age = (long) number(options, MAX_SIGNAL_AGE_MILLIS, DEFAULT_MAX_SIGNAL_AGE_MILLIS);
             int max = (int) number(options, MAX_SUBJECTS, DEFAULT_MAX_SUBJECTS);
@@ -129,7 +135,8 @@ public abstract class ThresholdDetector implements Detector
             catch (IllegalArgumentException e)
             {
                 logger.warn("Invalid autonomic detector options {}: {}; using defaults", options, e.getMessage());
-                return above(defaultRaise);
+                return new Settings(defaultRaise, defaultRaise * defaultClearFraction, DEFAULT_FOR_EVALUATIONS, true,
+                                    DEFAULT_MAX_SIGNAL_AGE_MILLIS, DEFAULT_MAX_SUBJECTS);
             }
         }
 

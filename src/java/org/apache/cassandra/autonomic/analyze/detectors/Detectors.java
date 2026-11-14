@@ -41,6 +41,14 @@ public final class Detectors
             out.add(LatencySloBreachDetector.fromConfig(options(config, LatencySloBreachDetector.NAME), config.slo));
         if (enabled(config, TombstoneOverloadDetector.NAME))
             out.add(TombstoneOverloadDetector.fromConfig(options(config, TombstoneOverloadDetector.NAME)));
+        if (enabled(config, CompactionBacklogDetector.NAME))
+            out.add(CompactionBacklogDetector.fromConfig(options(config, CompactionBacklogDetector.NAME)));
+        if (enabled(config, DiskPressureDetector.NAME))
+            out.add(DiskPressureDetector.fromConfig(options(config, DiskPressureDetector.NAME)));
+        if (enabled(config, GcPressureDetector.NAME))
+            out.add(GcPressureDetector.fromConfig(options(config, GcPressureDetector.NAME)));
+        if (enabled(config, PoolSaturationDetector.NAME))
+            out.add(PoolSaturationDetector.fromConfig(options(config, PoolSaturationDetector.NAME)));
         return out;
     }
 

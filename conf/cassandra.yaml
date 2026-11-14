@@ -3107,6 +3107,10 @@ storage_compatibility_mode: NONE
 #     hot_partition: { enabled: true, share_of_table_ops: 0.3, for_evaluations: 4 }
 #     latency_slo_breach: { enabled: true, slo_multiple: 1.0, for_evaluations: 4 }
 #     tombstone_overload: { enabled: true, tombstones_scanned_p99: 1000, failure_threshold: 100000 }
+#     compaction_backlog: { enabled: true, pending_tasks: 100 }
+#     disk_pressure: { enabled: true, used_fraction: 0.85 }   # clear defaults to 95% of raise
+#     gc_pressure: { enabled: true, time_fraction: 0.1 }
+#     pool_saturation: { enabled: true, pending_tasks: 50 }   # per thread pool
 #     # every detector also accepts clear_threshold (default 80% of its raise value),
 #     # max_signal_age_ms (default 120000) and max_subjects (default 1000)
 
