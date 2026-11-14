@@ -3111,6 +3111,11 @@ storage_compatibility_mode: NONE
 #     disk_pressure: { enabled: true, used_fraction: 0.85 }   # clear defaults to 95% of raise
 #     gc_pressure: { enabled: true, time_fraction: 0.1 }
 #     pool_saturation: { enabled: true, pending_tasks: 50 }   # per thread pool
+#     # The next three compare peers using gossip and dynamic snitch data, which can be seconds to a minute old
+#     # (gossiped load refreshes about once a minute); treat them as slow, approximate signals.
+#     node_imbalance: { enabled: true, load_ratio: 1.5, min_peers: 3, min_load_bytes: 1073741824 }
+#     degraded_peer: { enabled: true, score_ratio: 2.0, min_peers: 3 }
+#     degraded_self: { enabled: true, slo_multiple: 1.0, score_ratio: 2.0, min_peers: 3 }
 #     # every detector also accepts clear_threshold (default 80% of its raise value),
 #     # max_signal_age_ms (default 120000) and max_subjects (default 1000)
 

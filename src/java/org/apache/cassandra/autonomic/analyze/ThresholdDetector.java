@@ -213,6 +213,11 @@ public abstract class ThresholdDetector implements Detector
         return states.size();
     }
 
+    /** Called once at the start of each evaluation, before any {@link #measure}; for per-evaluation aggregates. */
+    protected void beginEvaluation(KnowledgeView knowledge)
+    {
+    }
+
     /** One sentence for operators. */
     protected abstract String summary(Subject subject, double value);
 
@@ -277,6 +282,14 @@ public abstract class ThresholdDetector implements Detector
     public final List<Diagnosis> analyze(KnowledgeView knowledge)
     {
         long now = knowledge.nowMillis();
+        try
+        {
+            beginEvaluation(knowledge);
+        }
+        catch (RuntimeException e)
+        {
+            logger.debug("Detector {} failed to prepare an evaluation", name, e);
+        }
         Set<Subject> candidates = new LinkedHashSet<>(states.keySet());
         try
         {

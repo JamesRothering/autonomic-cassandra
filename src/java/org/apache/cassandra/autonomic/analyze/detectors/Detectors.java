@@ -49,6 +49,12 @@ public final class Detectors
             out.add(GcPressureDetector.fromConfig(options(config, GcPressureDetector.NAME)));
         if (enabled(config, PoolSaturationDetector.NAME))
             out.add(PoolSaturationDetector.fromConfig(options(config, PoolSaturationDetector.NAME)));
+        if (enabled(config, NodeImbalanceDetector.NAME))
+            out.add(NodeImbalanceDetector.fromConfig(options(config, NodeImbalanceDetector.NAME)));
+        if (enabled(config, DegradedPeerDetector.NAME))
+            out.add(DegradedPeerDetector.fromConfig(options(config, DegradedPeerDetector.NAME)));
+        if (enabled(config, DegradedSelfDetector.NAME))
+            out.add(DegradedSelfDetector.fromConfig(options(config, DegradedSelfDetector.NAME), config.slo));
         return out;
     }
 
