@@ -40,7 +40,7 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Implemented, awaiting owner review (2026-11-14). T4.1 to T4.5 are committed on `deliverable/D4-self-healing`.
+Done. Approved by the owner on 2026-11-14. Tagged `D4`.
 
 - Criterion 1: the per-actuator contract tests (`KnobActuatorTest` and one test class per actuator); `ActuatorContractCoverageTest` fails when a built actuator has no contract test. `garbage_collect` and `repair_priority` are irreversible by design and have no rollback.
 - Criterion 2: `SelfHealingRollbackTest.aRegressingChangeIsRolledBackAndAudited` asserts the `action_events` rows (APPLYING, VERIFYING, ROLLING_BACK, ROLLED_BACK) and the output of `nodetool autonomic events`.
