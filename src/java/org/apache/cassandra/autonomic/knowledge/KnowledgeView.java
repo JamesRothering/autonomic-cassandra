@@ -21,6 +21,7 @@ import java.util.Collection;
 import java.util.OptionalDouble;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.coord.ClusterLedger;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
@@ -40,7 +41,9 @@ public interface KnowledgeView
     /** Local actions. */
     Collection<ActionRecord> recentActions(long lookbackMillis);
 
-    // TODO T2.8: ClusterLedger ledger(), from ClusterMetadata.current(); EMPTY if absent
+    /** The cluster ledger in the metadata this node has; {@code ClusterLedger.EMPTY} if absent. */
+    ClusterLedger ledger();
+
 
     long nowMillis();
 }

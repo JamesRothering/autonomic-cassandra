@@ -65,6 +65,19 @@ public final class Reasons
     public static final String OVERRIDDEN = "OVERRIDDEN";
     public static final String IRREVERSIBLE = "IRREVERSIBLE";
 
+    // cluster-scoped actions
+    /** The claim was not won: the lane is taken, a cooldown applies, or the commit did not go through. */
+    public static final String CLAIM_REJECTED = "CLAIM_REJECTED";
+    /** The claim expired, was taken over or was force-released; the action stopped without further side effects. */
+    public static final String CLAIM_LOST = "CLAIM_LOST";
+    /** Terminal COMMITTED of an action stopped past its commit point with cleanup outstanding (FC5). */
+    public static final String COMMITTED_CLEANUP_PENDING = "COMMITTED_CLEANUP_PENDING";
+    /** Rolled back by the recovery of a claim taken over from another node. */
+    public static final String RECOVERY = "RECOVERY";
+    /** Rolled back by the cluster actuator's own verification. */
+    public static final String ACTUATOR_ROLLBACK = "ACTUATOR_ROLLBACK";
+    /** Abort or recovery of a cluster action kept throwing; its claim is left to expire. */
+    public static final String RECOVERY_FAILED = "RECOVERY_FAILED";
     // self-pause reasons
     public static final String CIRCUIT_BREAKER = "CIRCUIT_BREAKER";
     public static final String ACTION_FAILED = "ACTION_FAILED";

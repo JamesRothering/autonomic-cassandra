@@ -30,6 +30,9 @@ import com.google.common.annotations.VisibleForTesting;
 
 import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.coord.Claim;
+import org.apache.cassandra.autonomic.coord.ClusterLedger;
+import org.apache.cassandra.autonomic.coord.Lane;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore.StoredDiagnosis;
 import org.apache.cassandra.db.marshal.BooleanType;
@@ -47,7 +50,9 @@ import org.apache.cassandra.db.virtual.VirtualTable;
 import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.SimpleDateSerializer;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.utils.Clock;
+import org.apache.cassandra.utils.TimeUUID;
 
 /**
  * Read-only virtual tables over the autonomic layer (overview 5.3). Each table is local to the queried node and
@@ -337,8 +342,8 @@ public final class AutonomicVirtualTables
     }
 
     /**
-     * Cluster-wide action ledger (overview 5.3). Always empty until T2.8 writes the lane rows.
-     * TODO T2.8: rows come from ClusterMetadata (lanes and recent entries).
+     * Claims of the cluster-wide action ledger (overview 5.3), one row per claimed lane, read from the cluster
+     * metadata of this node whether or not the layer is enabled here. Empty while no lane is claimed.
      */
     static final class ClusterLedgerTable extends AbstractVirtualTable
     {
@@ -365,7 +370,21 @@ public final class AutonomicVirtualTables
         @Override
         public DataSet data()
         {
-            return new SimpleDataSet(metadata());
+            SimpleDataSet result = new SimpleDataSet(metadata());
+            for (Map.Entry<Lane, Claim> e : ClusterLedger.of(ClusterMetadata.currentNullable()).claims.entrySet())
+            {
+                Claim claim = e.getValue();
+                result.row(e.getKey().name())
+                      .column("action_id", claim.actionId.version() == 1 ? TimeUUID.fromUuid(claim.actionId) : null)
+                      .column("actuator", claim.actuator)
+                      .column("target", claim.target)
+                      .column("owner", claim.owner.toUUID())
+                      .column("phase", claim.phase)
+                      .column("step", String.valueOf(claim.step))
+                      .column("claimed_at", new Date(claim.claimedAtMillis))
+                      .column("lease_expires_at", new Date(claim.leaseExpiresAtMillis));
+            }
+            return result;
         }
     }
 }

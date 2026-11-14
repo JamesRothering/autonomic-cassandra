@@ -21,9 +21,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Operator interface of the autonomic layer (overview 10.2). Cluster operations ({@code enableClusterActions},
- * {@code releaseClaim}) are added with the cluster ledger. Records are returned as maps of strings so that any JMX
- * client can read them.
+ * Operator interface of the autonomic layer (overview 10.2). Records are returned as maps of strings so that any
+ * JMX client can read them.
  */
 public interface AutonomicServiceMBean
 {
@@ -79,4 +78,36 @@ public interface AutonomicServiceMBean
 
     /** Diagnoses of the last day on this node, open and cleared. */
     List<Map<String, String>> getDiagnosisHistory(int limit);
+
+    /**
+     * {@code cluster enable | disable}: commits the gate for cluster-scoped actions to the cluster metadata log.
+     * Enabling is the operator's attestation that every node runs this fork: from then on the log contains entries
+     * that stock Cassandra cannot read. It is refused while nodes run different versions. Disabling stops new
+     * claims; claims in flight are not touched, and the log stays unreadable for stock nodes. Works whether or not
+     * the layer is enabled on this node.
+     *
+     * @throws IllegalStateException if refused or if the commit did not go through
+     */
+    void enableClusterActions(boolean enabled);
+
+    /** True if cluster-scoped actions are enabled in the cluster metadata this node has. */
+    boolean isClusterActionsEnabled();
+
+    /**
+     * {@code cluster release <lane>}: forcibly removes the claim on a lane (TOPOLOGY, SCHEMA_LAYOUT or MAINTENANCE)
+     * and returns the id of the action that held it. Nothing is undone; the owner, if it still runs, stops with
+     * CLAIM_LOST.
+     *
+     * @throws IllegalStateException if the lane is free or if the commit did not go through
+     */
+    String releaseClaim(String lane);
+
+    /** {@code cluster status}: the gate, this node's role, and one {@code lane.<LANE>} entry per lane. */
+    Map<String, String> getClusterStatus();
+
+    /** Claims in the cluster ledger, one map per claimed lane. */
+    List<Map<String, String>> getClusterClaims();
+
+    /** Most recently released claims of the cluster ledger, newest first. */
+    List<Map<String, String>> getClusterRecentActions();
 }

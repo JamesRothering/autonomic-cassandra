@@ -23,8 +23,10 @@ import java.util.List;
 import java.util.OptionalDouble;
 import java.util.function.LongFunction;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.coord.ClusterLedger;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
@@ -36,6 +38,7 @@ public class InMemoryKnowledgeView implements KnowledgeView
     private final LongSupplier clock;
     private volatile List<Diagnosis> activeDiagnoses = Collections.emptyList();
     private volatile LongFunction<Collection<ActionRecord>> actionSource = lookback -> Collections.emptyList();
+    private volatile Supplier<ClusterLedger> ledgerSource = () -> ClusterLedger.EMPTY;
 
     public InMemoryKnowledgeView(ObservationStore store, LongSupplier clock)
     {
@@ -88,6 +91,18 @@ public class InMemoryKnowledgeView implements KnowledgeView
     public Collection<ActionRecord> recentActions(long lookbackMillis)
     {
         return actionSource.apply(lookbackMillis);
+    }
+
+    /** Source of {@link #ledger}: the ledger in the cluster metadata of this node. */
+    public void setLedgerSource(Supplier<ClusterLedger> source)
+    {
+        ledgerSource = source;
+    }
+
+    @Override
+    public ClusterLedger ledger()
+    {
+        return ledgerSource.get();
     }
 
     @Override

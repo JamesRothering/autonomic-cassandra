@@ -47,6 +47,7 @@ public class CustomTransformation implements Transformation
         registerExtension(PokeString.NAME, new PokeString.TransformSerializer());
         registerExtension(PokeInt.NAME, new PokeInt.TransformSerializer());
         registerExtension(ClearInt.NAME, new ClearInt.TransformSerializer());
+        org.apache.cassandra.autonomic.coord.AutonomicTransformations.register();
     }
 
     public CustomTransformation(String extension, Transformation child)

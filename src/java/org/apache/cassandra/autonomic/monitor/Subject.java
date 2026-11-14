@@ -94,6 +94,52 @@ public final class Subject
         }
     }
 
+    /** Inverse of {@link #asString()}; a string that is not in that form becomes a CLUSTER subject with it as detail. */
+    public static Subject parse(String s)
+    {
+        try
+        {
+            int colon = s.indexOf(':');
+            Kind kind = Kind.valueOf(colon < 0 ? s : s.substring(0, colon));
+            String rest = colon < 0 ? null : s.substring(colon + 1);
+            switch (kind)
+            {
+                case KEYSPACE:
+                    if (rest != null)
+                        return keyspace(rest);
+                    break;
+                case TABLE:
+                case PARTITION:
+                {
+                    int dot = rest == null ? -1 : rest.indexOf('.');
+                    if (dot < 0)
+                        break;
+                    String ks = rest.substring(0, dot);
+                    String tail = rest.substring(dot + 1);
+                    if (kind == Kind.TABLE)
+                        return table(ks, tail);
+                    int sep = tail.indexOf(':');
+                    if (sep >= 0)
+                        return partition(ks, tail.substring(0, sep), tail.substring(sep + 1));
+                    break;
+                }
+                case THREAD_POOL:
+                case PEER:
+                    if (rest != null)
+                        return new Subject(kind, null, null, rest);
+                    break;
+                default:
+                    if (rest == null)
+                        return new Subject(kind, null, null, null);
+            }
+        }
+        catch (RuntimeException e)
+        {
+            // not a subject string
+        }
+        return new Subject(Kind.CLUSTER, null, null, s);
+    }
+
     @Override
     public boolean equals(Object o)
     {
