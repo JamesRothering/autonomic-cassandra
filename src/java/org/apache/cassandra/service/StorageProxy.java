@@ -57,6 +57,7 @@ import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
 
+import org.apache.cassandra.autonomic.layout.LayoutWrites;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.concurrent.DebuggableTask.RunnableDebuggableTask;
@@ -377,6 +378,7 @@ public class StorageProxy implements StorageProxyMBean
                                   Dispatcher.RequestTime requestTime)
     throws UnavailableException, IsBootstrappingException, RequestFailureException, RequestTimeoutException, InvalidRequestException, CasWriteUnknownResultException
     {
+        LayoutWrites.checkCas(keyspaceName, cfName, key);
         if (DatabaseDescriptor.getPartitionDenylistEnabled() && DatabaseDescriptor.getDenylistWritesEnabled() && !partitionDenylist.isKeyPermitted(keyspaceName, cfName, key.getKey()))
         {
             denylistMetrics.incrementWritesRejected();
@@ -1250,6 +1252,7 @@ public class StorageProxy implements StorageProxyMBean
             }
         }
 
+        if (LayoutWrites.route(mutations, consistencyLevel, mutateAtomically, requestTime, preserveTimestamps)) return;
         List<Mutation> augmented = TriggerExecutor.instance.execute(mutations);
 
         String keyspaceName = mutations.iterator().next().getKeyspaceName();
@@ -3068,6 +3071,7 @@ public class StorageProxy implements StorageProxyMBean
      */
     public static void truncateBlocking(String keyspace, String cfname) throws UnavailableException, TimeoutException
     {
+        LayoutWrites.beforeTruncate(keyspace, cfname);
         logger.debug("Starting a blocking truncate operation on keyspace {}, CF {}", keyspace, cfname);
         if (isAnyStorageHostDown())
         {
