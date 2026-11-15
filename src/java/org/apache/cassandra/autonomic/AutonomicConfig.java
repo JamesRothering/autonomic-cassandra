@@ -108,6 +108,12 @@ public class AutonomicConfig
         public Map<String, String> parameters = new LinkedHashMap<>();
         public DurationSpec.IntSecondsBound provision_timeout = new DurationSpec.IntSecondsBound("15m");
         public DurationSpec.IntSecondsBound join_timeout = new DurationSpec.IntSecondsBound("6h");
+        /** How long after the join the goal signal is compared with its baseline. */
+        public DurationSpec.IntSecondsBound verify_window = new DurationSpec.IntSecondsBound("1h");
+        /** Bound of one call of the provider; a call that overruns is interrupted. */
+        public DurationSpec.IntMillisecondsBound provider_call_timeout = new DurationSpec.IntMillisecondsBound("10s");
+        /** How often the provider's status and the directory are read while an action waits. */
+        public DurationSpec.IntMillisecondsBound poll_interval = new DurationSpec.IntMillisecondsBound("15s");
     }
 
     private static Map<String, Map<String, Object>> defaultDetectors()

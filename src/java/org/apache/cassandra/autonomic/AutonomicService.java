@@ -48,6 +48,7 @@ import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.RuleCorrelator;
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.detectors.BaselineDriftDetector;
+import org.apache.cassandra.autonomic.analyze.detectors.CapacityExhaustedDetector;
 import org.apache.cassandra.autonomic.analyze.detectors.Detectors;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
@@ -65,6 +66,7 @@ import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepScheduler;
 import org.apache.cassandra.autonomic.execute.actuators.Actuators;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
+import org.apache.cassandra.autonomic.execute.actuators.ScaleOutActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
@@ -84,6 +86,7 @@ import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.plan.policies.LoadSpikePolicy;
 import org.apache.cassandra.autonomic.plan.policies.Policies;
 import org.apache.cassandra.autonomic.safety.ClusterGate;
 import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
@@ -281,7 +284,7 @@ public class AutonomicService implements AutonomicServiceMBean
     /** Built when the layer starts, not before: nothing of the actuators exists while the layer is disabled. */
     private void registerProductionActuators(AutonomicConfig config)
     {
-        for (Actuator actuator : Actuators.build(config))
+        for (Actuator actuator : Actuators.build(config, () -> view))
             if (actuatorRegistry.get(actuator.name()) == null)
                 actuatorRegistry.register(actuator);
     }
@@ -291,7 +294,19 @@ public class AutonomicService implements AutonomicServiceMBean
         List<Detector> out = new ArrayList<>(Detectors.build(config));
         if (Detectors.enabled(config, BaselineDriftDetector.NAME))
             out.add(new BaselineDriftDetector(this::knobActuators, BaselineDriftDetector.LOOKBACK_MILLIS));
+        if (Detectors.enabled(config, CapacityExhaustedDetector.NAME))
+            out.add(CapacityExhaustedDetector.fromConfig(config.detectors == null ? null : config.detectors.get(CapacityExhaustedDetector.NAME),
+                                                         this::inNodeExhausted));
         return out;
+    }
+
+    /** What {@code capacity_exhausted} asks of the load spike ladder; the policies are built after the detectors. */
+    private Optional<String> inNodeExhausted(Diagnosis lead, KnowledgeView knowledge)
+    {
+        for (Policy policy : builtinPolicies)
+            if (policy instanceof LoadSpikePolicy)
+                return ((LoadSpikePolicy) policy).inNodeExhausted(lead, knowledge);
+        return Optional.empty();
     }
 
     private List<KnobActuator> knobActuators()
@@ -641,6 +656,10 @@ public class AutonomicService implements AutonomicServiceMBean
             return;
         ex.onControlTick(view);
         String stalled = ex.stalledStep(config().safety.action_step_timeout.toMilliseconds());
+        // a provider call that ignores its interrupt blocks the same thread
+        Actuator scaleOut = actuatorRegistry.get(ScaleOutActuator.NAME);
+        if (stalled == null && scaleOut instanceof ScaleOutActuator)
+            stalled = ((ScaleOutActuator) scaleOut).stalledProviderCall(config().safety.action_step_timeout.toMilliseconds());
         if (stalled != null && !selfDiagnoses.containsKey(ACTUATOR_STALLED_KEY))
         {
             raiseSelfDiagnosis(ACTUATOR_STALLED_KEY, LOOP_STALLED, Severity.CRITICAL,

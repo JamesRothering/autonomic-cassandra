@@ -20,9 +20,11 @@ package org.apache.cassandra.autonomic.execute.actuators;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.execute.Actuator;
+import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 
 /** The built-in actuators, built from {@code autonomic.actuators} when the layer starts. Each is off until enabled. */
 public final class Actuators
@@ -32,6 +34,12 @@ public final class Actuators
     }
 
     public static List<Actuator> build(AutonomicConfig config)
+    {
+        return build(config, () -> null);
+    }
+
+    /** @param knowledge the layer's view, for actuators that verify their own action ({@code scale_out}) */
+    public static List<Actuator> build(AutonomicConfig config, Supplier<KnowledgeView> knowledge)
     {
         List<Actuator> out = new ArrayList<>();
         out.add(CompactionThroughputActuator.create(options(config, CompactionThroughputActuator.NAME)));
@@ -47,6 +55,7 @@ public final class Actuators
         out.add(RequestThrottleActuator.create(options(config, RequestThrottleActuator.NAME)));
         out.add(GarbageCollectActuator.create());
         out.add(RepairPriorityActuator.create());
+        out.add(ScaleOutActuator.create(config, knowledge));
         return out;
     }
 

@@ -323,7 +323,7 @@ public class PoliciesTest
         config.actuators.get("compaction_throughput").put("baseline_window", "30s");
         config.actuators.get("compaction_throughput").put("observation_window", 90_000);
         List<Policy> built = Policies.build(config, actuators::get);
-        assertEquals(List.of("compaction_backlog", "tombstone_overload", "gc_pressure", "load_spike", "request_pools_recovery", "request_throttle_recovery", "repair_overdue"),
+        assertEquals(List.of("compaction_backlog", "tombstone_overload", "gc_pressure", "load_spike", "request_pools_recovery", "request_throttle_recovery", "repair_overdue", "scale_out"),
                      built.stream().map(Policy::name).collect(java.util.stream.Collectors.toList()));
         Diagnosis d = diagnosis("compaction_backlog", NODE, Severity.WARN);
         VerifySpec spec = only(built.get(0).plan(d, view), d, "compaction_backlog").verify;

@@ -39,6 +39,7 @@ import org.apache.cassandra.autonomic.execute.actuators.RequestPoolActuator;
 import org.apache.cassandra.autonomic.execute.actuators.RequestThrottleActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.Policy;
 
@@ -58,8 +59,9 @@ import org.apache.cassandra.autonomic.plan.Policy;
  * <li><b>Correlator.</b> Policies only receive diagnoses without a root cause. A latency breach caused by a saturated
  * pool is therefore never the lead; the {@code pool_saturation} root is, and the throttle step finds the latency
  * breach among the active diagnoses, where effects are kept, instead of waiting for it.</li>
- * <li><b>Scale-out</b> does not exist yet. The last step is an extension point: {@link #NO_SCALE_OUT} proposes
- * nothing; a {@link Step} may be passed to the constructor and is reached once the others are exhausted.</li>
+ * <li><b>Scale-out</b> is the last step, passed to the constructor ({@code ScaleOutPolicy.step}) and reached once
+ * the others are exhausted; {@link #NO_SCALE_OUT} proposes nothing. Its action is cluster-scoped and runs for hours,
+ * so it does not count for "one at a time": the in-node steps keep answering while a node is being added.</li>
  * </ul>
  */
 public class LoadSpikePolicy implements Policy
@@ -175,10 +177,8 @@ public class LoadSpikePolicy implements Policy
         Set<String> actuators = new LinkedHashSet<>();
         for (Step s : all)
             actuators.addAll(s.actuators());
-        // one at a time
-        for (ActionRecord r : knowledge.recentActions(LOOKBACK_MILLIS))
-            if (actuators.contains(r.action.actuator) && !r.state.isTerminal())
-                return Optional.empty();
+        if (inFlight(actuators, knowledge))
+            return Optional.empty();
         List<Diagnosis> leads = new ArrayList<>();
         for (Diagnosis d : knowledge.activeDiagnoses())
             if (LEADS.contains(d.type) && d.rootCause == null)
@@ -193,12 +193,62 @@ public class LoadSpikePolicy implements Policy
         return Optional.empty();
     }
 
+    /**
+     * One at a time, among the actions in the node. A scale-out takes hours and does not hold back the in-node
+     * steps; the scale-out step itself proposes only one at a time.
+     */
+    private static boolean inFlight(Set<String> actuators, KnowledgeView knowledge)
+    {
+        for (ActionRecord r : knowledge.recentActions(LOOKBACK_MILLIS))
+            if (actuators.contains(r.action.actuator) && !r.state.isTerminal() && r.action.scope == ActionScope.NODE)
+                return true;
+        return false;
+    }
+
+    private boolean unavailable(Step step)
+    {
+        return !step.actuators().isEmpty() && step.actuators().stream().noneMatch(enabled);
+    }
+
+    /**
+     * For {@code capacity_exhausted}: the state of every in-node step when none of them has anything left to propose
+     * for the lead, for example {@code yield_background: exhausted, shed_load: ineffective}. Empty while a step
+     * still has a proposal or an in-node action is in flight, and when no in-node step is enabled at all: nothing
+     * was tried then, so nothing is exhausted.
+     */
+    public Optional<String> inNodeExhausted(Diagnosis lead, KnowledgeView knowledge)
+    {
+        Set<String> actuators = new LinkedHashSet<>();
+        for (Step s : steps)
+            actuators.addAll(s.actuators());
+        if (inFlight(actuators, knowledge))
+            return Optional.empty();
+        List<String> states = new ArrayList<>();
+        boolean tried = false;
+        for (Step step : steps)
+        {
+            if (unavailable(step))
+            {
+                states.add(step.name() + ": not enabled");
+                continue;
+            }
+            tried = true;
+            if (ineffective(step, lead, knowledge))
+                states.add(step.name() + ": ineffective");
+            else if (step.plan(lead, knowledge).isPresent())
+                return Optional.empty();
+            else
+                states.add(step.name() + ": exhausted");
+        }
+        return tried ? Optional.of(String.join(", ", states)) : Optional.empty();
+    }
+
     /** The first step with something to propose for the lead. */
     private Optional<Plan> ladder(Diagnosis lead, List<Step> all, KnowledgeView knowledge)
     {
         for (Step step : all)
         {
-            if (!step.actuators().isEmpty() && step.actuators().stream().noneMatch(enabled))
+            if (unavailable(step))
                 continue;
             if (ineffective(step, lead, knowledge))
                 continue;

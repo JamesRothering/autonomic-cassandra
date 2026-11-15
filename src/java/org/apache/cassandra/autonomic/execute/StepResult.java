@@ -46,7 +46,9 @@ public final class StepResult
         /** Terminal: release as COMMITTED_CLEANUP_PENDING; locally COMMITTED (FC5). */
         COMMITTED_CLEANUP_PENDING,
         /** Terminal: release as ROLLED_BACK. */
-        ROLLED_BACK
+        ROLLED_BACK,
+        /** Terminal: release as FAILED; the cluster is in a state an operator must judge. */
+        FAILED
     }
 
     public final Kind kind;
@@ -115,9 +117,19 @@ public final class StepResult
         return new StepResult(Kind.ROLLED_BACK, null, null, null, null, detail, 0);
     }
 
+    /**
+     * The action can neither be completed nor undone by the layer (for example a join that started and did not
+     * finish). The claim is released as FAILED, the local record becomes FAILED, a CRITICAL diagnosis with
+     * {@code detail} is raised and the layer pauses, as for every FAILED action (overview 7.2).
+     */
+    public static StepResult failed(String detail)
+    {
+        return new StepResult(Kind.FAILED, null, null, null, null, detail, 0);
+    }
+
     public boolean isTerminal()
     {
-        return kind == Kind.COMMITTED || kind == Kind.COMMITTED_CLEANUP_PENDING || kind == Kind.ROLLED_BACK;
+        return kind == Kind.COMMITTED || kind == Kind.COMMITTED_CLEANUP_PENDING || kind == Kind.ROLLED_BACK || kind == Kind.FAILED;
     }
 
     @Override

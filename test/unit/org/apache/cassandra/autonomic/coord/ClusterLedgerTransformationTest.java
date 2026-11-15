@@ -286,6 +286,23 @@ public class ClusterLedgerTransformationTest
     }
 
     @Test
+    public void takeoverOfAnExpiredClaimIsNotHeldUpByASequenceInProgress()
+    {
+        // the sequence in progress may be the action's own: the join that a scale-out started
+        ClusterMetadata busy = withSequenceInProgress(apply(enabled(), claimAction(Lane.TOPOLOGY, A, N1, NOW)));
+        long later = NOW + LEASE + 1;
+        Claim held = ledger(busy).claims.get(Lane.TOPOLOGY);
+        Claim takeover = new Claim(B, held.actuator, held.target, N2, Claim.RECOVERING, 0, later, later + LEASE, held.state);
+        assertEquals(takeover, ledger(apply(busy, new ClaimAction(Lane.TOPOLOGY, takeover, later, 0))).claims.get(Lane.TOPOLOGY));
+        // only a recovery of the same actuator and target; a new action still waits for the sequence, and for the lease
+        Claim fresh = new Claim(B, held.actuator, held.target, N2, "CLAIMED", 0, later, later + LEASE, held.state);
+        assertTrue(rejection(busy, new ClaimAction(Lane.TOPOLOGY, fresh, later, 0)).contains("no metadata operation"));
+        Claim other = new Claim(B, held.actuator, "TABLE:ks.other", N2, Claim.RECOVERING, 0, later, later + LEASE, held.state);
+        assertTrue(rejection(busy, new ClaimAction(Lane.TOPOLOGY, other, later, 0)).contains("no metadata operation"));
+        assertTrue(rejection(busy, new ClaimAction(Lane.TOPOLOGY, takeover, NOW + 1, 0)).contains("is held by"));
+    }
+
+    @Test
     public void claimWithLeaseInThePastRejected()
     {
         Claim stale = new Claim(A, "a", "t", N1, "P", 0, NOW, NOW, ImmutableMap.of());

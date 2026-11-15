@@ -225,6 +225,48 @@ public class LoadSpikePolicyTest
     }
 
     @Test
+    public void aClusterActionInFlightDoesNotHoldBackTheInNodeSteps()
+    {
+        Diagnosis pool = saturated("ReadStage", Severity.CRITICAL, NOW - 60_000);
+        view.setActiveDiagnoses(List.of(pool));
+        Action scale = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), "scale_out", ActionScope.CLUSTER, Subject.cluster(), Map.of(), null);
+        records.add(new ActionRecord(scale, ActionState.APPLYING, NOW, null, "scale_out", false, null, Map.of(), Map.of(), Map.of(), null, NOW - 1000));
+        ladder = ladder(LoadSpikePolicy.NO_SCALE_OUT);
+        assertEquals("a node being added takes hours; the node keeps answering meanwhile", "compaction_throughput", next(pool));
+    }
+
+    @Test
+    public void inNodeStepsAreExhaustedOnlyWhenNoEnabledStepHasAnythingLeft()
+    {
+        Diagnosis pool = saturated("ReadStage", Severity.CRITICAL, NOW - 60_000);
+        view.setActiveDiagnoses(List.of(pool, breach(Severity.CRITICAL, pool.id)));
+        assertFalse(ladder.inNodeExhausted(pool, view).isPresent());
+        for (String knob : List.of("compaction_throughput", "stream_throughput", "hint_throttle"))
+            atLimit(knob, handles.get(knob).value / 4);
+        assertFalse("the pool can still grow", ladder.inNodeExhausted(pool, view).isPresent());
+        atLimit("read_pool", 20);
+        assertFalse("load can still be shed", ladder.inNodeExhausted(pool, view).isPresent());
+        limiterOn = true;
+        limit = 1000;
+        assertEquals("yield_background: exhausted, advertise_severity: exhausted, resize_request_pools: exhausted, shed_load: exhausted",
+                     ladder.inNodeExhausted(pool, view).get());
+
+        // not while an in-node action is still in flight: its effect is not known yet
+        record("read_pool", ActionState.VERIFYING, NOW - 1000);
+        assertFalse(ladder.inNodeExhausted(pool, view).isPresent());
+        records.clear();
+        // a step whose action was rolled back counts as tried, a disabled one as not available
+        handles.get("read_pool").value = 10;
+        record("read_pool", ActionState.ROLLED_BACK, NOW - 1000);
+        disabled.add(RequestThrottleActuator.NAME);
+        assertEquals("yield_background: exhausted, advertise_severity: exhausted, resize_request_pools: ineffective, shed_load: not enabled",
+                     ladder.inNodeExhausted(pool, view).get());
+        // with nothing enabled in the node nothing was tried, so nothing is exhausted
+        disabled.addAll(actuators.keySet());
+        assertFalse(ladder.inNodeExhausted(pool, view).isPresent());
+    }
+
+    @Test
     public void ofSeveralOpenLoadDiagnosesOnlyTheLeadGetsAPlan()
     {
         Diagnosis read = saturated("ReadStage", Severity.CRITICAL, NOW - 10_000);

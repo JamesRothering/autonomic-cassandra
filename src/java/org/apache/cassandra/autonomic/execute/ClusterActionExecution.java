@@ -60,6 +60,8 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
  *     reached {@code leaseExpiresAt - lease_safety_margin}, the action becomes FAILED with reason CLAIM_LOST and
  *     the actuator is never called again for it. Nothing is undone and nothing more is committed: the new owner's
  *     {@code recover} decides.</li>
+ * <li>An actuator may end an action it can neither complete nor undo with {@link StepResult#failed}: the claim is
+ *     released as FAILED and the local record becomes FAILED with reason ACTUATOR_FAILED.</li>
  * <li>A step result is carried out by a ledger commit and counts only once the ledger shows it. Until then the same
  *     commit is retried, without calling the actuator again for a plain advance.</li>
  * <li>The claim is released in the ledger before the local record becomes terminal, so a crash in between never
@@ -84,6 +86,7 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
     public static final String FINAL_COMMITTED = "COMMITTED";
     public static final String FINAL_COMMITTED_CLEANUP_PENDING = "COMMITTED_CLEANUP_PENDING";
     public static final String FINAL_ROLLED_BACK = "ROLLED_BACK";
+    public static final String FINAL_FAILED = "FAILED";
     /** Policy name of the local record of a takeover. */
     public static final String TAKEOVER_POLICY = "takeover";
     static final int MAX_STEP_FAILURES = 3;
@@ -490,6 +493,8 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
                 return FINAL_COMMITTED;
             case COMMITTED_CLEANUP_PENDING:
                 return FINAL_COMMITTED_CLEANUP_PENDING;
+            case FAILED:
+                return FINAL_FAILED;
             default:
                 return FINAL_ROLLED_BACK;
         }
@@ -534,6 +539,10 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
                 break;
             case COMMITTED_CLEANUP_PENDING:
                 end(run, ActionState.COMMITTED, Reasons.COMMITTED_CLEANUP_PENDING, terminal.verdict, terminal.detail, false);
+                break;
+            case FAILED:
+                // the claim is released: an operator, not the next owner, has to judge the cluster
+                end(run, ActionState.FAILED, Reasons.ACTUATOR_FAILED, null, terminal.detail, true);
                 break;
             default:
                 String reason = run.stopReason != null ? run.stopReason : run.recoveryReason != null ? run.recoveryReason : Reasons.ACTUATOR_ROLLBACK;

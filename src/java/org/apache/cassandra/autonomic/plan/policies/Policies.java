@@ -58,10 +58,13 @@ public final class Policies
         out.add(new TombstoneOverloadPolicy(actuators, windows));
         out.add(new GcPressurePolicy(actuators, windows));
         // pool_saturation, latency_slo_breach and degraded_self are answered by the ladder, in the order of overview 8.1
-        out.add(LoadSpikePolicy.standard(actuators, windows, enabled, null));
+        ScaleOutPolicy scaleOut = new ScaleOutPolicy(actuators, windows);
+        out.add(LoadSpikePolicy.standard(actuators, windows, enabled, scaleOut.step()));
         out.add(new RequestPoolPolicy(actuators, windows, RequestPoolPolicy.Mode.RECOVERY));
         out.add(new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.RECOVERY));
         out.add(new RepairOverduePolicy(windows));
+        // capacity_exhausted by disk trend; by saturation it is the last step of the ladder
+        out.add(scaleOut);
         return out;
     }
 }

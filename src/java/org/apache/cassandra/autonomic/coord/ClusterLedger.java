@@ -181,7 +181,8 @@ public final class ClusterLedger
      * {@code ClaimAction}: writes {@code claim} with step 0 into {@code lane}. Accepted when cluster actions are
      * enabled; the lane is free, or its claim's lease expired before {@code nowMillis}; no released claim with the
      * same actuator and target ended within {@code cooldownMillis}; and, for lanes that require it, no multi-step
-     * metadata operation is in progress. Re-applying the claim of the action and owner that hold the lane is
+     * metadata operation is in progress, unless the claim takes over an expired one of the same actuator and target
+     * (phase {@code RECOVERING}). Re-applying the claim of the action and owner that hold the lane is
      * accepted and changes nothing, whatever step that claim has reached.
      *
      * @param sequencesInProgress {@code !metadata.inProgressSequences.isEmpty()} of the metadata being transformed
@@ -213,7 +214,11 @@ public final class ClusterLedger
         for (Recent r : recent)
             if (r.actuator.equals(claim.actuator) && r.target.equals(claim.target) && nowMillis - r.endedAtMillis < cooldownMillis)
                 return reject("cooldown: action " + r.actionId + " on " + r.actuator + ' ' + r.target + " ended at " + r.endedAtMillis);
-        if (lane.requiresNoInProgressSequences && sequencesInProgress)
+        // a takeover is the recovery of an action that exists, not new work: the sequence in progress may be that
+        // action's own (the join of a scale-out), and its claim must not stay ownerless until it ends
+        boolean takeover = held != null && Claim.RECOVERING.equals(claim.phase)
+                           && held.actuator.equals(claim.actuator) && held.target.equals(claim.target);
+        if (lane.requiresNoInProgressSequences && sequencesInProgress && !takeover)
             return reject("lane " + lane + " requires that no metadata operation is in progress");
         Map<Lane, Claim> newClaims = new EnumMap<>(Lane.class);
         newClaims.putAll(claims);

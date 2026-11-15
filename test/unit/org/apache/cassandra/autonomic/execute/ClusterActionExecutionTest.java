@@ -563,6 +563,22 @@ public class ClusterActionExecutionTest
     // ---- failing steps ----
 
     @Test
+    public void actuatorMayEndAnActionAsFailedAndTheClaimIsReleased()
+    {
+        Action a = p1.startedIn("P2");
+        p1.actuator.onStep = claim -> StepResult.failed("the join started and did not finish");
+        p1.elapse();
+        p1.assertTerminal(a.id, ActionState.FAILED, Reasons.ACTUATOR_FAILED);
+        // released, unlike a claim that was lost or whose recovery keeps failing: nothing is left for a next owner
+        assertNull(claim(Lane.MAINTENANCE));
+        assertEquals(ClusterActionExecution.FINAL_FAILED, cluster.ledger().recent(a.id).finalState);
+        assertEquals(1, p1.failures.size());
+        assertTrue(p1.failures.get(0), p1.failures.get(0).contains("the join started and did not finish"));
+        assertEquals(0, p1.actuator.count("abort"));
+        assertEquals(0, p1.actuator.count("recover"));
+    }
+
+    @Test
     public void stepThatKeepsThrowingIsAborted()
     {
         Action a = p1.startedIn("P2");

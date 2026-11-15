@@ -3122,6 +3122,12 @@ storage_compatibility_mode: NONE
 #     # a host whose last auto-repair finished interval_multiple * min_repair_interval ago (CRITICAL from
 #     # critical_multiple); INFO and no action while auto-repair is disabled; the history is read every refresh_ms
 #     repair_overdue: { enabled: true, interval_multiple: 2.0, critical_multiple: 4.0, repair_type: FULL, refresh_ms: 30000 }
+#     # the node cannot answer its load with what it has; the trigger of scale-out. Two cases (evidence "trigger"):
+#     # saturation: a pool stays saturated and every enabled in-node step (yield background work, resize the pool,
+#     # shed load) is at its limit or was ineffective; disk_trend: a line through disk.used_fraction over
+#     # trend_window_ms (at least min_samples points, disk at least min_used_fraction full) reaches full_fraction
+#     # within horizon_hours. Either must persist for for_evaluations (default 8 for this detector)
+#     capacity_exhausted: { enabled: true, horizon_hours: 12, full_fraction: 0.9, trend_window_ms: 1800000, min_samples: 10, min_used_fraction: 0.5 }
 #   actuators:                     # each is off until enabled; the layer moves a knob only inside its envelope
 #     # every actuator also accepts baseline_window (default 2m) and observation_window (default 5m), the
 #     # windows over which its policy verifies a change; durations or milliseconds
@@ -3154,6 +3160,27 @@ storage_compatibility_mode: NONE
 #     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default): puts an overdue host
 #     # first in the auto-repair priority; irreversible, nothing to roll back; only while auto-repair is enabled
 #     repair_priority: { enabled: false }
+#     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default; one at a time in the
+#     # cluster): asks the scale_out provider below for one more node in the proposing node's datacenter and rack,
+#     # on capacity_exhausted. Never proposed while the provider cannot add a node. A node that started to join is
+#     # never removed or cancelled by the layer
+#     scale_out: { enabled: false }
+#   scale_out:
+#     # class implementing org.apache.cassandra.autonomic.elastic.ScaleOutProvider, built when the layer starts with
+#     # `parameters` (a public constructor taking a Map<String, String>, or a no-argument one). The default cannot
+#     # add nodes. A class that cannot be loaded is logged as an error and replaced by the default
+#     provider: org.apache.cassandra.autonomic.elastic.NoopProvider
+#     parameters: {}
+#     # from the request until the provider reports a started Cassandra process; after it the request is cancelled
+#     provision_timeout: 15m
+#     # from that report until the node is JOINED. If the join has not started by then the request is cancelled; if
+#     # it has, nothing is undone: the action ends FAILED with a CRITICAL diagnosis and the operator decides
+#     join_timeout: 6h
+#     # how long after the join the triggering signal is compared with its value before; recorded as the verdict
+#     verify_window: 1h
+#     # bound of one call of the provider (the call is interrupted), and how often status and directory are read
+#     provider_call_timeout: 10s
+#     poll_interval: 15s
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

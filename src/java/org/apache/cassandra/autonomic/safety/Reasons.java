@@ -76,6 +76,8 @@ public final class Reasons
     public static final String RECOVERY = "RECOVERY";
     /** Rolled back by the cluster actuator's own verification. */
     public static final String ACTUATOR_ROLLBACK = "ACTUATOR_ROLLBACK";
+    /** A cluster actuator ended its action as failed; the claim was released as FAILED. */
+    public static final String ACTUATOR_FAILED = "ACTUATOR_FAILED";
     /** Abort or recovery of a cluster action kept throwing; its claim is left to expire. */
     public static final String RECOVERY_FAILED = "RECOVERY_FAILED";
     // self-pause reasons

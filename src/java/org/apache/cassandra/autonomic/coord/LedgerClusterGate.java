@@ -57,9 +57,9 @@ public class LedgerClusterGate implements ClusterGate
             return Optional.of("this node is not registered");
         if (lane.requiresNoInProgressSequences && coordinator.sequencesInProgress())
             return Optional.of("a metadata operation is in progress; lane " + lane + " requires none");
-        if (lane == Lane.SCHEMA_LAYOUT)
+        if (lane == Lane.SCHEMA_LAYOUT || lane == Lane.TOPOLOGY)
         {
-            // FC3
+            // FC3, and overview 7.1 check 5 for TOPOLOGY
             List<NodeId> down = coordinator.membersNotAlive();
             if (!down.isEmpty())
                 return Optional.of("lane " + lane + " requires every member alive; not alive: " + down);

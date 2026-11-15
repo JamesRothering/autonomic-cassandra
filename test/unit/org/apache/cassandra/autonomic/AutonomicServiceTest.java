@@ -91,6 +91,29 @@ public class AutonomicServiceTest
         assertEquals(compactors, StorageService.instance.getConcurrentCompactors());
     }
 
+    /** Scale-out exists only once the layer starts, is off, and a provider class that cannot be loaded never fails the start. */
+    @Test
+    public void scaleOutIsBuiltWithTheLayerOffByDefaultAndSurvivesABrokenProvider()
+    {
+        AutonomicConfig c = DatabaseDescriptor.getAutonomicConfig();
+        assertEquals("org.apache.cassandra.autonomic.elastic.NoopProvider", c.scale_out.provider);
+        assertEquals(Boolean.FALSE, c.actuators.get("scale_out").get("enabled"));
+        assertFalse(service.getActuators().containsKey("scale_out"));
+        String provider = c.scale_out.provider;
+        c.scale_out.provider = "org.example.NoSuchProvider";
+        try
+        {
+            c.enabled = true;
+            service.start();
+            assertEquals(AutonomicService.State.STARTING, service.state());
+            assertEquals("CLUSTER irreversible disabled", service.getActuators().get("scale_out"));
+        }
+        finally
+        {
+            c.scale_out.provider = provider;
+        }
+    }
+
     @Test
     public void defaultsAreSafe()
     {
