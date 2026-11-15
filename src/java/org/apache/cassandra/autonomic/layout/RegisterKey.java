@@ -19,15 +19,11 @@ package org.apache.cassandra.autonomic.layout;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
-import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
-import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Transformation;
@@ -102,9 +98,13 @@ public final class RegisterKey extends LayoutTransformation
             return reject("table " + header.logical + " is " + logical.keyspace + '.' + logical.name + ", not " + header.keyspace + '.' + header.logicalName);
         if (!physical.keyspace.equals(header.keyspace) || !physical.name.equals(header.physicalName))
             return reject("table " + header.physical + " is " + physical.keyspace + '.' + physical.name + ", not " + header.keyspace + '.' + header.physicalName);
-        String mismatch = shapeMismatch(logical, physical);
+        String mismatch = PhysicalTables.mismatch(logical, physical);
         if (mismatch != null)
             return reject("physical table does not match the logical table: " + mismatch);
+        // atomic with the schema: a client DDL that races with this commit is ordered by the log (design 5.1, 6)
+        String blocked = Eligibility.describe(Eligibility.structural(logical, prev.schema.getKeyspaceMetadata(logical.keyspace)));
+        if (blocked != null)
+            return reject("table " + logical.keyspace + '.' + logical.name + " is not eligible: " + blocked);
         if (header.hashedClusteringColumns > logical.clusteringColumns().size())
             return reject("hashed clustering columns " + header.hashedClusteringColumns + " exceeds the " + logical.clusteringColumns().size()
                           + " clustering columns of " + logical.keyspace + '.' + logical.name);
@@ -114,47 +114,6 @@ public final class RegisterKey extends LayoutTransformation
     private static LayoutRegistry.Result reject(String reason)
     {
         return LayoutRegistry.rejected(reason);
-    }
-
-    /**
-     * Null if {@code physical} has the shape of design 2.1 for {@code logical}: the partition key of the logical table
-     * plus a trailing int bucket column, and identical clustering, static and regular columns. (This is the structural
-     * part of {@code PhysicalTables.matches}; T6.2 owns the full check.)
-     */
-    static String shapeMismatch(TableMetadata logical, TableMetadata physical)
-    {
-        List<ColumnMetadata> lpk = logical.partitionKeyColumns();
-        List<ColumnMetadata> ppk = physical.partitionKeyColumns();
-        if (ppk.size() != lpk.size() + 1)
-            return "partition key has " + ppk.size() + " columns, expected " + (lpk.size() + 1);
-        for (int i = 0; i < lpk.size(); i++)
-            if (!same(lpk.get(i), ppk.get(i)))
-                return "partition key column " + i + " differs";
-        ColumnMetadata bucket = ppk.get(lpk.size());
-        if (!bucket.name.toString().equals(TableLayout.BUCKET_COLUMN) || !bucket.type.equals(Int32Type.instance))
-            return "last partition key column is not an int named " + TableLayout.BUCKET_COLUMN;
-        if (!sameColumns(logical.clusteringColumns(), physical.clusteringColumns()))
-            return "clustering columns differ";
-        if (!sameColumns(new ArrayList<>(logical.staticColumns()), new ArrayList<>(physical.staticColumns())))
-            return "static columns differ";
-        if (!sameColumns(new ArrayList<>(logical.regularColumns()), new ArrayList<>(physical.regularColumns())))
-            return "regular columns differ";
-        return null;
-    }
-
-    private static boolean same(ColumnMetadata a, ColumnMetadata b)
-    {
-        return a.name.equals(b.name) && a.type.equals(b.type) && a.kind == b.kind;
-    }
-
-    private static boolean sameColumns(List<ColumnMetadata> a, List<ColumnMetadata> b)
-    {
-        if (a.size() != b.size())
-            return false;
-        for (int i = 0; i < a.size(); i++)
-            if (!same(a.get(i), b.get(i)))
-                return false;
-        return true;
     }
 
     @Override

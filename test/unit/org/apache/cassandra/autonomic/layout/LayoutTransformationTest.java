@@ -317,6 +317,26 @@ public class LayoutTransformationTest
         assertEquals(0, ledger(md).claim(A).step);
     }
 
+    /** Design 2.4 and section 6: RegisterKey re-validates eligibility against the schema of the epoch it commits to. */
+    @Test
+    public void registerKeyRejectsAnIneligibleLogicalTable()
+    {
+        TableMetadata cdc = TableMetadata.builder("ks", "t").id(LOGICAL).params(org.apache.cassandra.schema.TableParams.builder().cdc(true).build())
+                                         .addPartitionKeyColumn("p", Int32Type.instance).addClusteringColumn("c1", Int32Type.instance)
+                                         .addClusteringColumn("c2", UTF8Type.instance).addRegularColumn("v", UTF8Type.instance).build();
+        ClusterMetadata md = claimed(withTables(cdc, physicalBuilder().addRegularColumn("v", UTF8Type.instance).build()));
+        assertRejected("is not eligible: CDC", md, register(K1, 0));
+
+        TableMetadata withStatic = TableMetadata.builder("ks", "t").id(LOGICAL)
+                                                .addPartitionKeyColumn("p", Int32Type.instance).addClusteringColumn("c1", Int32Type.instance)
+                                                .addClusteringColumn("c2", UTF8Type.instance).addStaticColumn("s", Int32Type.instance)
+                                                .addRegularColumn("v", UTF8Type.instance).build();
+        ClusterMetadata staticMd = claimed(withTables(withStatic, physicalBuilder().addStaticColumn("s", Int32Type.instance)
+                                                                                    .addRegularColumn("v", UTF8Type.instance).build()));
+        assertRejected("STATIC_COLUMN", staticMd, register(K1, 0));
+        assertEquals("the claim did not move", 0, ledger(staticMd).claim(A).step);
+    }
+
     @Test
     public void registerKeyBoundsRejected()
     {
@@ -776,7 +796,7 @@ public class LayoutTransformationTest
     @Test
     public void replayedCodeDoesNotReadClocksOrConfiguration() throws IOException
     {
-        String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase",
+        String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase", "Eligibility", "PhysicalTables",
                              "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout" };
         String[] forbidden = { "Clock", "currentTimeMillis", "nanoTime", "DatabaseDescriptor", "AutonomicService", "AutonomicConfig",
                                "FBUtilities", "Random", "randomUUID", "TimeUUID", "System.", "ClusterMetadata.current", "ClusterMetadataService",
@@ -791,7 +811,8 @@ public class LayoutTransformationTest
                 if (line.startsWith("import org.apache.cassandra."))
                     assertTrue(source + ".java: unexpected dependency " + line,
                                line.matches("import org\\.apache\\.cassandra\\.(tcm|io\\.util|db\\.TypeSizes|db\\.marshal\\.Int32Type|exceptions\\.ExceptionCode"
-                                            + "|schema\\.(TableId|TableMetadata|ColumnMetadata)|utils\\.ByteBufferUtil|autonomic\\.(coord|layout))[.;].*"));
+                                            + "|schema\\.(TableId|TableMetadata|ColumnMetadata|KeyspaceMetadata|SchemaConstants)|cql3\\.ColumnIdentifier"
+                                            + "|service\\.consensus\\.(TransactionalMode|migration\\.TransactionalMigrationFromMode)|utils\\.ByteBufferUtil|autonomic\\.(coord|layout))[.;].*"));
         }
     }
 
