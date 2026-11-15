@@ -543,6 +543,20 @@ public class ClusterActionExecutionTest
         p1.assertTerminal(a.id, ActionState.ROLLED_BACK, Reasons.SHUTDOWN);
     }
 
+    /** A shutdown waits for the kill call only and then stops the actuator thread: an abort of immediate steps ends inside it. */
+    @Test
+    public void aStopFinishesImmediateAbortStepsWithinTheKillCall()
+    {
+        Action a = p1.startedIn("P2");
+        p1.actuator.onAbort = claim -> "P2".equals(claim.phase) ? StepResult.advance("CANCELLING", claim.state, 0)
+                                                                : StepResult.rolledBack("cancelled");
+        p1.execution.kill(Reasons.SHUTDOWN);
+        assertTrue(p1.actuator.calls.contains("abort:P2:2:killed"));
+        assertTrue(p1.actuator.calls.contains("abort:CANCELLING:3:killed"));
+        assertNull(claim(Lane.MAINTENANCE));
+        assertEquals(ClusterActionExecution.FINAL_ROLLED_BACK, cluster.ledger().recent(a.id).finalState);
+    }
+
     @Test
     public void killPastTheCommitPointReleasesAsCleanupPending()
     {

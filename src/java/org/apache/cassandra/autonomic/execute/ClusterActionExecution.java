@@ -90,6 +90,8 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
     /** Policy name of the local record of a takeover. */
     public static final String TAKEOVER_POLICY = "takeover";
     static final int MAX_STEP_FAILURES = 3;
+    /** Immediate steps that kill and shutdown run in the calling thread. */
+    static final int MAX_STOP_STEPS = 10;
 
     private enum Mode
     {
@@ -115,6 +117,8 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
         boolean done;
         /** Invalidates step tasks scheduled earlier. */
         int generation;
+        /** Delay of the step scheduled last. */
+        long nextDelayMillis = -1;
 
         Run(ClusterActuator actuator, Lane lane, ActionRecord record, Claim claim, Mode mode, long startedMillis)
         {
@@ -309,6 +313,7 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
     private void scheduleStep(Run run, long delayMillis)
     {
         int generation = ++run.generation;
+        run.nextDelayMillis = delayMillis;
         Runnable task = guarded("cluster step of " + run.id(), () -> {
             if (!run.done && run.generation == generation)
                 runStep(run);
@@ -591,6 +596,10 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
             try
             {
                 runStep(run);
+                // a stop that takes several immediate steps (a scale-out: cancel, then release) is finished here, because
+                // a shutdown waits for this call only and then interrupts the actuator thread
+                for (int i = 1; i < MAX_STOP_STEPS && !run.done && run.nextDelayMillis <= 0; i++)
+                    runStep(run);
             }
             catch (Throwable t)
             {
