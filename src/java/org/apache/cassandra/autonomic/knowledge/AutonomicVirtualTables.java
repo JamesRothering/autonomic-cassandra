@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.knowledge;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
@@ -35,10 +36,15 @@ import org.apache.cassandra.autonomic.coord.ClusterLedger;
 import org.apache.cassandra.autonomic.coord.Lane;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore.StoredDiagnosis;
+import org.apache.cassandra.autonomic.layout.KeyState;
+import org.apache.cassandra.autonomic.layout.LayoutRegistry;
+import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.db.marshal.BooleanType;
 import org.apache.cassandra.db.marshal.DoubleType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.db.marshal.SimpleDateType;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
 import org.apache.cassandra.db.marshal.TimestampType;
@@ -51,6 +57,8 @@ import org.apache.cassandra.dht.LocalPartitioner;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.serializers.SimpleDateSerializer;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -79,7 +87,8 @@ public final class AutonomicVirtualTables
                              signals(keyspace, AutonomicService.instance::observationStore),
                              new DiagnosesTable(keyspace),
                              new ActionsTable(keyspace),
-                             new ClusterLedgerTable(keyspace));
+                             new ClusterLedgerTable(keyspace),
+                             layouts(keyspace, ClusterMetadata::currentNullable));
     }
 
     /** The signals table over the given store source; package-private so tests can supply their own store. */
@@ -87,6 +96,13 @@ public final class AutonomicVirtualTables
     static VirtualTable signals(String keyspace, Supplier<ObservationStore> source)
     {
         return new SignalsTable(keyspace, source);
+    }
+
+    /** The layouts table over the given metadata source; public so that the layout tests can supply their own metadata. */
+    @VisibleForTesting
+    public static VirtualTable layouts(String keyspace, Supplier<ClusterMetadata> source)
+    {
+        return new LayoutsTable(keyspace, source);
     }
 
     private static int day(long millis)
@@ -383,6 +399,81 @@ public final class AutonomicVirtualTables
                       .column("step", String.valueOf(claim.step))
                       .column("claimed_at", new Date(claim.claimedAtMillis))
                       .column("lease_expires_at", new Date(claim.leaseExpiresAtMillis));
+            }
+            return result;
+        }
+    }
+
+    /**
+     * The adaptive-schema layout registry (design 2.3), one row per layout and split key, read from the cluster
+     * metadata of this node whether or not the layer is enabled here. {@code orphan} is true when the logical table
+     * of the layout no longer exists in the schema of that metadata.
+     */
+    static final class LayoutsTable extends AbstractVirtualTable
+    {
+        static final String TABLE_NAME = "autonomic_layouts";
+
+        private final Supplier<ClusterMetadata> source;
+
+        LayoutsTable(String keyspace, Supplier<ClusterMetadata> source)
+        {
+            super(TableMetadata.builder(keyspace, TABLE_NAME)
+                               .comment("adaptive schema layouts: one row per logical table and split partition key")
+                               .kind(TableMetadata.Kind.VIRTUAL)
+                               .partitioner(new LocalPartitioner(UTF8Type.instance))
+                               .addPartitionKeyColumn("keyspace_name", UTF8Type.instance)
+                               .addClusteringColumn("table_name", UTF8Type.instance)
+                               .addClusteringColumn("partition_key", UTF8Type.instance)
+                               .addRegularColumn("layout_id", UUIDType.instance)
+                               .addRegularColumn("physical_table", UTF8Type.instance)
+                               .addRegularColumn("transform", UTF8Type.instance)
+                               .addRegularColumn("buckets", Int32Type.instance)
+                               .addRegularColumn("layout_version", LongType.instance)
+                               .addRegularColumn("phase", UTF8Type.instance)
+                               .addRegularColumn("epoch", LongType.instance)
+                               .addRegularColumn("phase_since", TimestampType.instance)
+                               .addRegularColumn("incarnation", Int32Type.instance)
+                               .addRegularColumn("generation", Int32Type.instance)
+                               .addRegularColumn("generation_epoch", LongType.instance)
+                               .addRegularColumn("backfill_done", SetType.getInstance(UUIDType.instance, false))
+                               .addRegularColumn("action_id", UUIDType.instance)
+                               .addRegularColumn("orphan", BooleanType.instance)
+                               .build());
+            this.source = source;
+        }
+
+        @Override
+        public DataSet data()
+        {
+            SimpleDataSet result = new SimpleDataSet(metadata());
+            ClusterMetadata metadata = source.get();
+            if (metadata == null)
+                return result;
+            for (TableLayout layout : LayoutRegistry.of(metadata).byLogical.values())
+            {
+                boolean orphan = metadata.schema.getTableMetadata(layout.logical) == null;
+                for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
+                {
+                    KeyState key = e.getValue();
+                    Set<UUID> done = new HashSet<>();
+                    for (NodeId node : key.backfillDone)
+                        done.add(node.toUUID());
+                    result.row(layout.keyspace, layout.logicalName, ByteBufferUtil.bytesToHex(e.getKey()))
+                          .column("layout_id", layout.layoutId)
+                          .column("physical_table", layout.physicalName)
+                          .column("transform", layout.transform.name())
+                          .column("buckets", layout.buckets)
+                          .column("layout_version", layout.version)
+                          .column("phase", key.phase.name())
+                          .column("epoch", key.phaseEpoch.getEpoch())
+                          .column("phase_since", new Date(key.phaseSinceMillis))
+                          .column("incarnation", key.incarnation)
+                          .column("generation", key.generation)
+                          .column("generation_epoch", key.generationEpoch.getEpoch())
+                          .column("backfill_done", done)
+                          .column("action_id", key.actionId)
+                          .column("orphan", orphan);
+                }
             }
             return result;
         }

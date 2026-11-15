@@ -585,7 +585,7 @@ public class ClusterLedgerTransformationTest
             for (String line : code.split("\n"))
                 if (line.startsWith("import org.apache.cassandra."))
                     assertTrue(source + ".java: unexpected dependency " + line,
-                               line.matches("import org\\.apache\\.cassandra\\.(tcm|io\\.util|db\\.TypeSizes|exceptions\\.ExceptionCode|autonomic\\.coord)[.;].*"));
+                               line.matches("import org\\.apache\\.cassandra\\.(tcm|io\\.util|db\\.TypeSizes|exceptions\\.ExceptionCode|autonomic\\.(coord|layout))[.;].*"));
         }
     }
 

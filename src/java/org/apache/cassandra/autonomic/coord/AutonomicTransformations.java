@@ -17,6 +17,12 @@
  */
 package org.apache.cassandra.autonomic.coord;
 
+import org.apache.cassandra.autonomic.layout.AdvanceLayout;
+import org.apache.cassandra.autonomic.layout.FinishKey;
+import org.apache.cassandra.autonomic.layout.RegisterKey;
+import org.apache.cassandra.autonomic.layout.RemoveKey;
+import org.apache.cassandra.autonomic.layout.RemoveOrphanLayout;
+import org.apache.cassandra.autonomic.layout.ReportBackfill;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 
 /**
@@ -40,5 +46,12 @@ public final class AutonomicTransformations
         CustomTransformation.registerExtension(ClaimAction.NAME, ClaimAction.serializer);
         CustomTransformation.registerExtension(AdvanceAction.NAME, AdvanceAction.serializer);
         CustomTransformation.registerExtension(ReleaseAction.NAME, ReleaseAction.serializer);
+        // adaptive schema (D6): the layout registry
+        CustomTransformation.registerExtension(RegisterKey.NAME, RegisterKey.serializer);
+        CustomTransformation.registerExtension(AdvanceLayout.NAME, AdvanceLayout.serializer);
+        CustomTransformation.registerExtension(ReportBackfill.NAME, ReportBackfill.serializer);
+        CustomTransformation.registerExtension(RemoveKey.NAME, RemoveKey.serializer);
+        CustomTransformation.registerExtension(FinishKey.NAME, FinishKey.serializer);
+        CustomTransformation.registerExtension(RemoveOrphanLayout.NAME, RemoveOrphanLayout.serializer);
     }
 }
