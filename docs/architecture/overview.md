@@ -545,7 +545,7 @@ The claim owner drives the action. Steps that must happen on a specific other no
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Owner crashes or is partitioned from the CMS | It cannot renew. After expiry any preferred proposer commits `ClaimAction` for the same lane with a **new** claim whose `actuator` is the original and `phase` is `RECOVERING`; the actuator's `recover(Claim)` decides to resume or to undo. MVP actuators always undo, then release with `ROLLED_BACK`. |
+| Owner crashes or is partitioned from the CMS | It cannot renew. After expiry any preferred proposer commits `ClaimAction` for the same lane with a **new** claim whose `actuator` is the original and `phase` is `RECOVERING`; the actuator's `recover(Claim)` decides to resume or to undo. Node-scoped and early cluster actuators undo, then release with `ROLLED_BACK`; `ScaleOutActuator` resumes, because a provisioned node or a started join cannot be undone by the layer (D5). |
 | Owner is alive but cannot commit | `AdvanceAction` fails at its deadline. The owner retries until `leaseExpiresAtMillis - lease_safety_margin`, then stops acting and treats the claim as lost. |
 | Owner returns after a takeover | Its next `AdvanceAction` is rejected (`step` or `owner` mismatch). It marks its local record `FAILED` with reason `CLAIM_LOST` and performs no further side effects. |
 | CMS unavailable | No cluster action can start or advance. Node-scoped actions are unaffected. In-flight cluster actions stall; side effects already issued (for example a provisioning request) are covered by the provider's idempotency key. |
@@ -713,6 +713,8 @@ Notes:
 - Memtable, heap, and GC settings are not runtime-tunable and are out of scope.
 - Per-table local compaction overrides exist (`ColumnFamilyStore.setCompactionParameters(Map)`); they are reversible and node-local but change on-disk organisation. Out of MVP, noted as a follow-up actuator.
 
+**As built in D5.** There is one pool actuator per stage (`read_pool`, `mutation_pool`, `counter_mutation_pool`, `view_mutation_pool`) because a knob actuator holds one value; `setConcurrency` rejects a core size, so only the maximum is written. Pools grow only while `os.load_per_processor` (new `CpuSensor`, 1-minute load average per processor) is below 0.9 or unknown. Recovery of pools and throttle runs off the `autonomic.baseline_drift` diagnosis. Each throttle step is verified like any other action: a step too small to improve latency is rolled back, so the limit can settle slightly above the floor (owner decision, 2026-11-15). The ladder is implemented in `LoadSpikePolicy`; a rolled back or failed action marks its whole rung ineffective for the diagnosis that is current (owner decision, 2026-11-15). A scale-out is proposed only when `capacity_exhausted` is open and the earlier rungs are exhausted, or on a disk trend alone.
+
 The order of response to a load spike is fixed by policy priority: (1) yield background work (compaction, streaming, hints), (2) resize request pools, (3) shed load with the rate limiter, (4) propose scale-out.
 
 ### 8.2 What scale-out costs
@@ -852,6 +854,7 @@ autonomic:
     node_imbalance: { enabled: true, load_ratio: 1.5, min_peers: 3, min_load_bytes: 1073741824 }
     degraded_peer: { enabled: true, score_ratio: 2.0, min_peers: 3 }
     degraded_self: { enabled: true, slo_multiple: 1.0, score_ratio: 2.0, min_peers: 3 }
+    capacity_exhausted: { enabled: true, horizon_hours: 12, full_fraction: 0.9, trend_window_ms: 1800000, min_samples: 10, min_used_fraction: 0.5, for_evaluations: 8 }
     repair_overdue: { enabled: true, interval_multiple: 2.0, critical_multiple: 4.0, repair_type: FULL, refresh_ms: 30000 }   # see ADR-026
     # every detector also accepts clear_threshold (default 80% of its raise value),
     # for_evaluations (default 4), max_signal_age_ms (default 120000) and max_subjects (default 1000)
@@ -865,14 +868,17 @@ autonomic:
     garbage_collect: { enabled: false }                # irreversible; CRITICAL only, one per target per day
     repair_priority: { enabled: false }                # irreversible cluster action (MAINTENANCE lane)
     # knob actuators also take baseline_window (default 2m) and observation_window (default 5m)
-    request_pools: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
-    request_throttle: { enabled: false, min_requests_per_second: 1000 }
+    read_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }   # also mutation_pool, counter_mutation_pool, view_mutation_pool; never above 8x processors
+    request_throttle: { enabled: false, min_requests_per_second: 1000, increase_step: 100 }   # max_requests_per_second defaults to the configured limit
     scale_out: { enabled: false }
   scale_out:
     provider: org.apache.cassandra.autonomic.elastic.NoopProvider
     parameters: {}
     provision_timeout: 15m
     join_timeout: 6h
+    verify_window: 1h
+    provider_call_timeout: 10s
+    poll_interval: 15s
 ```
 
 Three independent gates must all be open before anything changes: `enabled`, `dry_run: false`, and the specific actuator's `enabled`. Cluster-scoped actions need a fourth: `nodetool autonomic cluster enable`.
