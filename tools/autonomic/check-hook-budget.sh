@@ -30,7 +30,7 @@ BASE="${1:-${BASE_COMMIT:-$PINNED_COMMIT}}"
 
 # ---------------------------------------------------------------------------------------------
 # Expected upstream files modified by hooks. Keep in sync with overview.md section 4.1.
-# When deliverable D6 adds hooks H16 to H21, append their files here (one per line).
+# D6 adds hooks H16 to H21 (FC7); H21 (AlterSchema.java) is here. Append the StorageProxy.java entry (H16 to H20) when T6.3 lands.
 # ---------------------------------------------------------------------------------------------
 EXPECTED_FILES="
 conf/cassandra.yaml
@@ -42,6 +42,7 @@ src/java/org/apache/cassandra/schema/Schema.java
 src/java/org/apache/cassandra/schema/SchemaConstants.java
 src/java/org/apache/cassandra/service/CassandraDaemon.java
 src/java/org/apache/cassandra/service/StorageService.java
+src/java/org/apache/cassandra/tcm/transformations/AlterSchema.java
 src/java/org/apache/cassandra/tcm/transformations/CustomTransformation.java
 src/java/org/apache/cassandra/tools/NodeProbe.java
 src/java/org/apache/cassandra/tools/nodetool/NodetoolCommand.java

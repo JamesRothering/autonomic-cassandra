@@ -36,6 +36,7 @@ import com.google.common.collect.Streams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.autonomic.layout.LayoutSchemaCoupling;
 import org.apache.cassandra.config.AccordConfig;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.statements.schema.AlterSchemaStatement;
@@ -120,6 +121,7 @@ public class AlterSchema implements Transformation
             schemaTransformation.enterExecution();
             // Guard against an invalid SchemaTransformation supplying a TableMetadata with a future epoch
             newKeyspaces = schemaTransformation.apply(prev);
+            newKeyspaces = LayoutSchemaCoupling.apply(prev, newKeyspaces);
             newKeyspaces.forEach(ksm -> {
                ksm.tables.forEach(tm -> {
                    if (tm.epoch.isAfter(prev.nextEpoch()))
