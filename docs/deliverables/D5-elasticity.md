@@ -39,7 +39,7 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Implemented, awaiting owner review (2026-11-15). T5.1 to T5.5 are committed on `deliverable/D5-elasticity`.
+Done. Approved by the owner on 2026-11-15. Tagged `D5`.
 
 - Criterion 1: `RequestPoolElasticityTest` (1-node dtest with injected pending tasks: sizes move, stay within the envelope and return on recovery), `RequestPoolActuatorTest`.
 - Criterion 2: `RequestThrottleTest` (dtest: limiter enabled and lowered on a latency breach, raised and released on recovery, never below the floor), `RequestThrottleActuatorTest` (the AIMD sequence).
