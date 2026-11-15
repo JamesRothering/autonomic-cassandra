@@ -49,6 +49,8 @@ public final class Policies
         out.add(new GcPressurePolicy(actuators, windows));
         out.add(new DegradedSelfPolicy(actuators, windows));
         out.add(new RequestPoolPolicy(actuators, windows));
+        out.add(new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.BREACH));
+        out.add(new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.RECOVERY));
         out.add(new RepairOverduePolicy(windows));
         return out;
     }

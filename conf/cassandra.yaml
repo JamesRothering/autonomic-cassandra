@@ -3143,6 +3143,12 @@ storage_compatibility_mode: NONE
 #     mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
 #     counter_mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
 #     view_mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
+#     # native transport request rate limiter, AIMD: engaged at 80% of the observed request rate and lowered by 20% per
+#     # step on a CRITICAL latency_slo_breach while a queue grows, never below min_requests_per_second; raised by
+#     # increase_step (default a tenth of the floor) on recovery and finally released (disabled, configured limit
+#     # restored). Changes what clients see, so it is off until enabled. max_requests_per_second: the unthrottled
+#     # rate, default the configured native_transport_max_requests_per_second
+#     request_throttle: { enabled: false, min_requests_per_second: 1000, increase_step: 100 }
 #     # irreversible: one garbage-collecting compaction of one table, only at severity CRITICAL, once a day per table
 #     garbage_collect: { enabled: false }
 #     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default): puts an overdue host

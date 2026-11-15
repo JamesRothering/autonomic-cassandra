@@ -44,6 +44,7 @@ public final class Actuators
         out.add(AdvertisedSeverityActuator.create());
         for (String pool : RequestPoolActuator.STAGES.keySet())
             out.add(RequestPoolActuator.create(pool, options(config, pool)));
+        out.add(RequestThrottleActuator.create(options(config, RequestThrottleActuator.NAME)));
         out.add(GarbageCollectActuator.create());
         out.add(RepairPriorityActuator.create());
         return out;
