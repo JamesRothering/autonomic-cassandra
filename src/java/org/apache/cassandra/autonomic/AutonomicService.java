@@ -398,7 +398,7 @@ public class AutonomicService implements AutonomicServiceMBean
         queuedDiagnosisWrites.set(0);
         registerProductionActuators(config);
         builtinDetectors = productionDetectors(config);
-        builtinPolicies = Policies.build(config, actuatorRegistry::get);
+        builtinPolicies = Policies.build(config, actuatorRegistry::get, name -> actuatorRegistry.isEnabled(name, config()));
         for (Detector detector : builtinDetectors)
             safely("start", detector.name(), detector::start);
         for (Sensor sensor : sensors)

@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.execute.Actuator;
@@ -39,6 +40,15 @@ public final class Policies
 
     public static List<Policy> build(AutonomicConfig config, Function<String, Actuator> actuators)
     {
+        return build(config, actuators, name -> true);
+    }
+
+    /**
+     * @param enabled whether an actuator is enabled; the load spike ladder skips steps whose actuators are not,
+     *                where the other policies leave that to the governor
+     */
+    public static List<Policy> build(AutonomicConfig config, Function<String, Actuator> actuators, Predicate<String> enabled)
+    {
         Function<String, Windows> windows = actuator -> {
             Map<String, Object> options = config.actuators == null ? null : config.actuators.get(actuator);
             return Windows.fromOptions(options);
@@ -47,9 +57,9 @@ public final class Policies
         out.add(new CompactionBacklogPolicy(actuators, windows));
         out.add(new TombstoneOverloadPolicy(actuators, windows));
         out.add(new GcPressurePolicy(actuators, windows));
-        out.add(new DegradedSelfPolicy(actuators, windows));
-        out.add(new RequestPoolPolicy(actuators, windows));
-        out.add(new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.BREACH));
+        // pool_saturation, latency_slo_breach and degraded_self are answered by the ladder, in the order of overview 8.1
+        out.add(LoadSpikePolicy.standard(actuators, windows, enabled, null));
+        out.add(new RequestPoolPolicy(actuators, windows, RequestPoolPolicy.Mode.RECOVERY));
         out.add(new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.RECOVERY));
         out.add(new RepairOverduePolicy(windows));
         return out;

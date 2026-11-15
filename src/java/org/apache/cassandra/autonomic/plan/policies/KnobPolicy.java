@@ -95,6 +95,12 @@ abstract class KnobPolicy implements Policy
     /** What the action must achieve and must not harm, over the given windows. */
     abstract VerifySpec verify(Diagnosis diagnosis, KnowledgeView knowledge, Windows windows);
 
+    /** False for a knob that must not be proposed, for example one whose actuator is not enabled. */
+    boolean usable(String actuator)
+    {
+        return true;
+    }
+
     /** Veto before any knob is considered, for example an unhealthy foreground. */
     boolean applicable(Diagnosis diagnosis, KnowledgeView knowledge)
     {
@@ -109,7 +115,7 @@ abstract class KnobPolicy implements Policy
         for (Step step : steps)
         {
             Actuator actuator = actuators.apply(step.actuator);
-            if (!(actuator instanceof KnobActuator))
+            if (!(actuator instanceof KnobActuator) || !usable(step.actuator))
                 continue;
             KnobActuator knob = (KnobActuator) actuator;
             Optional<Double> target = knob.nextTarget(step.direction, STEP_FRACTION, diagnosis.id.toString());

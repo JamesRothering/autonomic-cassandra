@@ -42,10 +42,10 @@ import org.apache.cassandra.utils.TimeUUID;
 /**
  * Request pool elasticity (overview 8.1).
  * <ul>
- * <li>{@code pool_saturation} of a request stage: one step up for that stage's pool while the CPUs are not
+ * <li>{@code pool_saturation} of a request stage ({@link Mode#SATURATION}): one step up for that stage's pool while the CPUs are not
  * saturated ({@code os.load_per_processor} below {@link #CPU_SATURATED}, or unknown). While they are, a pool that is
  * above its configured size is stepped back towards it. Goal: fewer queued tasks in that pool; guards: coordinator p99.</li>
- * <li>{@code autonomic.baseline_drift}: recovery. A request pool that differs from its configured size while its
+ * <li>{@code autonomic.baseline_drift} ({@link Mode#RECOVERY}): recovery. A request pool that differs from its configured size while its
  * stage is not saturated is stepped back towards the configured size, so a recovered node returns to baseline.
  * Goal: queued tasks do not grow; guards: coordinator p99.</li>
  * </ul>
@@ -58,25 +58,33 @@ public class RequestPoolPolicy implements Policy
     public static final double CPU_SATURATED = 0.9;
     static final double STEP_FRACTION = 0.2;
 
+    /** Which diagnosis the instance answers: the saturation of a pool (a step of the load spike ladder) or the drift left behind. */
+    public enum Mode
+    {
+        SATURATION, RECOVERY
+    }
+
     private final Function<String, Actuator> actuators;
     private final Function<String, Windows> windows;
+    private final Mode mode;
 
-    public RequestPoolPolicy(Function<String, Actuator> actuators, Function<String, Windows> windows)
+    public RequestPoolPolicy(Function<String, Actuator> actuators, Function<String, Windows> windows, Mode mode)
     {
         this.actuators = actuators;
         this.windows = windows;
+        this.mode = mode;
     }
 
     @Override
     public String name()
     {
-        return NAME;
+        return mode == Mode.SATURATION ? NAME : NAME + "_recovery";
     }
 
     @Override
     public Set<String> handles()
     {
-        return Set.of(PoolSaturationDetector.NAME, BaselineDriftDetector.TYPE);
+        return Set.of(mode == Mode.SATURATION ? PoolSaturationDetector.NAME : BaselineDriftDetector.TYPE);
     }
 
     /** The pool actuator of a pool name, for example {@code ReadStage}. */
@@ -105,8 +113,8 @@ public class RequestPoolPolicy implements Policy
     @Override
     public Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge)
     {
-        if (diagnosis.type.equals(PoolSaturationDetector.NAME))
-            return saturation(diagnosis, knowledge);
+        if (mode == Mode.SATURATION)
+            return diagnosis.type.equals(PoolSaturationDetector.NAME) ? saturation(diagnosis, knowledge) : Optional.empty();
         for (String actuator : diagnosis.evidence.keySet())
         {
             String pool = RequestPoolActuator.STAGES.get(actuator);
@@ -154,6 +162,6 @@ public class RequestPoolPolicy implements Policy
                                          w.baselineMillis, w.observationMillis);
         Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), knob.name(), ActionScope.NODE, Subject.node(),
                                    KnobActuator.params(target, diagnosis.id.toString()), spec);
-        return new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, NAME, List.of(action), rationale);
+        return new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale);
     }
 }

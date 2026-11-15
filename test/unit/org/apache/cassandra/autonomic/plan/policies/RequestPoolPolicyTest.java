@@ -51,7 +51,8 @@ public class RequestPoolPolicyTest
     private final Map<String, Actuator> actuators = new HashMap<>();
     private final ObservationStore store = new ObservationStore(8, 8);
     private final InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, () -> 1_000_000L);
-    private final RequestPoolPolicy policy = new RequestPoolPolicy(actuators::get, name -> WINDOWS);
+    private final RequestPoolPolicy saturation = new RequestPoolPolicy(actuators::get, name -> WINDOWS, RequestPoolPolicy.Mode.SATURATION);
+    private final RequestPoolPolicy recovery = new RequestPoolPolicy(actuators::get, name -> WINDOWS, RequestPoolPolicy.Mode.RECOVERY);
     private long ids;
 
     public RequestPoolPolicyTest()
@@ -91,7 +92,7 @@ public class RequestPoolPolicyTest
     public void aSaturatedPoolGrowsOneStepWhileTheCpuIsNotSaturated()
     {
         Diagnosis d = saturated("ReadStage");
-        Action a = policy.plan(d, view).get().actions.get(0);
+        Action a = saturation.plan(d, view).get().actions.get(0);
         assertEquals("read_pool", a.actuator);
         assertEquals("12", a.params.get("value"));
         assertEquals(Subject.node(), a.target);
@@ -99,23 +100,23 @@ public class RequestPoolPolicyTest
         assertEquals(READ_POOL, a.verify.goalSubject);
         assertEquals(2, a.verify.guards.size());
         load(0.5);
-        assertEquals("12", policy.plan(d, view).get().actions.get(0).params.get("value"));
+        assertEquals("12", saturation.plan(d, view).get().actions.get(0).params.get("value"));
     }
 
     @Test
     public void everyRequestStageHasItsOwnActuatorAndOtherPoolsAreIgnored()
     {
-        assertEquals("mutation_pool", policy.plan(saturated("MutationStage"), view).get().actions.get(0).actuator);
-        assertEquals("counter_mutation_pool", policy.plan(saturated("CounterMutationStage"), view).get().actions.get(0).actuator);
-        assertEquals("view_mutation_pool", policy.plan(saturated("ViewMutationStage"), view).get().actions.get(0).actuator);
-        assertFalse(policy.plan(saturated("GossipStage"), view).isPresent());
+        assertEquals("mutation_pool", saturation.plan(saturated("MutationStage"), view).get().actions.get(0).actuator);
+        assertEquals("counter_mutation_pool", saturation.plan(saturated("CounterMutationStage"), view).get().actions.get(0).actuator);
+        assertEquals("view_mutation_pool", saturation.plan(saturated("ViewMutationStage"), view).get().actions.get(0).actuator);
+        assertFalse(saturation.plan(saturated("GossipStage"), view).isPresent());
     }
 
     @Test
     public void nothingIsProposedAtTheEnvelopeLimit()
     {
         handles.get("read_pool").value = 20;
-        assertFalse(policy.plan(saturated("ReadStage"), view).isPresent());
+        assertFalse(saturation.plan(saturated("ReadStage"), view).isPresent());
     }
 
     @Test
@@ -123,9 +124,9 @@ public class RequestPoolPolicyTest
     {
         load(0.95);
         Diagnosis d = saturated("ReadStage");
-        assertFalse("at the configured size there is nothing to give back", policy.plan(d, view).isPresent());
+        assertFalse("at the configured size there is nothing to give back", saturation.plan(d, view).isPresent());
         handles.get("read_pool").value = 14;
-        Plan plan = policy.plan(d, view).get();
+        Plan plan = saturation.plan(d, view).get();
         assertEquals("11", plan.actions.get(0).params.get("value"));
     }
 
@@ -133,13 +134,13 @@ public class RequestPoolPolicyTest
     public void aRecoveredPoolReturnsToItsConfiguredSizeThroughTheDriftDiagnosis()
     {
         handles.get("read_pool").value = 14;
-        Optional<Plan> plan = policy.plan(drift("read_pool"), view);
+        Optional<Plan> plan = recovery.plan(drift("read_pool"), view);
         Action a = plan.get().actions.get(0);
         assertEquals("read_pool", a.actuator);
         assertEquals("11", a.params.get("value"));
         assertEquals("the queue must not grow while returning", 0.0, a.verify.minImprovement, 0);
         handles.get("read_pool").value = 11;
-        assertEquals("10", policy.plan(drift("read_pool"), view).get().actions.get(0).params.get("value"));
+        assertEquals("10", recovery.plan(drift("read_pool"), view).get().actions.get(0).params.get("value"));
     }
 
     @Test
@@ -147,13 +148,13 @@ public class RequestPoolPolicyTest
     {
         handles.get("read_pool").value = 14;
         view.setActiveDiagnoses(List.of(saturated("ReadStage")));
-        assertFalse(policy.plan(drift("read_pool"), view).isPresent());
+        assertFalse(recovery.plan(drift("read_pool"), view).isPresent());
         view.setActiveDiagnoses(List.of());
-        assertFalse(policy.plan(drift("compaction_throughput"), view).isPresent());
+        assertFalse(recovery.plan(drift("compaction_throughput"), view).isPresent());
         // another pool is taken instead of the saturated one
         handles.get("mutation_pool").value = 14;
         view.setActiveDiagnoses(List.of(saturated("ReadStage")));
-        assertEquals("mutation_pool", policy.plan(drift("read_pool", "mutation_pool"), view).get().actions.get(0).actuator);
+        assertEquals("mutation_pool", recovery.plan(drift("read_pool", "mutation_pool"), view).get().actions.get(0).actuator);
     }
 
     @Test
@@ -169,8 +170,8 @@ public class RequestPoolPolicyTest
             public void recordUndo(Map<String, String> undo) {}
         });
         handles.get("read_pool").value = 17;
-        assertFalse(policy.plan(saturated("ReadStage"), view).isPresent());
-        assertFalse(policy.plan(drift("read_pool"), view).isPresent());
+        assertFalse(saturation.plan(saturated("ReadStage"), view).isPresent());
+        assertFalse(recovery.plan(drift("read_pool"), view).isPresent());
         assertTrue(knob.operatorOverride());
     }
 }

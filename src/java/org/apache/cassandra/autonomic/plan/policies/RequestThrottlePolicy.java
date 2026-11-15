@@ -150,7 +150,7 @@ public class RequestThrottlePolicy implements Policy
         String id = diagnosis.id.toString();
         Optional<Double> target = knob.engaged() ? knob.decrease(id) : knob.engageAt(observedRate(knowledge));
         Windows w = windows.apply(RequestThrottleActuator.NAME);
-        boolean write = ratio(diagnosis, Signals.CLIENT_WRITE_LATENCY_P99_MICROS) > ratio(diagnosis, Signals.CLIENT_READ_LATENCY_P99_MICROS);
+        boolean write = YieldBackgroundPolicy.writeWorse(diagnosis);
         VerifySpec spec = new VerifySpec(write ? Signals.CLIENT_WRITE_LATENCY_P99_MICROS : Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(),
                                          true, 0.10, List.of(write ? KnobPolicy.readLatencyGuard() : KnobPolicy.writeLatencyGuard()),
                                          w.baselineMillis, w.observationMillis);
@@ -176,20 +176,5 @@ public class RequestThrottlePolicy implements Policy
         Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), knob.name(), ActionScope.NODE, Subject.node(),
                                    RequestThrottleActuator.params(target, diagnosis.id.toString()), spec);
         return new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale);
-    }
-
-    /** Evidence is {@code "<value> us (<op> slo <slo> us)"}; the ratio to the SLO, or 0 if absent or unparsable. */
-    private static double ratio(Diagnosis diagnosis, SignalId signal)
-    {
-        String e = diagnosis.evidence.get(signal.name);
-        try
-        {
-            String[] parts = e.split(" us \\((?:read|write) slo ");
-            return Double.parseDouble(parts[0]) / Double.parseDouble(parts[1].replace(" us)", ""));
-        }
-        catch (RuntimeException ex)
-        {
-            return 0;
-        }
     }
 }
