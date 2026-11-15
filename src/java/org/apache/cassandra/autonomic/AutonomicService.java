@@ -71,6 +71,7 @@ import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
+import org.apache.cassandra.autonomic.layout.LayoutService;
 import org.apache.cassandra.autonomic.monitor.ObservationSink;
 import org.apache.cassandra.autonomic.monitor.Sensor;
 import org.apache.cassandra.autonomic.monitor.Subject;
@@ -378,8 +379,9 @@ public class AutonomicService implements AutonomicServiceMBean
     public void start()
     {
         registerMBean();
-        // FC1: an always-on data-plane service (layout, adaptive schema) is started here, regardless of
-        // autonomic.enabled, and stopped in shutdownBlocking(). It must create no threads until it has work.
+        // FC1: the always-on data-plane service (layout, adaptive schema) is started here, regardless of
+        // autonomic.enabled, and stopped in shutdownBlocking(). It creates no threads until it has work.
+        LayoutService.instance.start();
         if (config().enabled)
             startLoops();
     }
@@ -1038,7 +1040,13 @@ public class AutonomicService implements AutonomicServiceMBean
      */
     public void shutdownBlocking(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
     {
-        // FC1: stop the always-on data-plane service here.
+        // FC1: process shutdown also stops the always-on data-plane service; disabling the layer at runtime does not
+        LayoutService.instance.shutdownBlocking();
+        stopLoops(timeout, unit);
+    }
+
+    private void stopLoops(long timeout, TimeUnit unit) throws InterruptedException, TimeoutException
+    {
         ActionExecutor ex;
         synchronized (this)
         {
@@ -1177,9 +1185,9 @@ public class AutonomicService implements AutonomicServiceMBean
         }
         try
         {
-            shutdownBlocking();
+            stopLoops(1L, TimeUnit.MINUTES);
         }
-        catch (ExecutionException | InterruptedException e)
+        catch (TimeoutException | InterruptedException e)
         {
             if (e instanceof InterruptedException)
                 Thread.currentThread().interrupt();
