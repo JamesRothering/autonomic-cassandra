@@ -74,6 +74,7 @@ import org.apache.cassandra.autonomic.monitor.Sensor;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.ClientRequestSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.CompactionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.CpuSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.GcSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
@@ -158,7 +159,7 @@ public class AutonomicService implements AutonomicServiceMBean
     private static List<Sensor> productionSensors()
     {
         return Arrays.asList(new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
-                             new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor());
+                             new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor());
     }
 
     private static Correlator productionCorrelator()

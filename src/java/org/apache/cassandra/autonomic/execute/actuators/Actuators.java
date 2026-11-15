@@ -42,6 +42,8 @@ public final class Actuators
         out.add(CacheCapacityActuator.row(options(config, CacheCapacityActuator.ROW)));
         out.add(CacheCapacityActuator.counter(options(config, CacheCapacityActuator.COUNTER)));
         out.add(AdvertisedSeverityActuator.create());
+        for (String pool : RequestPoolActuator.STAGES.keySet())
+            out.add(RequestPoolActuator.create(pool, options(config, pool)));
         out.add(GarbageCollectActuator.create());
         out.add(RepairPriorityActuator.create());
         return out;

@@ -3136,6 +3136,13 @@ storage_compatibility_mode: NONE
 #     row_cache_capacity: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
 #     counter_cache_capacity: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
 #     advertised_severity: { enabled: false }   # envelope 0 to 1, steps of at least 0.1
+#     # maximum size of the request stage pools, one actuator per stage: read_pool, mutation_pool, counter_mutation_pool,
+#     # view_mutation_pool; envelope min_factor .. max_factor times the configured size, never above 8x the processors;
+#     # grown on pool_saturation while the CPUs are not saturated, stepped back to the configured size on recovery
+#     read_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
+#     mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
+#     counter_mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
+#     view_mutation_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }
 #     # irreversible: one garbage-collecting compaction of one table, only at severity CRITICAL, once a day per table
 #     garbage_collect: { enabled: false }
 #     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default): puts an overdue host

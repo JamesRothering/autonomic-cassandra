@@ -134,6 +134,9 @@ public final class Signals
     public static final SignalId GC_TIME_MILLIS_DELTA = def("gc.time_millis_delta", "ms", "Accumulated GC time since the previous collection, all collectors");
     public static final SignalId GC_HEAP_USED_FRACTION = def("gc.heap_used_fraction", "fraction", "Used heap divided by max heap (committed when max is undefined)");
 
+    // ---- CpuSensor (subject NODE) ----
+    public static final SignalId OS_LOAD_PER_PROCESSOR = def("os.load_per_processor", "ratio", "One-minute system load average divided by the available processors; absent where the platform has no load average");
+
     // ---- PeerSensor (subject PEER, detail is the host id, or the address when the host id is unknown) ----
     public static final SignalId PEER_LOAD_BYTES = def("peer.load_bytes", "bytes", "LOAD the peer last gossiped (can be stale); also emitted for this node under its own peer subject");
     public static final SignalId PEER_SEVERITY = def("peer.severity", "score", "SEVERITY the peer last gossiped");

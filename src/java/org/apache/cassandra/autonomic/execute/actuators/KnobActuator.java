@@ -202,12 +202,32 @@ public abstract class KnobActuator implements Actuator
             return Optional.empty();
         double current = handle.get();
         double step = Math.max(Math.abs(current) * stepFraction, minStep);
-        double target = direction == Direction.UP ? current + step : current - step;
+        // an integral step is rounded to the nearest whole number, so that a small knob never steps further than the
+        // step limit allows
         if (integral)
-            target = direction == Direction.UP ? Math.ceil(target - EPSILON) : Math.floor(target + EPSILON);
-        else
+            step = Math.max(minStep, Math.rint(step));
+        double target = direction == Direction.UP ? current + step : current - step;
+        if (!integral)
             target = Math.round(target * 1000) / 1000.0;
         target = Math.max(min, Math.min(max, target));
+        return differs(target, current) ? Optional.of(target) : Optional.empty();
+    }
+
+    /**
+     * One step from the live value back towards the configured value, without passing it; empty if the knob is
+     * not managed, overridden by an operator or already at the configured value. Never locked: it undoes drift.
+     */
+    public Optional<Double> nextTargetTowardConfigured(double stepFraction)
+    {
+        double current = handle.get();
+        if (!managed() || operatorOverride() || !differs(current, configured))
+            return Optional.empty();
+        double step = Math.max(Math.abs(current) * stepFraction, minStep);
+        if (integral)
+            step = Math.max(minStep, Math.rint(step));
+        double target = current < configured ? Math.min(configured, current + step) : Math.max(configured, current - step);
+        if (!integral)
+            target = Math.round(target * 1000) / 1000.0;
         return differs(target, current) ? Optional.of(target) : Optional.empty();
     }
 

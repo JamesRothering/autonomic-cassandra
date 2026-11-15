@@ -167,6 +167,18 @@ public class NodeSensorsTest extends CQLTester
     }
 
     @Test
+    public void cpuSensorEmitsTheLoadPerProcessorWhereThePlatformHasOne()
+    {
+        RecordingSink sink = new RecordingSink();
+        new CpuSensor().collect(sink, 1_000);
+        Double load = sink.value(Signals.OS_LOAD_PER_PROCESSOR, Subject.node());
+        if (java.lang.management.ManagementFactory.getOperatingSystemMXBean().getSystemLoadAverage() >= 0)
+            assertTrue(load >= 0);
+        else
+            assertNull(load);
+    }
+
+    @Test
     public void peerSensorReadsGossipState() throws Throwable
     {
         PeerSensor sensor = new PeerSensor();
@@ -234,7 +246,7 @@ public class NodeSensorsTest extends CQLTester
         Set<SignalId> claimed = new java.util.HashSet<>();
         for (org.apache.cassandra.autonomic.monitor.Sensor s : new org.apache.cassandra.autonomic.monitor.Sensor[]{
             new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
-            new DiskSensor(), new GcSensor(), new PeerSensor(), new HotPartitionSensor() })
+            new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor() })
         {
             for (SignalId id : s.signals())
             {
