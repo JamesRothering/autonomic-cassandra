@@ -71,7 +71,10 @@ public class AutonomicConfigTest
     "    provider: org.apache.cassandra.autonomic.elastic.NoopProvider\n" +
     "    parameters: {}\n" +
     "    provision_timeout: 15m\n" +
-    "    join_timeout: 6h\n";
+    "    join_timeout: 6h\n" +
+    "  layout:\n" +
+    "    fanout_eager_rows: 500\n" +
+    "    fanout_chunk_rows: 50\n";
 
     @Test
     public void defaults()
@@ -85,6 +88,8 @@ public class AutonomicConfigTest
         assertEquals(50, c.slo.read_latency_p99.toMilliseconds());
         assertEquals("manual", c.safety.cluster_approval);
         assertFalse((Boolean) c.actuators.get("scale_out").get("enabled"));
+        assertEquals(10000, c.layout.fanout_eager_rows);
+        assertEquals(1000, c.layout.fanout_chunk_rows);
     }
 
     @Test
@@ -110,5 +115,7 @@ public class AutonomicConfigTest
         assertEquals(4, ((Number) c.detectors.get("hot_partition").get("for_evaluations")).intValue());
         assertTrue((Boolean) c.actuators.get("compaction_throughput").get("enabled"));
         assertEquals(6 * 3600, c.scale_out.join_timeout.toSeconds());
+        assertEquals(500, c.layout.fanout_eager_rows);
+        assertEquals(50, c.layout.fanout_chunk_rows);
     }
 }

@@ -18,7 +18,6 @@
 
 package org.apache.cassandra.autonomic.layout;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
@@ -36,9 +35,7 @@ import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.UnavailableException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
-import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.PreserveTimestamp;
 import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -56,8 +53,8 @@ import io.netty.util.concurrent.FastThreadLocal;
  * <p>A write is <em>routed</em> if it updates a key that is in the registry, in any phase. A routed write executes
  * entirely under the metadata read before it started and is acknowledged only if, afterwards, every key it routed is
  * still in the same routing state (rule C1 of design 4.3); otherwise it is executed again under the new metadata, at
- * most {@link #MAX_ATTEMPTS} times. The routing state of a key is its layout, incarnation and phase: backfill reports
- * and generation restarts change neither and do not cause a re-execution. A write that routes nothing takes the stock
+ * most {@link #MAX_ATTEMPTS} times. The routing state of a key is defined by {@link RoutedKey}: backfill reports and
+ * generation restarts do not change it and do not cause a re-execution. A write that routes nothing takes the stock
  * path and is not checked.
  *
  * <p>Order of the copies (design 3.2): the copy that reads use is written last, after the other copy acknowledged at
@@ -149,7 +146,7 @@ public final class LayoutWrites
                 return false;
             execute(plan, atomic, requestTime, preserveTimestamps);
             ClusterMetadata after = metadata.get();
-            if (after == cm || plan.unchangedIn(after))
+            if (after == cm || RoutedKey.unchanged(plan.routed, after))
                 return true;
             cm = after;
             registry = LayoutRegistry.of(cm);
@@ -160,41 +157,10 @@ public final class LayoutWrites
                                         "The layout of an adapted partition changed during each of " + MAX_ATTEMPTS + " attempts to write it");
     }
 
-    /** The routing state of one key a plan routed; a write is acknowledged only if it is the same afterwards. */
-    private static final class Routed
-    {
-        final TableLayout layout;
-        final ByteBuffer key;
-        final KeyState state;
-
-        Routed(TableLayout layout, ByteBuffer key, KeyState state)
-        {
-            this.layout = layout;
-            this.key = key;
-            this.state = state;
-        }
-
-        /**
-         * Layout, incarnation and phase. The layout is compared so that a key removed and registered again in a new
-         * layout, whose incarnations start over, is a change. The phase epoch is not: a backfill restart sets it
-         * without changing the phase.
-         */
-        boolean unchangedIn(ClusterMetadata cm, LayoutRegistry registry)
-        {
-            TableLayout now = registry.layout(layout.logical);
-            if (now == layout)
-                return true;
-            if (now == null || !now.layoutId.equals(layout.layoutId) || !now.physical.equals(layout.physical) || logical(cm, now) == null)
-                return false;
-            KeyState s = now.keyState(key);
-            return s != null && s.phase == state.phase && s.incarnation == state.incarnation;
-        }
-    }
-
     private static final class Plan
     {
         final ConsistencyLevel consistencyLevel;
-        final List<Routed> routed = new ArrayList<>();
+        final List<RoutedKey> routed = new ArrayList<>();
         /** Shadows of keys in class C1: written before the original. */
         final List<IMutation> shadowsFirst = new ArrayList<>();
         /** The caller's mutations; for keys in class C3 the base updates are replaced by their shadows. */
@@ -207,15 +173,6 @@ public final class LayoutWrites
         Plan(ConsistencyLevel consistencyLevel)
         {
             this.consistencyLevel = consistencyLevel;
-        }
-
-        boolean unchangedIn(ClusterMetadata after)
-        {
-            LayoutRegistry registry = LayoutRegistry.of(after);
-            for (Routed r : routed)
-                if (!r.unchangedIn(after, registry))
-                    return false;
-            return true;
         }
 
         int blockFor()
@@ -251,25 +208,22 @@ public final class LayoutWrites
                 for (PartitionUpdate update : ((Mutation) mutation).getPartitionUpdates())
                 {
                     TableId table = update.metadata().id;
-                    TableLayout layout = registry.layout(table);
-                    if (layout == null)
+                    RoutedKey routed = RoutedKey.of(cm, registry, table, update.partitionKey().getKey());
+                    if (routed == null)
                     {
                         rejectDirectWrite(registry, table);
                         continue;
                     }
-                    ByteBuffer key = update.partitionKey().getKey();
-                    KeyState state = layout.keyState(key);
-                    if (state == null || logical(cm, layout) == null)
-                        continue;
-                    plan.routed.add(new Routed(layout, TableLayout.key(key), state));
+                    TableLayout layout = routed.layout;
+                    plan.routed.add(routed);
                     plan.keyspace = layout.keyspace;
-                    int coordinatorClass = state.phase.coordinatorClass;
+                    int coordinatorClass = routed.coordinatorClass();
                     if (coordinatorClass == 0)
                         continue;
                     List<IMutation> shadows = coordinatorClass == 1 ? plan.shadowsFirst
                                               : coordinatorClass == 2 ? plan.shadowsLast
                                               : c3Shadows == null ? c3Shadows = new ArrayList<>() : c3Shadows;
-                    for (PartitionUpdate shadow : RowMapper.toPhysical(update, physical(cm, layout), layout, state.incarnation).values())
+                    for (PartitionUpdate shadow : RowMapper.toPhysical(update, RoutedKey.physical(cm, layout), layout, routed.state.incarnation).values())
                         shadows.add(new Mutation(shadow));
                     if (coordinatorClass == 3 && kept != null)
                         kept = ((Mutation) kept).without(table);
@@ -350,7 +304,7 @@ public final class LayoutWrites
                 continue;
             if (layout.physicalName.equals(table))
                 throw managed(layout);
-            if (layout.logicalName.equals(table) && layout.keyState(key.getKey()) != null && logical(cm, layout) != null)
+            if (layout.logicalName.equals(table) && layout.keyState(key.getKey()) != null && RoutedKey.logical(cm, layout) != null)
                 throw new InvalidRequestException("Lightweight transactions are not supported on partition 0x" + ByteBufferUtil.bytesToHex(key.getKey())
                                                   + " of " + keyspace + '.' + table + " while it is adapted");
         }
@@ -373,7 +327,7 @@ public final class LayoutWrites
                 continue;
             if (layout.physicalName.equals(table))
                 throw managed(layout);
-            if (!layout.logicalName.equals(table) || logical(cm, layout) == null)
+            if (!layout.logicalName.equals(table) || RoutedKey.logical(cm, layout) == null)
                 continue;
             for (KeyState state : layout.keys.values())
                 if (state.phase != Phase.STEADY)
@@ -391,21 +345,6 @@ public final class LayoutWrites
             }
             return;
         }
-    }
-
-    private static TableMetadata logical(ClusterMetadata cm, TableLayout layout)
-    {
-        KeyspaceMetadata ks = cm.schema.getKeyspaces().getNullable(layout.keyspace);
-        return ks == null ? null : ks.tables.getNullable(layout.logical);
-    }
-
-    private static TableMetadata physical(ClusterMetadata cm, TableLayout layout)
-    {
-        KeyspaceMetadata ks = cm.schema.getKeyspaces().getNullable(layout.keyspace);
-        TableMetadata physical = ks == null ? null : ks.tables.getNullable(layout.physical);
-        if (physical == null)
-            throw new IllegalStateException("The overflow table " + layout.keyspace + '.' + layout.physicalName + " of an adapted layout is missing");
-        return physical;
     }
 
     private static void rejectDirectWrite(LayoutRegistry registry, TableId table)

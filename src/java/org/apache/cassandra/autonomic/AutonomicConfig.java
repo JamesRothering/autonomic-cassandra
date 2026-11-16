@@ -52,6 +52,8 @@ public class AutonomicConfig
     public Map<String, Map<String, Object>> actuators = defaultActuators();
 
     public final ScaleOutConfig scale_out = new ScaleOutConfig();
+    /** Adaptive schema (D6). Read on every node, whatever {@link #enabled} says: routing is unconditional. */
+    public final LayoutConfig layout = new LayoutConfig();
 
     /** Inputs to detectors. */
     public static class SloConfig
@@ -100,6 +102,14 @@ public class AutonomicConfig
     {
         public DurationSpec.IntSecondsBound lease = new DurationSpec.IntSecondsBound("10m");
         public DurationSpec.IntSecondsBound lease_safety_margin = new DurationSpec.IntSecondsBound("60s");
+    }
+
+    public static class LayoutConfig
+    {
+        /** A read of an adapted partition that asks each bucket for at most this many rows holds them in memory. */
+        public int fanout_eager_rows = 10000;
+        /** Larger reads fetch each bucket in chunks of this many rows and merge them as they are consumed. */
+        public int fanout_chunk_rows = 1000;
     }
 
     public static class ScaleOutConfig

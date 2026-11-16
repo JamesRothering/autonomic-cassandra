@@ -71,11 +71,11 @@ import static org.junit.Assert.fail;
  */
 public class LayoutWritesTest extends TestBaseImpl
 {
-    private static final UUID LAYOUT_ID = new UUID(0x1a2b3c4d00004000L, 0x8000000000000003L);
-    private static final String PHYSICAL = PhysicalTables.physicalName("t", LAYOUT_ID);
-    private static final int BUCKETS = 4;
+    static final UUID LAYOUT_ID = new UUID(0x1a2b3c4d00004000L, 0x8000000000000003L);
+    static final String PHYSICAL = PhysicalTables.physicalName("t", LAYOUT_ID);
+    static final int BUCKETS = 4;
     /** The split partition; partition 2 is never split. */
-    private static final int K = 1;
+    static final int K = 1;
 
     private static ClusterCoordinator coordinator()
     {
@@ -87,8 +87,11 @@ public class LayoutWritesTest extends TestBaseImpl
         return Int32Type.instance.decompose(K);
     }
 
-    /** Claims the lane and registers the key: phase ANNOUNCED, incarnation 1. Returns the action id. */
-    private static String register(IInvokableInstance node)
+    /**
+     * Claims the lane and registers key {@link #K} of table {@code t}, hashed on its first {@code hashed} clustering
+     * columns: phase ANNOUNCED, incarnation 1. Returns the action id.
+     */
+    static String register(IInvokableInstance node, int hashed)
     {
         node.runOnInstance(() -> AutonomicService.instance.enableClusterActions(true));
         String id = node.callOnInstance(() -> TimeUUID.Generator.nextTimeUUID().asUUID().toString());
@@ -104,14 +107,14 @@ public class LayoutWritesTest extends TestBaseImpl
             TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
             TableId physical = Schema.instance.getTableMetadata(KEYSPACE, PHYSICAL).id;
             LayoutHeader header = new LayoutHeader(LAYOUT_ID, logical, physical, KEYSPACE, "t", PHYSICAL,
-                                                   TableLayout.Transform.HASH_SPLIT, LayoutRegistry.HASH_ALGO, BUCKETS, 1);
+                                                   TableLayout.Transform.HASH_SPLIT, LayoutRegistry.HASH_ALGO, BUCKETS, hashed);
             RegisterKey t = new RegisterKey(own.actionId, own.owner, own.step, header, key(), Clock.Global.currentTimeMillis(), 600_000);
             assertTrue(c.commitInstead(own, t.wrap(), Phase.ANNOUNCED.name(), own.state).ok());
         });
         return id;
     }
 
-    private static void advance(Cluster cluster, String id, Phase fromPhase, Phase toPhase)
+    static void advance(Cluster cluster, String id, Phase fromPhase, Phase toPhase)
     {
         IInvokableInstance node = cluster.get(1);
         String fromName = fromPhase.name();
@@ -220,7 +223,7 @@ public class LayoutWritesTest extends TestBaseImpl
             inBase.add(1);
             assertLanded(cluster, "absent", inBase, inOverflow);
 
-            String id = register(n1);
+            String id = register(n1, 1);
             ClusterUtils.waitForCMSToQuiesce(cluster, n1);
 
             Phase[] path = { Phase.ANNOUNCED, Phase.DUAL_WRITE, Phase.BACKFILL, Phase.VERIFY, Phase.CUTOVER, Phase.NEW_ONLY, Phase.CLEANUP, Phase.STEADY };

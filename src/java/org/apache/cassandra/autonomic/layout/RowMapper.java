@@ -83,7 +83,7 @@ public final class RowMapper
         {
             int bucket = BucketFunction.bucket(row.clustering(), layout.hashedClusteringColumns, layout.buckets);
             builders.computeIfAbsent(bucket, b -> builder(physical, keyComponents, incarnation, b, columns, estimate))
-                    .add(relabel(row, physical));
+                    .add(relabelRow(row, physical));
         }
         Map<Integer, PartitionUpdate> result = new TreeMap<>();
         builders.forEach((bucket, builder) -> result.put(bucket, builder.build()));
@@ -106,7 +106,7 @@ public final class RowMapper
         for (RangeTombstone range : deletions.ranges)
             builder.add(range);
         for (Row row : physical)
-            builder.add(relabel(row, logical));
+            builder.add(relabelRow(row, logical));
         return builder.build();
     }
 
@@ -115,6 +115,18 @@ public final class RowMapper
     {
         List<ByteBuffer> components = components(physical, key.getKey());
         return Int32Type.instance.compose(components.get(components.size() - 1));
+    }
+
+    /** The partition key of the overflow table that holds a bucket of a logical partition (design 2.2). */
+    public static DecoratedKey physicalKey(TableMetadata logical, TableMetadata physical, ByteBuffer logicalKey, int incarnation, int bucket)
+    {
+        return physicalKey(physical, components(logical, logicalKey), incarnation, bucket);
+    }
+
+    /** The row with every cell and complex deletion re-labelled to the column of the same name of {@code to}; nothing else changes. */
+    public static Row relabel(Row row, TableMetadata to)
+    {
+        return relabelRow(row, to);
     }
 
     // ---- internals ----
@@ -135,9 +147,14 @@ public final class RowMapper
     private static PartitionUpdate.Builder builder(TableMetadata physical, List<ByteBuffer> keyComponents, int incarnation, int bucket,
                                                    RegularAndStaticColumns columns, int estimate)
     {
+        return new PartitionUpdate.Builder(physical, physicalKey(physical, keyComponents, incarnation, bucket), columns, estimate);
+    }
+
+    private static DecoratedKey physicalKey(TableMetadata physical, List<ByteBuffer> keyComponents, int incarnation, int bucket)
+    {
         List<ByteBuffer> all = new ArrayList<>(keyComponents);
         all.add(Int32Type.instance.decompose(BucketFunction.physicalValue(incarnation, bucket)));
-        return new PartitionUpdate.Builder(physical, physical.partitioner.decorateKey(compose(physical, all)), columns, estimate);
+        return physical.partitioner.decorateKey(compose(physical, all));
     }
 
     private static List<ByteBuffer> components(TableMetadata table, ByteBuffer key)
@@ -170,7 +187,7 @@ public final class RowMapper
         return mapped;
     }
 
-    private static Row relabel(Row row, TableMetadata to)
+    private static Row relabelRow(Row row, TableMetadata to)
     {
         Row.Builder builder = BTreeRow.sortedBuilder();
         builder.newRow(row.clustering());

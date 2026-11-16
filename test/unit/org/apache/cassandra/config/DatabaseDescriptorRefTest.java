@@ -132,6 +132,7 @@ public class DatabaseDescriptorRefTest
     "org.apache.cassandra.service.consensus.UnsupportedTransactionConsistencyLevel",
     "org.apache.cassandra.autonomic.AutonomicConfig",
     "org.apache.cassandra.autonomic.AutonomicConfig$CoordinationConfig",
+    "org.apache.cassandra.autonomic.AutonomicConfig$LayoutConfig",
     "org.apache.cassandra.autonomic.AutonomicConfig$SafetyConfig",
     "org.apache.cassandra.autonomic.AutonomicConfig$SamplingConfig",
     "org.apache.cassandra.autonomic.AutonomicConfig$ScaleOutConfig",

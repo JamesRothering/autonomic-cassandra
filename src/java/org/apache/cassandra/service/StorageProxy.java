@@ -57,6 +57,7 @@ import org.slf4j.LoggerFactory;
 
 import accord.primitives.Txn;
 
+import org.apache.cassandra.autonomic.layout.LayoutReads;
 import org.apache.cassandra.autonomic.layout.LayoutWrites;
 import org.apache.cassandra.batchlog.Batch;
 import org.apache.cassandra.batchlog.BatchlogManager;
@@ -2192,6 +2193,7 @@ public class StorageProxy implements StorageProxyMBean
             }
         }
 
+        { PartitionIterator r = LayoutReads.read(group, consistencyLevel, requestTime); if (r != null) return r; }
         return consistencyLevel.isSerialConsistency()
              ? readWithConsensus(group, consistencyLevel, requestTime)
              : dispatchReadWithRetryOnDifferentSystem(group, consistencyLevel, ReadCoordinator.DEFAULT, requestTime);

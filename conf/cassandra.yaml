@@ -3181,6 +3181,12 @@ storage_compatibility_mode: NONE
 #     # bound of one call of the provider (the call is interrupted), and how often status and directory are read
 #     provider_call_timeout: 10s
 #     poll_interval: 15s
+#   layout:
+#     # adaptive schema; read on every node, also while the layer is disabled. A read of an adapted partition that
+#     # asks each bucket for at most fanout_eager_rows rows (every paged query does) holds them in memory; a larger
+#     # one fetches each bucket in chunks of fanout_chunk_rows rows and merges them as they are consumed
+#     fanout_eager_rows: 10000
+#     fanout_chunk_rows: 1000
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries
