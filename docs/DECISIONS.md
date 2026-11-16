@@ -498,3 +498,17 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Reading `layout.straggler_window` inside the transformation was rejected because configuration can differ between nodes and over time, which would make replay non-deterministic. Carrying the window as a field of `RegisterKey` is possible and is the option to take if the owner wants the check to follow configuration.
 
 **Consequences.** An operator who raises `straggler_window` above 3 h is not protected by the eligibility check; the owner-side deadline of I9 (T6.9) must still be enforced from the configured value at run time.
+
+## ADR-030: Verification reports overflow-only rows separately and they do not fail a migration
+
+- **Date:** 2026-11-16
+- **Status:** Accepted (orchestrator decision during T6.8; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** In class C1 a routed write goes to the overflow table first and to the base table second (adaptive-schema 3.3). If the coordinator fails or the base write times out in between, the overflow copy holds a row the base copy lacks. The write was never acknowledged, so this is legal (4.11). Section 4.6 verifies by comparing the two copies for equality and treats any difference as a mismatch; a backfill generation cannot repair this difference because backfill copies base to overflow only. As specified, one timed-out client write during `DUAL_WRITE`, `BACKFILL` or `VERIFY` would fail verification twice and abort the migration.
+
+**Decision.** `LayoutVerifier` reports three kinds of mismatch separately: `CONTENT_DIFFERS`, `MISSING_FROM_OVERFLOW` and `MISSING_FROM_BASE`. The verifier decides nothing. `PartitionSplitActuator` (T6.9) treats the first two as failures, as 4.6 says, and tolerates `MISSING_FROM_BASE`: the row is an unacknowledged write that becomes visible at cutover, which 4.11 already allows.
+
+**Alternatives considered.** Writing base first in C1 was rejected because it breaks the adjacency argument of 4.2 (a C2 reader could miss an acknowledged write). Deleting overflow-only rows before cutover was rejected because the delete would race with a retry of the same write.
+
+**Consequences.** A cell in a `MISSING_FROM_BASE` row that differs only in content from its base counterpart is still `CONTENT_DIFFERS` and fails. The tolerated count is recorded in the action's verdict so that an unexpectedly large number is visible. The TLA+ model's verification guard must be read as `base \subseteq overflow`, not equality.
