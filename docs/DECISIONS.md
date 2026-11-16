@@ -456,3 +456,45 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Keeping the read on the control thread was rejected for the reason above. A sensor on the monitor thread was rejected because it breaks the same rule on a thread whose stall delays every other sensor. A dedicated autonomic thread was rejected because the layer is specified as three threads. Reading the history in the executor was rejected because detection would then depend on an action having been proposed. Dropping the detector was rejected because the repair-priority action would have no trigger.
 
 **Consequences.** No component of the layer waits on a replicated read. A diagnosis from this detector opens after `for_evaluations` distinct reads (at least that many times `refresh_ms`, 2 minutes with defaults), not after that many control ticks. The same pattern is the sanctioned way for any future detector that needs a slow external read; it does not need a new ADR.
+
+## ADR-027: A routed operation is validated against the routing state of its keys, not the layout version
+
+- **Date:** 2026-11-16
+- **Status:** Accepted (orchestrator decision during T6.3; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** Rule C1 (adaptive-schema 4.3) has a coordinator compare `TableLayout.version` before and after a routed operation and re-execute on a change, failing with a timeout after three attempts. As built in T6.1, every registry change bumps that version, including `ReportBackfill` and a backfill generation restart. With replication factor 3 a key in `BACKFILL` receives three reports, so a write in flight could be re-executed three times and time out although its phase never changed.
+
+**Decision.** The comparison is per routed key: the layout id, the physical table id, the key's incarnation and its phase (`LayoutWrites.Routed.unchangedIn`; reads share it). `phaseEpoch` is not compared, because a generation restart sets it without changing the phase. A key that is absent from the registry when the operation captures its metadata is not routed and is not validated.
+
+**Alternatives considered.** Not bumping the version in `ReportBackfill` was rejected because the version would then no longer mean "any change", which other readers of the registry rely on. Comparing coordinator classes instead of phases was rejected as weaker than the argument of 4.3 needs to be shown to hold.
+
+**Consequences.** The safety argument of 4.3 is unchanged: it needs only that the coordinator saw the same phase before and after. `VERIFY -> BACKFILL -> VERIFY` within one operation is not detected, and does not need to be, since the class stays C1. A layout id must never be reused with the same physical table; T6.9 must generate fresh ids.
+
+## ADR-028: The owner holds `ANNOUNCED` until operations that started before registration have ended
+
+- **Date:** 2026-11-16
+- **Status:** Accepted (orchestrator decision during T6.3; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** An operation on a key that is not yet in the registry takes the stock path and is never validated (adaptive-schema 3.3, `nothingRouted`). Rules O1 and C1 therefore say nothing about it. Such an operation that is still in flight when the key passes `DUAL_WRITE` and `BACKFILL` can reach the base table after the backfill pass and still be acknowledged, and readers of the overflow copy then miss an acknowledged write. The design's only wait in `ANNOUNCED` is `cas_drain` (15 s), documented as being for Paxos rounds. Three cases were identified during T6.3: an ordinary write delayed inside its coordinator; a `TRUNCATE`, whose timeout (`truncate_request_timeout`, 60 s) exceeds `cas_drain`; and a write at `ANY` acknowledged on a hint alone, which is on no base replica when backfill runs.
+
+**Decision.** After the all-node acknowledgement of `ANNOUNCED`, the owner waits at least the largest of `cas_drain` and the write, counter-write, CAS-contention, range and truncate request timeouts, plus a margin, before `DUAL_WRITE` (T6.9). The wait starts when every node has acknowledged the `ANNOUNCED` epoch, since from then on every new operation on the key is routed and validated. The TLA+ model (T6.15) carries this as the switchable rule `EnforceDrain`. The hint-only `ANY` case is not closed by the wait: it is covered only if the hint is delivered before the reconcile pass of `CLEANUP`, and is documented as a limitation for tables written at `ANY`.
+
+**Alternatives considered.** Validating every operation on a table that has a layout, whether or not its key is registered, was rejected because it puts the check on the request path of every key of the table for the life of the layout. Making `ANY`-written tables ineligible was rejected because the consistency level is per request and cannot be known from the schema.
+
+**Consequences.** A migration takes at least about a minute longer with default timeouts. The bound relies on request timeouts being enforced from the request's start time; a coordinator thread stalled for longer than the wait between capturing metadata and sending is not covered, and the operator guide must say so. Contract item for T6.16: writes at `ANY` to a key that is about to be split can be lost if their hint outlives the migration.
+
+## ADR-029: The `gc_grace_seconds` eligibility threshold is a constant
+
+- **Date:** 2026-11-16
+- **Status:** Proposed (owner to confirm at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** A table is ineligible for a split when its `gc_grace_seconds` is too small for invariant I9 (no backfill or reconcile write after `DUAL_WRITE` start plus half of `gc_grace`). The design derives the threshold from the configured straggler window. `Eligibility.structural` runs inside `RegisterKey`, a cluster metadata transformation, which must give the same result on every node and on replay.
+
+**Decision.** The threshold is the constant `Eligibility.MIN_GC_GRACE_SECONDS` = 28800 (twice the default 3 h straggler window plus 1 h), not a function of configuration.
+
+**Alternatives considered.** Reading `layout.straggler_window` inside the transformation was rejected because configuration can differ between nodes and over time, which would make replay non-deterministic. Carrying the window as a field of `RegisterKey` is possible and is the option to take if the owner wants the check to follow configuration.
+
+**Consequences.** An operator who raises `straggler_window` above 3 h is not protected by the eligibility check; the owner-side deadline of I9 (T6.9) must still be enforced from the configured value at run time.
