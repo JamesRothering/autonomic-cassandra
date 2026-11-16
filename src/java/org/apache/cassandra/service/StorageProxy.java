@@ -2853,6 +2853,7 @@ public class StorageProxy implements StorageProxyMBean
                                                                 tokens));
             }
         }
+        { PartitionIterator r = LayoutReads.range(command, consistencyLevel, readCoordinator, requestTime); if (r != null) return r; }
         return RangeCommands.partitions(command, consistencyLevel, readCoordinator, requestTime);
     }
 
