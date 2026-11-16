@@ -74,7 +74,9 @@ public class AutonomicConfigTest
     "    join_timeout: 6h\n" +
     "  layout:\n" +
     "    fanout_eager_rows: 500\n" +
-    "    fanout_chunk_rows: 50\n";
+    "    fanout_chunk_rows: 50\n" +
+    "    backfill_throughput: 512KiB/s\n" +
+    "    backfill_chunk_rows: 200\n";
 
     @Test
     public void defaults()
@@ -90,6 +92,8 @@ public class AutonomicConfigTest
         assertFalse((Boolean) c.actuators.get("scale_out").get("enabled"));
         assertEquals(10000, c.layout.fanout_eager_rows);
         assertEquals(1000, c.layout.fanout_chunk_rows);
+        assertEquals(1024 * 1024, c.layout.backfill_throughput.toBytesPerSecondAsInt());
+        assertEquals(1000, c.layout.backfill_chunk_rows);
     }
 
     @Test
@@ -117,5 +121,7 @@ public class AutonomicConfigTest
         assertEquals(6 * 3600, c.scale_out.join_timeout.toSeconds());
         assertEquals(500, c.layout.fanout_eager_rows);
         assertEquals(50, c.layout.fanout_chunk_rows);
+        assertEquals(512 * 1024, c.layout.backfill_throughput.toBytesPerSecondAsInt());
+        assertEquals(200, c.layout.backfill_chunk_rows);
     }
 }

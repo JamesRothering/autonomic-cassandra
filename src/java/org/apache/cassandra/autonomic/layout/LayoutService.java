@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.autonomic.layout;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 
@@ -51,7 +53,9 @@ public final class LayoutService implements ChangeListener
 
     private ClusterMetadataService registered;
     private ExecutorService backfill;
-    private volatile Consumer<LayoutRegistry> backfillHook = registry -> {};
+    /** Threads released without an interrupt that may still be finishing a step; interrupted at shutdown. */
+    private final List<ExecutorService> released = new ArrayList<>();
+    private volatile Consumer<LayoutRegistry> backfillHook = BackfillTask::onRegistryChange;
 
     private volatile boolean active;
 
@@ -81,10 +85,15 @@ public final class LayoutService implements ChangeListener
             registered.log().removeListener(this);
         registered = null;
         active = false;
-        stopBackfill();
+        stopBackfill(true);
     }
 
-    /** The work of the backfill thread, run on it once per registry change while it exists (T6.7). */
+    /**
+     * The work of the backfill thread, run on it once per registry change while it exists (T6.7); {@link BackfillTask}
+     * unless replaced, and nothing if set to null. A call may run long: it must follow the current metadata itself
+     * and return when it has nothing left to do, because the thread is not interrupted when the registry stops
+     * needing it (see {@link #stopBackfill}).
+     */
     public void setBackfillHook(Consumer<LayoutRegistry> hook)
     {
         backfillHook = hook == null ? registry -> {} : hook;
@@ -122,7 +131,7 @@ public final class LayoutService implements ChangeListener
     {
         if (!needsBackfill(registry))
         {
-            stopBackfill();
+            stopBackfill(false);
             return;
         }
         if (backfill == null)
@@ -149,11 +158,25 @@ public final class LayoutService implements ChangeListener
         return false;
     }
 
-    private void stopBackfill()
+    /**
+     * Releases the backfill thread. Only process shutdown interrupts it: the thread may be reading sstables, and an
+     * interrupt delivered during a read of a file channel closes that channel for every other reader of the sstable.
+     * Otherwise the work in progress ends by itself, when it sees that its key left the phase it was started for.
+     */
+    private void stopBackfill(boolean interrupt)
     {
         ExecutorService e = backfill;
         backfill = null;
+        released.removeIf(ExecutorService::isTerminated);
         if (e != null)
-            e.shutdownNow();
+        {
+            e.shutdown();
+            released.add(e);
+        }
+        if (interrupt)
+        {
+            released.forEach(ExecutorService::shutdownNow);
+            released.clear();
+        }
     }
 }

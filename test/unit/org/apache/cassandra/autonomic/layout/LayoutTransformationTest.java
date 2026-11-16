@@ -186,6 +186,14 @@ public class LayoutTransformationTest
         return new AdvanceLayout(A, N1, step, LOGICAL, K1, from, to, generation, NOW + 2, LEASE);
     }
 
+    /** The report a replica commits for the generation of the key that is current in {@code md}. */
+    static ReportBackfill report(ClusterMetadata md, TableId logical, ByteBuffer key, int generation, NodeId node)
+    {
+        TableLayout layout = LayoutRegistry.of(md).layout(logical);
+        KeyState state = layout == null ? null : layout.keyState(key);
+        return new ReportBackfill(logical, key, generation, state == null ? Epoch.EMPTY : state.generationEpoch, node);
+    }
+
     static ClusterLedger ledger(ClusterMetadata md)
     {
         return ClusterLedger.of(md);
@@ -584,19 +592,19 @@ public class LayoutTransformationTest
     public void reportBackfill()
     {
         ClusterMetadata md = keyIn(Phase.BACKFILL);
-        ClusterMetadata one = execute(md, new ReportBackfill(LOGICAL, K1, 1, N2));
+        ClusterMetadata one = execute(md, report(md, LOGICAL, K1, 1, N2));
         assertEquals(ImmutableSet.of(N2), key(one, K1).backfillDone);
         assertEquals(6, registry(one).layout(LOGICAL).version);
         assertEquals("needs no claim and does not touch it", 0, ledger(one).claim(A).step);
         assertSame(md.extensions.get(ClusterLedgerValue.KEY), one.extensions.get(ClusterLedgerValue.KEY));
         // idempotent: nothing changes, the registry value is the same object
-        ClusterMetadata twice = execute(one, new ReportBackfill(LOGICAL, K1, 1, N2));
+        ClusterMetadata twice = execute(one, report(one, LOGICAL, K1, 1, N2));
         assertSame(one.extensions.get(LayoutRegistryValue.KEY), twice.extensions.get(LayoutRegistryValue.KEY));
         assertEquals(6, registry(twice).layout(LOGICAL).version);
-        ClusterMetadata both = execute(twice, new ReportBackfill(LOGICAL, K1, 1, N1));
+        ClusterMetadata both = execute(twice, report(twice, LOGICAL, K1, 1, N1));
         assertEquals(ImmutableSet.of(N1, N2), key(both, K1).backfillDone);
         // CLEANUP takes reports too
-        assertEquals(ImmutableSet.of(N1), key(execute(keyIn(Phase.CLEANUP), new ReportBackfill(LOGICAL, K1, 1, N1)), K1).backfillDone);
+        assertEquals(ImmutableSet.of(N1), key(execute(keyIn(Phase.CLEANUP), report(keyIn(Phase.CLEANUP), LOGICAL, K1, 1, N1)), K1).backfillDone);
     }
 
     @Test
@@ -606,14 +614,32 @@ public class LayoutTransformationTest
         {
             if (phase == Phase.BACKFILL || phase == Phase.CLEANUP)
                 continue;
-            assertRejected("takes no backfill reports", keyIn(phase), new ReportBackfill(LOGICAL, K1, 1, N1));
+            assertRejected("takes no backfill reports", keyIn(phase), report(keyIn(phase), LOGICAL, K1, 1, N1));
         }
         ClusterMetadata md = keyIn(Phase.BACKFILL, 2, ImmutableSet.of());
-        assertRejected("generation 2, not 1", md, new ReportBackfill(LOGICAL, K1, 1, N1));
-        assertRejected("generation 2, not 3", md, new ReportBackfill(LOGICAL, K1, 3, N1));
-        assertRejected("key is not registered", md, new ReportBackfill(LOGICAL, K2, 2, N1));
-        assertRejected("has no layout", md, new ReportBackfill(TableId.fromUUID(new UUID(5, 5)), K1, 2, N1));
-        assertRejected("has no layout", empty(), new ReportBackfill(LOGICAL, K1, 1, N1));
+        assertRejected("generation 2, not 1", md, report(md, LOGICAL, K1, 1, N1));
+        assertRejected("generation 2, not 3", md, report(md, LOGICAL, K1, 3, N1));
+        assertRejected("key is not registered", md, report(md, LOGICAL, K2, 2, N1));
+        assertRejected("has no layout", md, report(md, TableId.fromUUID(new UUID(5, 5)), K1, 2, N1));
+        assertRejected("has no layout", empty(), report(empty(), LOGICAL, K1, 1, N1));
+    }
+
+    @Test
+    public void reportOfAnAbandonedAttemptIsRejected()
+    {
+        // attempt 1 of K1 reached BACKFILL at generation 1; a replica finished and is about to report
+        ClusterMetadata first = keyIn(Phase.BACKFILL);
+        ReportBackfill late = report(first, LOGICAL, K1, 1, N2);
+        // the attempt is aborted and K1 is registered again: a new incarnation, again generation 1, again BACKFILL
+        Epoch e = Epoch.create(first.epoch.getEpoch() + 10);
+        KeyState second = new KeyState(Phase.BACKFILL, e, NOW, 2, 1, e, ImmutableSet.of(), A);
+        TableLayout layout = new TableLayout(header(), 3, ImmutableMap.of(K1, second), 9);
+        ClusterMetadata md = first.transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(
+            new LayoutRegistry(LayoutRegistry.FORMAT_VERSION, ImmutableMap.of(LOGICAL, layout)))).build().metadata;
+        assertRejected("started at epoch " + e.getEpoch(), md, late);
+        assertTrue(key(md, K1).backfillDone.isEmpty());
+        // a generation restart within one attempt is told apart by the number already; the epoch agrees
+        assertEquals(ImmutableSet.of(N2), key(execute(md, report(md, LOGICAL, K1, 1, N2)), K1).backfillDone);
     }
 
     @Test
@@ -623,12 +649,12 @@ public class LayoutTransformationTest
         for (int i = 1; i <= LayoutRegistry.MAX_BACKFILL_NODES; i++)
             nodes.add(new NodeId(i));
         ClusterMetadata md = keyIn(Phase.BACKFILL, 1, ImmutableSet.copyOf(nodes.subList(0, 31)));
-        md = execute(md, new ReportBackfill(LOGICAL, K1, 1, nodes.get(31)));
+        md = execute(md, report(md, LOGICAL, K1, 1, nodes.get(31)));
         assertEquals(32, key(md, K1).backfillDone.size());
-        assertRejected("already has 32 nodes", md, new ReportBackfill(LOGICAL, K1, 1, new NodeId(33)));
+        assertRejected("already has 32 nodes", md, report(md, LOGICAL, K1, 1, new NodeId(33)));
         // a node that is already in is still idempotent at the bound
         assertSame(md.extensions.get(LayoutRegistryValue.KEY),
-                   execute(md, new ReportBackfill(LOGICAL, K1, 1, N1)).extensions.get(LayoutRegistryValue.KEY));
+                   execute(md, report(md, LOGICAL, K1, 1, N1)).extensions.get(LayoutRegistryValue.KEY));
         try
         {
             List<NodeId> tooMany = new ArrayList<>(nodes);
@@ -714,7 +740,7 @@ public class LayoutTransformationTest
     {
         ClusterMetadata prev = keyIn(Phase.BACKFILL);
         LayoutTransformation[] changes = { advance(0, Phase.BACKFILL, Phase.VERIFY, 1),
-                                           new ReportBackfill(LOGICAL, K1, 1, N1),
+                                           report(prev, LOGICAL, K1, 1, N1),
                                            advance(0, Phase.BACKFILL, Phase.ABORTING, 1) };
         for (LayoutTransformation t : changes)
         {
@@ -780,7 +806,7 @@ public class LayoutTransformationTest
     public void executeIsDeterministic() throws IOException
     {
         ClusterMetadata prev = keyIn(Phase.BACKFILL);
-        LayoutTransformation[] all = { advance(0, Phase.BACKFILL, Phase.VERIFY, 1), new ReportBackfill(LOGICAL, K1, 1, N2),
+        LayoutTransformation[] all = { advance(0, Phase.BACKFILL, Phase.VERIFY, 1), report(prev, LOGICAL, K1, 1, N2),
                                        advance(0, Phase.BACKFILL, Phase.BACKFILL, 2) };
         for (LayoutTransformation t : all)
         {
@@ -823,8 +849,8 @@ public class LayoutTransformationTest
         md = execute(md, register(K2, 1));
         md = execute(md, advance(2, Phase.ANNOUNCED, Phase.DUAL_WRITE, 1));
         md = execute(md, advance(3, Phase.DUAL_WRITE, Phase.BACKFILL, 1));
-        md = execute(md, new ReportBackfill(LOGICAL, K1, 1, N2));
-        md = execute(md, new ReportBackfill(LOGICAL, K1, 1, N1));
+        md = execute(md, report(md, LOGICAL, K1, 1, N2));
+        md = execute(md, report(md, LOGICAL, K1, 1, N1));
 
         ClusterMetadata read = roundTrip(md);
         assertEquals(registry(md), registry(read));
@@ -885,7 +911,7 @@ public class LayoutTransformationTest
                                        new RegisterKey(B, N2, 0, header(64, 1), ByteBuffer.allocate(1024), NOW, LEASE),
                                        advance(4, Phase.VERIFY, Phase.BACKFILL, 2),
                                        advance(0, Phase.CLEANUP, Phase.CLEANUP, 9),
-                                       new ReportBackfill(LOGICAL, K1, 3, N2),
+                                       new ReportBackfill(LOGICAL, K1, 3, Epoch.create(41), N2),
                                        new RemoveKey(A, N1, 7, LOGICAL, K2, NOW, LEASE),
                                        new FinishKey(A, N1, 8, LOGICAL, K2, NOW, LEASE),
                                        new RemoveOrphanLayout(LOGICAL) };

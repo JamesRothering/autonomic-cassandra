@@ -144,7 +144,9 @@ public class LayoutRegistryTest extends TestBaseImpl
     {
         node.runOnInstance(() -> {
             TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
-            ClusterMetadataService.instance().commit(new ReportBackfill(logical, bytes(keyHex), generation, new org.apache.cassandra.tcm.membership.NodeId(nodeId)).wrap());
+            org.apache.cassandra.tcm.Epoch started = LayoutRegistry.of(ClusterMetadata.current()).layout(logical).keyState(bytes(keyHex)).generationEpoch;
+            ClusterMetadataService.instance().commit(new ReportBackfill(logical, bytes(keyHex), generation, started,
+                                                                        new org.apache.cassandra.tcm.membership.NodeId(nodeId)).wrap());
         });
     }
 
@@ -181,12 +183,18 @@ public class LayoutRegistryTest extends TestBaseImpl
             register(n1, id, KEY_2);
             advance(n1, id, KEY_1, "ANNOUNCED", "DUAL_WRITE", 1);
             advance(n1, id, KEY_1, "DUAL_WRITE", "BACKFILL", 1);
+            int n1Id = n1.callOnInstance(() -> ClusterMetadata.current().myNodeId().id());
             int n2Id = n2.callOnInstance(() -> ClusterMetadata.current().myNodeId().id());
+            // since T6.7 both replicas report by themselves (the partition is empty); a repeated report changes nothing
+            String both = "backfillDone=[NodeId{id=" + Math.min(n1Id, n2Id) + "}, NodeId{id=" + Math.max(n1Id, n2Id) + "}]";
+            long deadline = System.nanoTime() + 60_000_000_000L;
+            while (!registry(n1).contains(both) && System.nanoTime() < deadline)
+                Thread.sleep(100);
             reportBackfill(n2, KEY_1, 1, n2Id);
             ClusterUtils.waitForCMSToQuiesce(cluster, n1);
 
             String expected = registry(n1);
-            assertTrue(expected, expected.contains("BACKFILL") && expected.contains("ANNOUNCED") && expected.contains("backfillDone=[NodeId{id=" + n2Id + "}]"));
+            assertTrue(expected, expected.contains("BACKFILL") && expected.contains("ANNOUNCED") && expected.contains(both));
             assertEquals(expected, registry(n2));
             // the claim stepped once for each of the four registry commits
             String ledger = n1.callOnInstance(() -> org.apache.cassandra.autonomic.coord.ClusterLedger.of(ClusterMetadata.current()).toString());
@@ -200,7 +208,7 @@ public class LayoutRegistryTest extends TestBaseImpl
                 assertEquals(KEY_1, rows[0][0]);
                 assertEquals("BACKFILL", rows[0][1]);
                 assertEquals(1, rows[0][2]);
-                assertEquals(1, ((Set<?>) rows[0][3]).size());
+                assertEquals(2, ((Set<?>) rows[0][3]).size());
                 assertEquals(8, rows[0][4]);
                 assertEquals("t_al_00000001", rows[0][5]);
                 assertEquals(false, rows[0][6]);

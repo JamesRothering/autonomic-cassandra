@@ -25,6 +25,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.serialization.AsymmetricMetadataSerializer;
@@ -34,6 +35,10 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 /**
  * Reports that a replica finished a backfill generation (design 2.4). Committed by replicas, so it needs no claim
  * and is idempotent.
+ *
+ * <p>A report names the generation by its number and by the epoch at which it started ({@link KeyState#generationEpoch}).
+ * The number alone does not identify a pass: a key that is removed and registered again starts over at generation 1,
+ * and a report of the abandoned attempt that is committed late must not count for the new one (T6.7).
  */
 public final class ReportBackfill extends LayoutTransformation
 {
@@ -43,13 +48,16 @@ public final class ReportBackfill extends LayoutTransformation
     public final TableId logical;
     public final ByteBuffer keyBytes;
     public final int generation;
+    /** The epoch at which {@link #generation} started, as the reporting replica saw it. */
+    public final Epoch generationEpoch;
     public final NodeId nodeId;
 
-    public ReportBackfill(TableId logical, ByteBuffer keyBytes, int generation, NodeId nodeId)
+    public ReportBackfill(TableId logical, ByteBuffer keyBytes, int generation, Epoch generationEpoch, NodeId nodeId)
     {
         this.logical = Objects.requireNonNull(logical);
         this.keyBytes = TableLayout.key(keyBytes);
         this.generation = generation;
+        this.generationEpoch = Objects.requireNonNull(generationEpoch);
         this.nodeId = Objects.requireNonNull(nodeId);
     }
 
@@ -74,7 +82,7 @@ public final class ReportBackfill extends LayoutTransformation
     @Override
     LayoutRegistry.Result apply(LayoutRegistry registry, ClusterMetadata prev)
     {
-        return registry.withBackfillReported(logical, keyBytes, generation, nodeId);
+        return registry.withBackfillReported(logical, keyBytes, generation, generationEpoch, nodeId);
     }
 
     @Override
@@ -83,19 +91,21 @@ public final class ReportBackfill extends LayoutTransformation
         if (!(o instanceof ReportBackfill))
             return false;
         ReportBackfill r = (ReportBackfill) o;
-        return logical.equals(r.logical) && keyBytes.equals(r.keyBytes) && generation == r.generation && nodeId.equals(r.nodeId);
+        return logical.equals(r.logical) && keyBytes.equals(r.keyBytes) && generation == r.generation
+               && generationEpoch.equals(r.generationEpoch) && nodeId.equals(r.nodeId);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(logical, keyBytes, generation, nodeId);
+        return Objects.hash(logical, keyBytes, generation, generationEpoch, nodeId);
     }
 
     @Override
     public String toString()
     {
-        return "ReportBackfill{" + logical + " key=" + ByteBufferUtil.bytesToHex(keyBytes) + " generation=" + generation + " node=" + nodeId.id() + '}';
+        return "ReportBackfill{" + logical + " key=" + ByteBufferUtil.bytesToHex(keyBytes) + " generation=" + generation + " generationEpoch=" + generationEpoch.getEpoch()
+               + " node=" + nodeId.id() + '}';
     }
 
     public static final class Serializer implements AsymmetricMetadataSerializer<Transformation, ReportBackfill>
@@ -112,6 +122,7 @@ public final class ReportBackfill extends LayoutTransformation
             r.logical.serialize(out);
             writeKey(r.keyBytes, out);
             out.writeInt(r.generation);
+            Epoch.serializer.serialize(r.generationEpoch, out, version);
             out.writeInt(r.nodeId.id());
         }
 
@@ -121,14 +132,17 @@ public final class ReportBackfill extends LayoutTransformation
             checkFormat(in.readByte(), NAME);
             TableId logical = TableId.deserialize(in);
             ByteBuffer key = readKey(in);
-            return new ReportBackfill(logical, key, in.readInt(), new NodeId(in.readInt()));
+            int generation = in.readInt();
+            Epoch generationEpoch = Epoch.serializer.deserialize(in, version);
+            return new ReportBackfill(logical, key, generation, generationEpoch, new NodeId(in.readInt()));
         }
 
         @Override
         public long serializedSize(Transformation t, Version version)
         {
             ReportBackfill r = (ReportBackfill) t;
-            return 1 + r.logical.serializedSize() + keySize(r.keyBytes) + 2 * Integer.BYTES;
+            return 1 + r.logical.serializedSize() + keySize(r.keyBytes) + 2 * Integer.BYTES
+                   + Epoch.serializer.serializedSize(r.generationEpoch, version);
         }
     }
 }

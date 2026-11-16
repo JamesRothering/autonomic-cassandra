@@ -221,10 +221,12 @@ public final class LayoutRegistry
 
     /**
      * {@code ReportBackfill}: adds the node to {@link KeyState#backfillDone} of the current generation. Idempotent.
+     * The report must name the current generation and the epoch at which it started: generation numbers start over
+     * when a key is removed and registered again, the epoch does not.
      */
-    public Result withBackfillReported(TableId logical, ByteBuffer key, int generation, NodeId node)
+    public Result withBackfillReported(TableId logical, ByteBuffer key, int generation, Epoch generationEpoch, NodeId node)
     {
-        if (logical == null || key == null || node == null)
+        if (logical == null || key == null || generationEpoch == null || node == null)
             return reject("missing argument");
         String missing = lookup(logical, key);
         if (missing != null)
@@ -235,6 +237,8 @@ public final class LayoutRegistry
             return reject("key is in phase " + state.phase + ", which takes no backfill reports");
         if (state.generation != generation)
             return reject("key is at generation " + state.generation + ", not " + generation);
+        if (!state.generationEpoch.equals(generationEpoch))
+            return reject("generation " + generation + " of the key started at epoch " + state.generationEpoch.getEpoch() + ", not " + generationEpoch.getEpoch());
         if (state.backfillDone.contains(node))
             return new Result(this, null, true);
         if (state.backfillDone.size() >= MAX_BACKFILL_NODES)

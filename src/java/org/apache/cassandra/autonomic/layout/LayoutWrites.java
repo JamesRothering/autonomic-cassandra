@@ -284,6 +284,26 @@ public final class LayoutWrites
         }
     }
 
+    /**
+     * A write of this package that must take the stock path whatever the registry says: the replica backfill (T6.7,
+     * design 4.5) writes the overflow table itself, with the cells of the base table unchanged. Not atomic, so it is
+     * {@code StorageProxy.mutate}; it returns once every mutation is acknowledged at the consistency level and throws
+     * what the stock path throws.
+     */
+    static void writeUnrouted(List<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    {
+        boolean outer = reentrant.get();
+        reentrant.set(Boolean.TRUE);
+        try
+        {
+            sink.write(mutations, consistencyLevel, false, requestTime, PreserveTimestamp.yes);
+        }
+        finally
+        {
+            reentrant.set(outer);
+        }
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // H19, H20
     // ---------------------------------------------------------------------------------------------------------

@@ -121,6 +121,35 @@ public class LayoutServiceTest
     }
 
     @Test
+    public void releasedThreadIsInterruptedOnlyAtShutdown() throws Exception
+    {
+        // T6.7: the hook may be reading sstables, which an interrupt would close for every reader
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        LayoutService service = new LayoutService();
+        service.activate();
+        service.setBackfillHook(r -> {
+            running.countDown();
+            try
+            {
+                Thread.sleep(60_000);
+            }
+            catch (InterruptedException e)
+            {
+                interrupted.countDown();
+            }
+        });
+        ClusterMetadata backfill = LayoutTransformationTest.keyIn(Phase.BACKFILL);
+        service.notifyPostCommit(LayoutTransformationTest.start(), backfill, false);
+        assertTrue(running.await(10, TimeUnit.SECONDS));
+        service.notifyPostCommit(backfill, LayoutTransformationTest.keyIn(Phase.VERIFY), false);
+        assertFalse(service.hasBackfillThread());
+        assertFalse("released, not interrupted", interrupted.await(500, TimeUnit.MILLISECONDS));
+        service.shutdownBlocking();
+        assertTrue("shutdown interrupts the released thread too", interrupted.await(10, TimeUnit.SECONDS));
+    }
+
+    @Test
     public void inactiveServiceIgnoresNotifications()
     {
         LayoutService service = new LayoutService();

@@ -156,8 +156,13 @@ public class LayoutSchemaCouplingTest extends TestBaseImpl
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".other (p int, c int, v int, PRIMARY KEY (p, c))");
             ClusterUtils.waitForCMSToQuiesce(cluster, n1);
             handCommitBackfillRegistry(n1);
+            // since T6.7 both replicas report their (empty) backfill by themselves; the registry is at rest after that
+            long deadline = System.nanoTime() + 60_000_000_000L;
+            while (!registry(n1).matches("(?s).*backfillDone=\\[NodeId\\{id=\\d+\\}, NodeId\\{id=\\d+\\}\\].*") && System.nanoTime() < deadline)
+                Thread.sleep(100);
             ClusterUtils.waitForCMSToQuiesce(cluster, n1);
             String expected = registry(n1);
+            assertTrue(expected, expected.contains("}, NodeId{"));
             assertTrue(expected, expected.contains("BACKFILL"));
 
             // ALTER TABLE ADD is rejected with the documented message, and nothing changed

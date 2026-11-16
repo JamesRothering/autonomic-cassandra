@@ -3187,6 +3187,11 @@ storage_compatibility_mode: NONE
 #     # one fetches each bucket in chunks of fanout_chunk_rows rows and merges them as they are consumed
 #     fanout_eager_rows: 10000
 #     fanout_chunk_rows: 1000
+#     # while a partition is being adapted, every replica of it copies its own data into the overflow table: at most
+#     # backfill_throughput per node (0 is unlimited), in steps of backfill_chunk_rows rows and range tombstone
+#     # markers, each written at ALL and then recorded locally so that a restart continues after it
+#     backfill_throughput: 1MiB/s
+#     backfill_chunk_rows: 1000
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

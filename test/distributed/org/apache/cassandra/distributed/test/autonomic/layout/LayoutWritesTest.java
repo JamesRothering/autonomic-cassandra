@@ -37,6 +37,7 @@ import org.apache.cassandra.autonomic.layout.BucketFunction;
 import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
+import org.apache.cassandra.autonomic.layout.LayoutService;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
@@ -205,6 +206,8 @@ public class LayoutWritesTest extends TestBaseImpl
                                            .start()))
         {
             IInvokableInstance n1 = cluster.get(1);
+            // the test places every row by hand: the replica backfill (T6.7) would copy the base rows on its own
+            cluster.forEach(node -> node.runOnInstance(() -> LayoutService.instance.setBackfillHook(null)));
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".t (p int, c int, v int, PRIMARY KEY (p, c))");
             String derived = n1.callOnInstance(() -> PhysicalTables.derive(Schema.instance.getTableMetadata(KEYSPACE, "t"), LAYOUT_ID, TableId.generate()));
             cluster.schemaChange(derived);

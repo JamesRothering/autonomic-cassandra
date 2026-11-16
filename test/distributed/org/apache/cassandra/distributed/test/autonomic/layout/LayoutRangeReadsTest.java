@@ -37,6 +37,7 @@ import org.apache.cassandra.autonomic.coord.TcmEnvironment;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
+import org.apache.cassandra.autonomic.layout.LayoutService;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
@@ -304,6 +305,8 @@ public class LayoutRangeReadsTest extends TestBaseImpl
                                            .start()))
         {
             IInvokableInstance n1 = cluster.get(1);
+            // the test leaves stray rows in the base copies: the replica backfill (T6.7) would reconcile them in CLEANUP
+            cluster.forEach(node -> node.runOnInstance(() -> LayoutService.instance.setBackfillHook(null)));
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".t" + COLUMNS);
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".twin" + COLUMNS);
             String derived = n1.callOnInstance(() -> PhysicalTables.derive(Schema.instance.getTableMetadata(KEYSPACE, "t"), LAYOUT_ID, TableId.generate()));

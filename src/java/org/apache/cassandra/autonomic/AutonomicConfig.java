@@ -20,6 +20,7 @@ package org.apache.cassandra.autonomic;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.apache.cassandra.config.DataRateSpec;
 import org.apache.cassandra.config.DurationSpec;
 
 /**
@@ -110,6 +111,10 @@ public class AutonomicConfig
         public int fanout_eager_rows = 10000;
         /** Larger reads fetch each bucket in chunks of this many rows and merge them as they are consumed. */
         public int fanout_chunk_rows = 1000;
+        /** Bytes per second this node copies into the overflow table while it backfills a partition; 0 is unlimited. */
+        public DataRateSpec.LongBytesPerSecondBound backfill_throughput = new DataRateSpec.LongBytesPerSecondBound("1MiB/s");
+        /** Rows and range tombstone markers a backfill reads, writes at ALL and records as copied in one step. */
+        public int backfill_chunk_rows = 1000;
     }
 
     public static class ScaleOutConfig
