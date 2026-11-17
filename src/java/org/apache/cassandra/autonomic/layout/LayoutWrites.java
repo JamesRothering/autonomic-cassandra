@@ -41,6 +41,7 @@ import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.Clock;
 
 import io.netty.util.concurrent.FastThreadLocal;
 
@@ -132,6 +133,42 @@ public final class LayoutWrites
      */
     public static boolean route(List<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, boolean atomic,
                                 Dispatcher.RequestTime requestTime, PreserveTimestamp preserveTimestamps)
+    {
+        // FC8: one read of a field that is null unless a key is profiled
+        LayoutProfiler.Watches watches = LayoutProfiler.active();
+        if (watches == null || reentrant.get())
+            return routeRegistered(mutations, consistencyLevel, atomic, requestTime, preserveTimestamps);
+        LayoutProfiler.Probe probe = watches.write(mutations);
+        if (probe == null)
+            return routeRegistered(mutations, consistencyLevel, atomic, requestTime, preserveTimestamps);
+        long start = Clock.Global.nanoTime();
+        try
+        {
+            if (!routeRegistered(mutations, consistencyLevel, atomic, requestTime, preserveTimestamps))
+            {
+                // taken by the hook so that its latency is known: the stock tail, under the re-entrancy flag
+                reentrant.set(Boolean.TRUE);
+                try
+                {
+                    sink.write(mutations, consistencyLevel, atomic, requestTime, preserveTimestamps);
+                }
+                finally
+                {
+                    reentrant.set(Boolean.FALSE);
+                }
+            }
+            probe.done(Clock.Global.nanoTime() - start);
+            return true;
+        }
+        catch (RuntimeException e)
+        {
+            probe.failed();
+            throw e;
+        }
+    }
+
+    private static boolean routeRegistered(List<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, boolean atomic,
+                                           Dispatcher.RequestTime requestTime, PreserveTimestamp preserveTimestamps)
     {
         ClusterMetadata cm = metadata.get();
         LayoutRegistry registry = LayoutRegistry.of(cm);
@@ -326,6 +363,9 @@ public final class LayoutWrites
      */
     public static void checkCas(String keyspace, String table, DecoratedKey key)
     {
+        LayoutProfiler.Watches watches = LayoutProfiler.active();
+        if (watches != null)
+            watches.cas(keyspace, table, key.getKey());
         ClusterMetadata cm = metadata.get();
         LayoutRegistry registry = LayoutRegistry.of(cm);
         if (registry.byLogical.isEmpty())

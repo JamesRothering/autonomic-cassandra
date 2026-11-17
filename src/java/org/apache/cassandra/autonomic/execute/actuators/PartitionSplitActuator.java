@@ -39,6 +39,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.autonomic.AutonomicConfig;
+import org.apache.cassandra.autonomic.AutonomicService;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
@@ -47,7 +48,6 @@ import org.apache.cassandra.autonomic.execute.ActionContext;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
 import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepResult;
-import org.apache.cassandra.autonomic.execute.Verdict;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.layout.AdoptKey;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
@@ -55,7 +55,9 @@ import org.apache.cassandra.autonomic.layout.Eligibility;
 import org.apache.cassandra.autonomic.layout.EpochWatermarks;
 import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.KeyState;
+import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
+import org.apache.cassandra.autonomic.layout.LayoutProfiler;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.LayoutVerifier;
 import org.apache.cassandra.autonomic.layout.LayoutWrites;
@@ -64,6 +66,7 @@ import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.autonomic.layout.RowMapper;
+import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.Action;
@@ -246,6 +249,12 @@ public class PartitionSplitActuator implements ClusterActuator
 
         /** This node's wall clock, for {@link #validate}, which has no step context. */
         long nowMillis();
+
+        /** The signals of this node (design 7.3); null where there are none, and stages A and B are then not judged. */
+        default KnowledgeView knowledge()
+        {
+            return null;
+        }
     }
 
     private final Env env;
@@ -389,6 +398,9 @@ public class PartitionSplitActuator implements ClusterActuator
         String blocked = Eligibility.describe(Eligibility.structural(logical, ksm));
         if (blocked != null)
             return Optional.of("table " + logical.keyspace + '.' + logical.name + " is not eligible: " + blocked);
+        String lwt = LayoutProfiler.runtime(logical, profile(logical.id, t.key));
+        if (lwt != null)
+            return Optional.of("table " + logical.keyspace + '.' + logical.name + " is not eligible: " + lwt);
         try
         {
             logical.partitionKeyType.validate(t.key);
@@ -421,6 +433,12 @@ public class PartitionSplitActuator implements ClusterActuator
         if (layout != null && action.params.containsKey(PARAM_BUCKETS) && layout.buckets != buckets)
             return Optional.of("the layout of " + logical.keyspace + '.' + logical.name + " has " + layout.buckets + " buckets; every key of a table has the same");
         return Optional.empty();
+    }
+
+    private static LayoutProfiler.Shape profile(TableId table, ByteBuffer key)
+    {
+        LayoutProfiler.Watch watch = LayoutProfiler.get(table, key);
+        return watch == null ? null : watch.shape();
     }
 
     private Optional<String> validateResume(ClusterMetadata cm, TableMetadata logical, ByteBuffer key, KeyState state)
@@ -482,6 +500,10 @@ public class PartitionSplitActuator implements ClusterActuator
         state.put(S_TABLE, logical.id.toString());
         String mode = action.params.getOrDefault(PARAM_MODE, MODE_SPLIT);
         state.put(S_MODE, mode);
+        // the profile the policy proposed the split with: what stages A and B compare with
+        for (Map.Entry<String, String> param : action.params.entrySet())
+            if (param.getKey().startsWith(SplitEvaluation.P_PREFIX))
+                state.put(param.getKey(), param.getValue());
         TableLayout layout = LayoutRegistry.of(cm).layout(logical.id);
         if (MODE_RESUME.equals(mode))
         {
@@ -742,6 +764,14 @@ public class PartitionSplitActuator implements ClusterActuator
                 long remaining = ackedAt(v) + layoutConfig().cutover_soak.toMilliseconds() - ctx.nowMillis();
                 if (remaining > 0)
                     return StepResult.stay(Math.min(remaining, pollMillis()));
+                // stage A (design 7.3): a failure takes the abort path, which in CUTOVER goes through ROLLBACK_DUAL
+                SplitEvaluation.Result stageA = stageA(v, ctx);
+                if (!stageA.ok)
+                {
+                    Map<String, String> state = new TreeMap<>(v.claim.state);
+                    state.put(S_ABORT, text("stage A failed: " + stageA.detail));
+                    return StepResult.advance(v.claim.phase, state, 0);
+                }
                 if (manualCommitApproval() && !"true".equals(v.claim.state.get(S_COMMIT_APPROVED)))
                     return StepResult.stay(pollMillis());
                 // the commit point
@@ -754,6 +784,33 @@ public class PartitionSplitActuator implements ClusterActuator
             default:
                 return StepResult.failed("no forward step from phase " + key.phase);
         }
+    }
+
+    private SplitEvaluation.Result stageA(View v, ActionContext ctx)
+    {
+        KnowledgeView knowledge = env.knowledge();
+        if (knowledge == null)
+            return SplitEvaluation.stageA(null, null, layoutConfig());
+        SplitEvaluation.Window window = SplitEvaluation.Window.of(knowledge, keySubject(v), ackedAt(v), ctx.nowMillis());
+        return SplitEvaluation.stageA(SplitEvaluation.Baseline.fromMap(v.claim.state), window, layoutConfig());
+    }
+
+    /** Stage B over the last {@code verify_window}, ending now: the key has been split for at least {@code straggler_window}. */
+    private SplitEvaluation.Result stageB(View v, ActionContext ctx)
+    {
+        KnowledgeView knowledge = env.knowledge();
+        if (knowledge == null)
+            return SplitEvaluation.stageB(null, null, Double.NaN, layoutConfig());
+        long window = layoutConfig().verify_window.toMilliseconds();
+        Subject key = keySubject(v);
+        SplitEvaluation.Window signals = SplitEvaluation.Window.of(knowledge, key, ctx.nowMillis() - window, ctx.nowMillis());
+        double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, window);
+        return SplitEvaluation.stageB(SplitEvaluation.Baseline.fromMap(v.claim.state), signals, share, layoutConfig());
+    }
+
+    private static Subject keySubject(View v)
+    {
+        return Subject.partition(v.target.keyspace, v.target.table, ByteBufferUtil.bytesToHex(v.target.key));
     }
 
     private StepResult verify(View v, ActionContext ctx)
@@ -817,7 +874,11 @@ public class PartitionSplitActuator implements ClusterActuator
         logger.warn("Autonomic partition split of {}: verification of generation {} failed ({} of {}): {}", v.name(), key.generation,
                     failures, layoutConfig().verify_retries + 1, done.summary());
         if (failures > layoutConfig().verify_retries)
+        {
             next.put(S_ABORT, text("verification failed " + failures + " times: " + done.summary()));
+            LayoutEvents.verifyFailed(v.claim.actionId, v.target.keyspace, v.target.table, ByteBufferUtil.bytesToHex(v.target.key),
+                                      text(done.summary()), ctx.nowMillis());
+        }
         else
             next.put(S_VERIFY_FAILED, generation);
         return StepResult.advance(Phase.VERIFY.name(), next, 0);
@@ -877,11 +938,12 @@ public class PartitionSplitActuator implements ClusterActuator
         if (!Phase.STEADY.name().equals(claim.phase))
             return StepResult.failed("the claim is in phase " + claim.phase + " but " + v.name() + " is STEADY");
         String tombstone = claim.state.get(S_TOMBSTONE);
+        SplitEvaluation.Result stageB = stageB(v, ctx);
         String detail = v.name() + " is split into " + v.layout.buckets + " buckets of " + v.layout.keyspace + '.' + v.layout.physicalName
                         + "; " + S_TOLERATED + '=' + claim.state.getOrDefault(S_TOLERATED, "0")
-                        + "; stage-B verification is not built yet (T6.11)";
+                        + "; stage B " + stageB.verdict + ": " + stageB.detail;
         if (tombstone == null)
-            return StepResult.committed(Verdict.INCONCLUSIVE, detail + "; no base tombstone was recorded");
+            return StepResult.committed(stageB.verdict, detail + "; no base tombstone was recorded");
         // no replica has a pass due once every node has STEADY; the wait lets a chunk read before that be written
         StepResult acked = ackedFor(v, ctx);
         if (acked != null)
@@ -900,7 +962,7 @@ public class PartitionSplitActuator implements ClusterActuator
             return mode == Mode.STOP ? StepResult.committedCleanupPending(v.name() + " is STEADY; its base partition tombstone was not written: " + e)
                                      : StepResult.stay(pollMillis());
         }
-        return StepResult.committed(Verdict.INCONCLUSIVE, detail + "; base partition tombstone written at " + tombstone);
+        return StepResult.committed(stageB.verdict, detail + "; base partition tombstone written at " + tombstone);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -1365,6 +1427,12 @@ public class PartitionSplitActuator implements ClusterActuator
         public long nowMillis()
         {
             return Clock.Global.currentTimeMillis();
+        }
+
+        @Override
+        public KnowledgeView knowledge()
+        {
+            return AutonomicService.instance.knowledge();
         }
     }
 }

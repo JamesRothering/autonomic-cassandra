@@ -246,7 +246,7 @@ public class NodeSensorsTest extends CQLTester
         Set<SignalId> claimed = new java.util.HashSet<>();
         for (org.apache.cassandra.autonomic.monitor.Sensor s : new org.apache.cassandra.autonomic.monitor.Sensor[]{
             new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
-            new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor() })
+            new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor(), new LayoutSensor() })
         {
             for (SignalId id : s.signals())
             {

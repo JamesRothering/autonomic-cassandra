@@ -50,6 +50,7 @@ import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.detectors.BaselineDriftDetector;
 import org.apache.cassandra.autonomic.analyze.detectors.CapacityExhaustedDetector;
 import org.apache.cassandra.autonomic.analyze.detectors.Detectors;
+import org.apache.cassandra.autonomic.analyze.detectors.SplitOutcomeDetectors;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
@@ -82,6 +83,7 @@ import org.apache.cassandra.autonomic.monitor.sensors.CpuSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.GcSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.LayoutSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.PeerSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.monitor.sensors.TableSensor;
@@ -93,6 +95,7 @@ import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
 import org.apache.cassandra.autonomic.plan.policies.LoadSpikePolicy;
+import org.apache.cassandra.autonomic.plan.policies.PartitionSplitPolicy;
 import org.apache.cassandra.autonomic.plan.policies.Policies;
 import org.apache.cassandra.autonomic.safety.ClusterGate;
 import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
@@ -170,7 +173,7 @@ public class AutonomicService implements AutonomicServiceMBean
     private static List<Sensor> productionSensors()
     {
         return Arrays.asList(new TableSensor(), new ClientRequestSensor(), new ThreadPoolSensor(), new CompactionSensor(),
-                             new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor());
+                             new DiskSensor(), new GcSensor(), new CpuSensor(), new PeerSensor(), new HotPartitionSensor(), new LayoutSensor());
     }
 
     private static Correlator productionCorrelator()
@@ -305,6 +308,8 @@ public class AutonomicService implements AutonomicServiceMBean
         if (Detectors.enabled(config, CapacityExhaustedDetector.NAME))
             out.add(CapacityExhaustedDetector.fromConfig(config.detectors == null ? null : config.detectors.get(CapacityExhaustedDetector.NAME),
                                                          this::inNodeExhausted));
+        out.add(new SplitOutcomeDetectors.VerifyFailed());
+        out.add(new SplitOutcomeDetectors.SplitNotEffective());
         return out;
     }
 
@@ -422,7 +427,9 @@ public class AutonomicService implements AutonomicServiceMBean
         queuedDiagnosisWrites.set(0);
         registerProductionActuators(config);
         builtinDetectors = productionDetectors(config);
-        builtinPolicies = Policies.build(config, actuatorRegistry::get, name -> actuatorRegistry.isEnabled(name, config()));
+        List<Policy> built = new ArrayList<>(Policies.build(config, actuatorRegistry::get, name -> actuatorRegistry.isEnabled(name, config())));
+        built.add(PartitionSplitPolicy.create(config, coordinator));
+        builtinPolicies = built;
         for (Detector detector : builtinDetectors)
             safely("start", detector.name(), detector::start);
         for (Sensor sensor : sensors)
@@ -996,6 +1003,12 @@ public class AutonomicService implements AutonomicServiceMBean
 
     @VisibleForTesting
     KnowledgeView view()
+    {
+        return view;
+    }
+
+    /** This node's knowledge while the layer runs, else null: what the stages A and B of a partition split compare. */
+    public KnowledgeView knowledge()
     {
         return view;
     }

@@ -26,6 +26,7 @@ import java.util.Set;
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.layout.LayoutAnnotations;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.PartitionKeys;
@@ -99,8 +100,11 @@ public class HotPartitionDetector extends ThresholdDetector
         put(evidence, Signals.PARTITION_WRITE_SHARE, subject, knowledge);
         put(evidence, Signals.PARTITION_READ_OPS_PER_SEC, subject, knowledge);
         put(evidence, Signals.PARTITION_WRITE_OPS_PER_SEC, subject, knowledge);
-        evidence.put("key_hex", subject.detail);
+        evidence.put("key_hex", PartitionKeys.hex(subject));
         evidence.put("table", subject.keyspace + '.' + subject.table);
+        String layout = LayoutAnnotations.get(subject);
+        if (layout != null)
+            evidence.put(LayoutAnnotations.KEY, layout);
     }
 
     private void put(Map<String, String> evidence, SignalId signal, Subject subject, KnowledgeView knowledge)

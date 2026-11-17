@@ -178,4 +178,27 @@ public class EligibilityTest extends CQLTester
         String text = Eligibility.describe(structural(table));
         assertTrue(text, text.indexOf("CDC") < text.indexOf("STATIC_COLUMN") && text.indexOf("STATIC_COLUMN") < text.indexOf("GC_GRACE_TOO_SMALL"));
     }
+
+    @Test
+    public void runtimeBlocksOnLwtActivityOnTheTableOrInTheProfile()
+    {
+        assertNull(Eligibility.runtime(0, 0));
+        String onTable = Eligibility.runtime(3, 0);
+        assertTrue(onTable, onTable.contains("3 Paxos operations"));
+        assertTrue(Eligibility.runtime(0, 2).contains("2 on the key in its profile"));
+        assertNull(LayoutProfiler.runtime(base().build(), null));
+    }
+
+    @Test
+    public void runtimeReadsThePaxosCountersOfTheTable() throws Throwable
+    {
+        String t = createTable("CREATE TABLE %s (p int, c int, v int, PRIMARY KEY (p, c))");
+        TableMetadata table = table(t);
+        assertEquals(0, LayoutProfiler.paxosOperations(table));
+        assertNull(LayoutProfiler.runtime(table, null));
+        // a replica counts the Paxos phases it serves in the table's metrics
+        Schema.instance.getColumnFamilyStoreInstance(table.id).metric.casPropose.addNano(1000);
+        assertEquals(1, LayoutProfiler.paxosOperations(table));
+        assertTrue(LayoutProfiler.runtime(table, null).contains("lightweight transactions"));
+    }
 }

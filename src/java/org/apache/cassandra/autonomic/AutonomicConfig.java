@@ -141,6 +141,28 @@ public class AutonomicConfig
         public DurationSpec.LongMillisecondsBound straggler_window = new DurationSpec.LongMillisecondsBound("3h");
         /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
         public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
+
+        // triggering (T6.11); read on the node that proposes and on the node that owns the action
+        /** Evaluations a {@code hot_partition} diagnosis is open before the policy looks at it (design 7.1). */
+        public int for_evaluations = 20;
+        /** A partition with fewer rows than this is a small hot partition (shape C): not split (design 7.2). */
+        public int min_rows_for_split = 10000;
+        /** Rows the size probe counts at most; a larger partition is not proposed automatically. */
+        public int max_probe_rows = 5_000_000;
+        /** Smallest fraction of a key's operations that touch a single bucket (named-row reads and row writes). */
+        public double min_point_op_fraction = 0.8;
+        /** The share of the table's operations a bucket should stay below when the number of buckets is chosen. */
+        public double target_share = 0.05;
+        /** How long the profiler counts the shape of the key's operations before the policy decides. */
+        public DurationSpec.IntMillisecondsBound profile_window = new DurationSpec.IntMillisecondsBound("5m");
+        /** Operations the profile, and each evaluation window of design 7.3, needs before it is judged. */
+        public int min_samples = 100;
+        /** Stage A and B: the key's read latency may grow by this fraction of its baseline (1.0 is 2x). */
+        public double read_regression_tolerance = 1.0;
+        /** Stage B: the busiest partition's share of the table's operations must fall by this fraction. */
+        public double min_improvement = 0.5;
+        /** Stage B: the window, ending when the key is STEADY, over which the signals are compared with the baseline. */
+        public DurationSpec.IntMillisecondsBound verify_window = new DurationSpec.IntMillisecondsBound("10m");
     }
 
     public static class ScaleOutConfig

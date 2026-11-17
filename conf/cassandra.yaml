@@ -3215,6 +3215,25 @@ storage_compatibility_mode: NONE
 #     straggler_window: 3h
 #     # longest time before the commit point (the deadline is also kept below half of gc_grace_seconds)
 #     max_migration_duration: 24h
+#     # triggering. A hot_partition diagnosis open for for_evaluations evaluations is looked at by the policy on the
+#     # preferred proposer: fewer than min_rows_for_split rows is a small hot partition and is not split; the key's
+#     # operations are then counted for profile_window (the profile must hold min_samples operations) and at least
+#     # min_point_op_fraction of them must touch one bucket (named-row reads, row writes); the number of buckets keeps
+#     # a bucket below target_share of the table's operations; a partition of more than max_probe_rows rows is not
+#     # proposed automatically
+#     for_evaluations: 20
+#     min_rows_for_split: 10000
+#     max_probe_rows: 5000000
+#     min_point_op_fraction: 0.8
+#     target_share: 0.05
+#     profile_window: 5m
+#     min_samples: 100
+#     # verification. The key's read latency during CUTOVER (stage A: else the split is rolled back) and after the
+#     # split (stage B) may grow by read_regression_tolerance of its baseline; stage B also needs the busiest
+#     # partition's share of the table's operations to fall by min_improvement, over the last verify_window
+#     read_regression_tolerance: 1.0
+#     min_improvement: 0.5
+#     verify_window: 10m
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

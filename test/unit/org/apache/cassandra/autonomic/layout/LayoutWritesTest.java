@@ -59,6 +59,7 @@ import org.apache.cassandra.transport.Dispatcher;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -158,6 +159,7 @@ public class LayoutWritesTest extends CQLTester
     @After
     public void restore()
     {
+        LayoutProfiler.clear();
         LayoutWrites.setForTesting(null, null);
     }
 
@@ -308,6 +310,8 @@ public class LayoutWritesTest extends CQLTester
     @Test
     public void emptyRegistryCostsOneLookup() throws Exception
     {
+        long hooks = LayoutProfiler.hookCalls();
+        assertNull("FC8: nothing is watched, the hooks read one null field", LayoutProfiler.active());
         for (ClusterMetadata md : new ClusterMetadata[]{ emptyRegistry(), ClusterMetadata.current() })
         {
             metadata.set(md);
@@ -323,6 +327,58 @@ public class LayoutWritesTest extends CQLTester
             assertEquals(1, metadata.lookups);
         }
         assertCalls();
+        assertEquals("FC8: the profiler was not looked at", hooks, LayoutProfiler.hookCalls());
+    }
+
+    /** Design 7.2 step 3: the shapes of a watched key's writes are counted and the writes timed, whatever the registry. */
+    @Test
+    public void aWatchedKeyIsProfiledAndItsWritesAreTimed()
+    {
+        metadata.set(emptyRegistry());
+        LayoutProfiler.watch(logical.id, key(K), 60_000);
+        LayoutProfiler.watch(logical.id, key(K + 1), 60_000);
+        long hooks = LayoutProfiler.hookCalls();
+
+        assertTrue("the hook executes the stock tail itself", route(List.of(rows(logical, K, 1, 2)), ConsistencyLevel.QUORUM, false));
+        assertCalls("plain QUORUM [t(" + K + ")2]");
+        assertTrue(route(List.of(rangeDelete(K + 1)), ConsistencyLevel.QUORUM, false));
+        assertTrue(route(List.of(partitionDelete(K + 1)), ConsistencyLevel.QUORUM, false));
+        // not watched: the stock path, which the hook leaves to its caller
+        assertFalse(route(List.of(rows(logical, 99, 1)), ConsistencyLevel.QUORUM, false));
+        assertFalse(route(List.of(rows(unrelated, K, 1)), ConsistencyLevel.QUORUM, false));
+        assertEquals(3, recorder.calls.size());
+
+        LayoutProfiler.Shape a = LayoutProfiler.get(logical.id, key(K)).shape();
+        assertEquals(2, a.rowWrites);
+        assertEquals(1, a.timedWrites);
+        assertEquals(1.0, a.pointFraction(), 0.0);
+        LayoutProfiler.Shape b = LayoutProfiler.get(logical.id, key(K + 1)).shape();
+        assertEquals(2, b.deletes);
+        assertEquals(2, b.timedWrites);
+        assertEquals(0.0, b.pointFraction(), 0.0);
+        assertEquals(5, LayoutProfiler.hookCalls() - hooks);
+
+        LayoutWrites.checkCas(keyspace(), logical.name, logical.partitioner.decorateKey(key(K)));
+        LayoutWrites.checkCas(keyspace(), logical.name, logical.partitioner.decorateKey(key(5000)));
+        assertEquals(1, LayoutProfiler.get(logical.id, key(K)).shape().cas);
+
+        // a failing write is counted as an error and the exception goes on
+        recorder.inside = () -> {
+            throw new org.apache.cassandra.exceptions.InvalidRequestException("no");
+        };
+        try
+        {
+            route(List.of(rows(logical, K, 3)), ConsistencyLevel.QUORUM, false);
+            fail();
+        }
+        catch (org.apache.cassandra.exceptions.InvalidRequestException expected)
+        {
+            assertEquals(1, LayoutProfiler.get(logical.id, key(K)).shape().writeErrors);
+        }
+
+        LayoutProfiler.unwatch(logical.id, key(K));
+        LayoutProfiler.unwatch(logical.id, key(K + 1));
+        assertNull(LayoutProfiler.active());
     }
 
     @Test

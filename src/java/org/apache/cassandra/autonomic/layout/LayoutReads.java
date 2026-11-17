@@ -65,6 +65,7 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.Clock;
 
 import io.netty.util.concurrent.FastThreadLocal;
 
@@ -180,6 +181,33 @@ public final class LayoutReads
      */
     public static PartitionIterator read(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     {
+        // FC8: one read of a field that is null unless a key is profiled
+        LayoutProfiler.Watches watches = LayoutProfiler.active();
+        if (watches == null || reentrant.get())
+            return readRegistered(group, consistencyLevel, requestTime);
+        LayoutProfiler.Probe probe = watches.read(group);
+        if (probe == null)
+            return readRegistered(group, consistencyLevel, requestTime);
+        long start = Clock.Global.nanoTime();
+        try
+        {
+            // taken by the hook so that its latency is known
+            PartitionIterator result = readRegistered(group, consistencyLevel, requestTime);
+            if (result == null)
+                result = stock(group, consistencyLevel, requestTime);
+            probe.done(Clock.Global.nanoTime() - start);
+            return result;
+        }
+        catch (RuntimeException e)
+        {
+            probe.failed();
+            throw e;
+        }
+    }
+
+    private static PartitionIterator readRegistered(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel,
+                                                    Dispatcher.RequestTime requestTime)
+    {
         ClusterMetadata cm = metadata.get();
         LayoutRegistry registry = LayoutRegistry.of(cm);
         if (registry.byLogical.isEmpty() || reentrant.get())
@@ -245,6 +273,9 @@ public final class LayoutReads
     public static PartitionIterator range(PartitionRangeReadCommand command, ConsistencyLevel consistencyLevel, ReadCoordinator readCoordinator,
                                           Dispatcher.RequestTime requestTime)
     {
+        LayoutProfiler.Watches watches = LayoutProfiler.active();
+        if (watches != null && !reentrant.get())
+            watches.scan(command.metadata().id);
         ClusterMetadata cm = metadata.get();
         LayoutRegistry registry = LayoutRegistry.of(cm);
         if (registry.byLogical.isEmpty() || reentrant.get() || registry.layout(command.metadata().id) == null)

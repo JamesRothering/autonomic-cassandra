@@ -116,6 +116,23 @@ public final class Eligibility
         return blockers;
     }
 
+    /**
+     * The runtime part (design section 6, 7.4), decided on the proposing node and by the same call for an operator's
+     * {@code layout split} and for the policy: LWT activity. Pure in its arguments.
+     *
+     * @param casOperations Paxos operations on the table on this node since it started
+     *                      ({@code casPrepare}, {@code casPropose} and {@code casCommit} counts)
+     * @param profiledCas   {@code cas} calls on the key in its shape profile; 0 without a profile
+     * @return why the key must not be split, or null
+     */
+    public static String runtime(long casOperations, long profiledCas)
+    {
+        if (casOperations > 0 || profiledCas > 0)
+            return "lightweight transactions were used on the table (" + casOperations + " Paxos operations on this node since it started"
+                   + (profiledCas > 0 ? ", " + profiledCas + " on the key in its profile" : "") + "); they are rejected on an adapted partition";
+        return null;
+    }
+
     /** The blockers as one sentence, or null if there are none. */
     public static String describe(List<Blocker> blockers)
     {

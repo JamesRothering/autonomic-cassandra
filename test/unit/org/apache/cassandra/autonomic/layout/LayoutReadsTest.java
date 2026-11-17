@@ -162,6 +162,7 @@ public class LayoutReadsTest extends CQLTester
     @After
     public void restore()
     {
+        LayoutProfiler.clear();
         LayoutWrites.setForTesting(null, null);
         LayoutReads.setForTesting(null, null);
         DatabaseDescriptor.getAutonomicConfig().layout.fanout_eager_rows = eagerRows;
@@ -361,6 +362,8 @@ public class LayoutReadsTest extends CQLTester
     @Test
     public void whatIsNotRoutedCostsOneLookup()
     {
+        long hooks = LayoutProfiler.hookCalls();
+        assertNull("nothing is watched", LayoutProfiler.active());
         SinglePartitionReadCommand.Group split = group(logical, K);
         for (ClusterMetadata md : new ClusterMetadata[]{ with(null), ClusterMetadata.current() })
         {
@@ -375,6 +378,38 @@ public class LayoutReadsTest extends CQLTester
         assertNull(LayoutReads.read(group(physical, K), ConsistencyLevel.SERIAL, Dispatcher.RequestTime.forImmediateExecution()));
         assertEquals(3, metadata.lookups);
         assertEquals(List.of(), reads);
+        assertEquals("FC8: the profiler was not looked at", hooks, LayoutProfiler.hookCalls());
+    }
+
+    /** FC8 and design 7.2 step 3: a watched key is counted by shape and its reads are timed; others are not looked at. */
+    @Test
+    public void aWatchedKeyIsProfiledAndItsReadsAreTimed()
+    {
+        metadata.set(with(null));
+        LayoutProfiler.watch(logical.id, key(K), 60_000);
+        long hooks = LayoutProfiler.hookCalls();
+        LayoutProfiler.Shape before = LayoutProfiler.get(logical.id, key(K)).shape();
+        assertEquals(0, before.operations());
+
+        PartitionIterator result = LayoutReads.read(group(logical, K), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution());
+        assertNotNull("the hook took the read so that it could time it", result);
+        result.close();
+        java.util.TreeSet<org.apache.cassandra.db.Clustering<?>> names = new java.util.TreeSet<>(logical.comparator);
+        names.add(org.apache.cassandra.db.Clustering.make(key(1), key(1)));
+        SinglePartitionReadCommand named = SinglePartitionReadCommand.create(logical, NOW, ColumnFilter.all(logical), RowFilter.none(), DataLimits.NONE,
+                                                                             logical.partitioner.decorateKey(key(K)),
+                                                                             new org.apache.cassandra.db.filter.ClusteringIndexNamesFilter(names, false));
+        LayoutReads.read(SinglePartitionReadCommand.Group.one(named), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution()).close();
+        LayoutProfiler.Shape shape = LayoutProfiler.get(logical.id, key(K)).shape();
+        assertEquals(1, shape.sliceReads);
+        assertEquals(1, shape.namedReads);
+        assertEquals(2, shape.timedReads);
+        assertEquals(0.5, shape.pointFraction(), 0.0);
+        assertEquals(2, LayoutProfiler.hookCalls() - hooks);
+
+        // another key of the same table is looked at by the hook but not counted or taken over
+        assertNull(LayoutReads.read(group(logical, K + 1), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution()));
+        assertEquals(2, LayoutProfiler.get(logical.id, key(K)).shape().timedReads);
     }
 
     /** The whole partition with a limit of 1000 rows: with the default settings an eager read, which the test can see. */

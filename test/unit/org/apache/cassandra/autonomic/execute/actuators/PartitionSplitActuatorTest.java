@@ -47,17 +47,26 @@ import org.apache.cassandra.autonomic.coord.Recent;
 import org.apache.cassandra.autonomic.execute.ActionContext;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
 import org.apache.cassandra.autonomic.execute.StepResult;
+import org.apache.cassandra.autonomic.execute.Verdict;
+import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
+import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.knowledge.ObservationStore;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.KeyState;
+import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.LayoutVerifier;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.autonomic.layout.ReportBackfill;
+import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
+import org.apache.cassandra.autonomic.monitor.Observation;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -271,6 +280,15 @@ public class PartitionSplitActuatorTest
         public long nowMillis()
         {
             return cluster.now.get();
+        }
+
+        /** The signals of this node; null: stages A and B are not judged. */
+        KnowledgeView knowledge;
+
+        @Override
+        public KnowledgeView knowledge()
+        {
+            return knowledge;
         }
     }
 
@@ -723,6 +741,184 @@ public class PartitionSplitActuatorTest
     // ---------------------------------------------------------------------------------------------------------
     // verification (ADR-030)
     // ---------------------------------------------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------------------------------------------
+    // stage A and stage B (T6.11, design 7.3)
+    // ---------------------------------------------------------------------------------------------------------
+
+    private ObservationStore signals;
+
+    private void withKnowledge()
+    {
+        signals = new ObservationStore(64, 64);
+        env.knowledge = new InMemoryKnowledgeView(signals, cluster.now::get);
+    }
+
+    private void observe(SignalId signal, Subject subject, long time, double value)
+    {
+        signals.accept(new Observation(signal, subject, time, value));
+    }
+
+    private static Subject keySubject()
+    {
+        return Subject.partition(KS, TABLE, KEY_HEX);
+    }
+
+    /** What the key looked like when the policy proposed the split: 1000us reads, 500us writes, busiest partition 60% of the table. */
+    private static Map<String, String> proposedWithProfile()
+    {
+        Map<String, String> params = PartitionSplitActuator.params(4, PartitionSplitActuator.MODE_SPLIT);
+        params.putAll(new SplitEvaluation.Baseline(1000, 500, 0.0, 1000, 1000, 0.6, false).toParams());
+        return params;
+    }
+
+    private Owner ownerWithProfile()
+    {
+        return new Owner(coordinator1, node1, proposedWithProfile()).claimLane();
+    }
+
+    /** Key signals as {@code LayoutSensor} emits them, 300 and 400 ms from now: inside CUTOVER's soak, or the last 10 minutes of STEADY. */
+    private void keySignals(double readMicros, double writeMicros, double errorRate)
+    {
+        long t = cluster.now.get();
+        for (long at : new long[]{ t + 300, t + 400 })
+        {
+            observe(Signals.KEY_READ_LATENCY_MICROS, keySubject(), at, readMicros);
+            observe(Signals.KEY_READ_OPS_DELTA, keySubject(), at, 300);
+            observe(Signals.KEY_WRITE_LATENCY_MICROS, keySubject(), at, writeMicros);
+            observe(Signals.KEY_WRITE_OPS_DELTA, keySubject(), at, 300);
+            observe(Signals.KEY_ERROR_RATE, keySubject(), at, errorRate);
+        }
+    }
+
+    private void overflowShare(double share)
+    {
+        TableLayout layout = LayoutRegistry.of(cluster.log).layout(LOGICAL);
+        observe(Signals.PARTITION_READ_SHARE, Subject.partition(KS, layout.physicalName, "0001"), cluster.now.get(), share);
+    }
+
+    @Test
+    public void stageAFailureRollsBackThroughRollbackDual() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        keySignals(2100, 500, 0.0);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(owner.phases.toString(), owner.phases.containsAll(List.of("CUTOVER/1", "ROLLBACK_DUAL/1", "ABORTING/1")));
+        assertFalse(owner.phases.toString(), owner.phases.contains("NEW_ONLY/1"));
+        assertTrue(end.detail, end.detail.contains("stage A failed") && end.detail.contains("read latency"));
+        assertRemovedAndDropped();
+    }
+
+    @Test
+    public void stageAFailureOnTheErrorRateRollsBack() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        keySignals(1000, 500, 0.05);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("stage A failed") && end.detail.contains("error rate"));
+    }
+
+    @Test
+    public void stageAWithinToleranceCommitsAndStageBJudgesTheGoal() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        keySignals(1900, 500, 0.0);
+        owner.reach(Phase.CLEANUP);
+        overflowShare(0.2);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.COMMITTED, end.kind);
+        assertEquals(Verdict.IMPROVED, end.verdict);
+        assertTrue(end.detail, end.detail.contains("stage B IMPROVED") && end.detail.contains("0.600 -> 0.200"));
+        assertEquals(Phase.STEADY, key(cluster.log).phase);
+    }
+
+    @Test
+    public void stageBVerdictsAreRecordedAndTheKeyStaysSplit() throws Exception
+    {
+        // goal missed: the busiest bucket still has 40% of the table: NEUTRAL
+        withKnowledge();
+        Owner neutral = ownerWithProfile().reach(Phase.CLEANUP);
+        keySignals(1000, 500, 0.0);
+        overflowShare(0.4);
+        StepResult end = neutral.toEnd();
+        assertEquals(end.toString(), Verdict.NEUTRAL, end.verdict);
+        assertEquals(Phase.STEADY, key(cluster.log).phase);
+    }
+
+    @Test
+    public void aBreachedStageBGuardIsRegressed() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        // fine during the soak, worse than 25% over the baseline's write latency afterwards
+        keySignals(1000, 500, 0.0);
+        owner.reach(Phase.CLEANUP);
+        cluster.now.addAndGet(1000);
+        keySignals(1000, 900, 0.0);
+        overflowShare(0.1);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), Verdict.REGRESSED, end.verdict);
+        assertTrue(end.detail, end.detail.contains("write latency") && end.detail.contains("a guard was breached"));
+        assertEquals("the key stays split", Phase.STEADY, key(cluster.log).phase);
+    }
+
+    @Test
+    public void withoutAProfileTheStagesAreNotJudgedAndNothingIsRolledBack() throws Exception
+    {
+        // an operator's split carries no baseline; the signals may be anything
+        withKnowledge();
+        Owner owner = owner().reach(Phase.CUTOVER);
+        keySignals(99999, 99999, 1.0);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.COMMITTED, end.kind);
+        assertEquals(Verdict.INCONCLUSIVE, end.verdict);
+        assertTrue(end.detail, end.detail.contains("no baseline"));
+    }
+
+    @Test
+    public void aNodeWithoutKnowledgeJudgesNothing() throws Exception
+    {
+        env.knowledge = null;
+        StepResult end = ownerWithProfile().toEnd();
+        assertEquals(end.toString(), StepResult.Kind.COMMITTED, end.kind);
+        assertEquals(Verdict.INCONCLUSIVE, end.verdict);
+    }
+
+    @Test
+    public void aBaselineIsKeptInTheClaimAcrossAnOwnerChange() throws Exception
+    {
+        Owner owner = ownerWithProfile().reach(Phase.BACKFILL);
+        Map<String, String> state = owner.claim().state;
+        assertEquals("1000.0", state.get(SplitEvaluation.P_READ_MICROS));
+        assertEquals("0.6", state.get(SplitEvaluation.P_OPS_SHARE));
+        assertNotNull(SplitEvaluation.Baseline.fromMap(state));
+    }
+
+    @Test
+    public void anAbortedVerificationIsReportedForTheDiagnosis() throws Exception
+    {
+        LayoutEvents.clear();
+        FakeCheck first = new FakeCheck();
+        first.contentDiffers = 1;
+        FakeCheck second = new FakeCheck();
+        second.contentDiffers = 1;
+        env.checks.add(first);
+        env.checks.add(second);
+        Owner owner = owner();
+        StepResult end = owner.toEnd();
+        assertEquals(StepResult.Kind.ROLLED_BACK, end.kind);
+        List<LayoutEvents.VerifyFailure> failures = LayoutEvents.verifyFailures();
+        assertEquals(1, failures.size());
+        assertEquals(owner.id, failures.get(0).actionId);
+        assertEquals(KEY_HEX, failures.get(0).keyHex);
+        assertTrue(failures.get(0).detail, failures.get(0).detail.contains("fake"));
+        LayoutEvents.clear();
+    }
 
     @Test
     public void failedVerificationRestartsTheBackfillThenAborts() throws Exception

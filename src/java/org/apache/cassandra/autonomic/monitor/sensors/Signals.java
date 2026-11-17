@@ -149,6 +149,13 @@ public final class Signals
     public static final SignalId PARTITION_READ_OPS_PER_SEC = def("partition.read_ops_per_sec", "ops/s", "Estimated reads per second of this partition in the last sampling window");
     public static final SignalId PARTITION_WRITE_OPS_PER_SEC = def("partition.write_ops_per_sec", "ops/s", "Estimated writes per second of this partition in the last sampling window");
 
+    // ---- LayoutSensor (subject PARTITION; detail is the raw key as lowercase hex); only for keys the LayoutProfiler watches ----
+    public static final SignalId KEY_READ_LATENCY_MICROS = def("layout.key_read_latency_micros", "us", "Mean latency, over the last collection interval, of reads of the watched key that this node coordinated (absent when none)");
+    public static final SignalId KEY_WRITE_LATENCY_MICROS = def("layout.key_write_latency_micros", "us", "Mean latency, over the last collection interval, of writes of the watched key that this node coordinated (absent when none)");
+    public static final SignalId KEY_ERROR_RATE = def("layout.key_error_rate", "fraction", "Fraction of the reads and writes of the watched key in the last collection interval that failed (absent when none)");
+    public static final SignalId KEY_READ_OPS_DELTA = def("layout.key_read_ops_delta", "ops", "Reads of the watched key coordinated here since the previous collection");
+    public static final SignalId KEY_WRITE_OPS_DELTA = def("layout.key_write_ops_delta", "ops", "Writes of the watched key coordinated here since the previous collection");
+
     private Signals()
     {
     }
