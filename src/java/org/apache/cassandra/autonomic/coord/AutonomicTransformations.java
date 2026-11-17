@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.coord;
 
+import org.apache.cassandra.autonomic.layout.AdoptKey;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
@@ -53,5 +54,6 @@ public final class AutonomicTransformations
         CustomTransformation.registerExtension(RemoveKey.NAME, RemoveKey.serializer);
         CustomTransformation.registerExtension(FinishKey.NAME, FinishKey.serializer);
         CustomTransformation.registerExtension(RemoveOrphanLayout.NAME, RemoveOrphanLayout.serializer);
+        CustomTransformation.registerExtension(AdoptKey.NAME, AdoptKey.serializer);
     }
 }

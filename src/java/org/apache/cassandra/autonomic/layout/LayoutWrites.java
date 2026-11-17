@@ -304,6 +304,18 @@ public final class LayoutWrites
         }
     }
 
+    /**
+     * The owner's own writes of design 4.1 (T6.9): the partition deletions of the bucket partitions of an aborted
+     * incarnation in the overflow table, and the base partition tombstone of a finished key in the base table. Both
+     * must take the stock path: the first targets a managed table, which the router refuses to clients, and the second
+     * a key in class C3, which the router would send to the overflow table. Not atomic; returns once every mutation is
+     * acknowledged at the consistency level and throws what the stock path throws.
+     */
+    public static void writeAsOwner(List<? extends IMutation> mutations, ConsistencyLevel consistencyLevel)
+    {
+        writeUnrouted(mutations, consistencyLevel, Dispatcher.RequestTime.forImmediateExecution());
+    }
+
     // ---------------------------------------------------------------------------------------------------------
     // H19, H20
     // ---------------------------------------------------------------------------------------------------------

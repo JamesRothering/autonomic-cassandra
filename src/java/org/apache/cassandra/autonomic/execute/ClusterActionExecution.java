@@ -466,11 +466,15 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
                     scheduleStep(run, result.delayMillis);
                     return;
                 }
+                Claim before = run.claim;
                 if (outcome.claim != null)
                     run.claim = outcome.claim;
                 // a plain advance is retried as it is; a transformation of the actuator embeds the step it expected,
-                // so the actuator is asked again
-                run.pending = result.kind == StepResult.Kind.ADVANCE ? result : null;
+                // so the actuator is asked again. So is it for an advance whose claim was moved meanwhile by another
+                // commit (an operator's request written into the claim state, T6.9): retried as it is, the advance
+                // would overwrite that state with the one it was computed from
+                boolean moved = outcome.claim != null && outcome.claim.step != before.step;
+                run.pending = result.kind == StepResult.Kind.ADVANCE && !moved ? result : null;
                 scheduleStep(run, retryDelayMillis());
                 return;
             }

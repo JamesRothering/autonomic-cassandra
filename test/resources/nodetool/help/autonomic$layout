@@ -1,0 +1,67 @@
+NAME
+        nodetool autonomic layout - Operate adaptive layouts: split hot
+        partitions and follow their migration
+
+SYNOPSIS
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout <command>
+                [<args>]
+
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout status
+
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout split
+                [--buckets <buckets>] [--] <keyspace> <table> <key-hex>
+
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout abort [--]
+                <keyspace> <table> <key-hex>
+
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout resume [--]
+                <keyspace> <table> <key-hex>
+
+OPTIONS
+        -h <host>, --host <host>
+            Node hostname or ip address
+
+        -p <port>, --port <port>
+            Remote jmx agent port number
+
+        -pw <password>, --password <password>
+            Remote jmx agent password
+
+        -pwf <passwordFilePath>, --password-file <passwordFilePath>
+            Path to the JMX password file
+
+        -u <username>, --username <username>
+            Remote jmx agent username
+
+COMMANDS
+        With no arguments, Display help information
+
+        status
+            Print every adapted partition: phase, generation, owning action and what it
+            waits for
+        split
+            Propose to split one partition into buckets (passes the governor; manual
+            approval by default)
+
+            With --buckets option, Number of buckets, 2 to 64 (default layout.
+            default_buckets)
+        abort
+            Abort the split of a partition; refused past its commit point
+        resume
+            Take over a split that has no live action: abort it before its commit
+            point, finish it after

@@ -248,6 +248,30 @@ public final class LayoutRegistry
         return changed(logical, layout.withKey(key, state.withBackfillDone(node)));
     }
 
+    /**
+     * {@code AdoptKey}: the key must be in {@code phase}, not {@link Phase#STEADY}, and owned by {@code previous}; it
+     * becomes owned by {@code actionId} and nothing else changes. Already owned by {@code actionId}: unchanged.
+     */
+    public Result withAdoptedKey(TableId logical, ByteBuffer key, Phase phase, UUID previous, UUID actionId)
+    {
+        if (logical == null || key == null || phase == null || previous == null || actionId == null)
+            return reject("missing argument");
+        String missing = lookup(logical, key);
+        if (missing != null)
+            return reject(missing);
+        TableLayout layout = byLogical.get(logical);
+        KeyState state = layout.keyState(key);
+        if (state.phase != phase)
+            return reject("key is in phase " + state.phase + ", not " + phase);
+        if (state.phase == Phase.STEADY || state.actionId == null)
+            return reject("key is in phase " + state.phase + " and owned by no action");
+        if (actionId.equals(state.actionId))
+            return new Result(this, null, true);
+        if (!previous.equals(state.actionId))
+            return reject("key is owned by action " + state.actionId + ", not " + previous);
+        return changed(logical, layout.withKey(key, state.withAction(actionId)));
+    }
+
     /** {@code RemoveKey}: the key must be {@link Phase#ABORTING} and owned by {@code actionId}; the layout goes with its last key. */
     public Result withoutKey(TableId logical, ByteBuffer key, UUID actionId)
     {

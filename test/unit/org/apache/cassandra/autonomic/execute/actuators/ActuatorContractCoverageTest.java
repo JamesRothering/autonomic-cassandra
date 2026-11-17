@@ -38,7 +38,8 @@ import static org.junit.Assert.assertTrue;
  */
 public class ActuatorContractCoverageTest
 {
-    private static final Set<String> IRREVERSIBLE = Set.of(GarbageCollectActuator.NAME, RepairPriorityActuator.NAME, ScaleOutActuator.NAME);
+    private static final Set<String> IRREVERSIBLE = Set.of(GarbageCollectActuator.NAME, RepairPriorityActuator.NAME, ScaleOutActuator.NAME,
+                                                           PartitionSplitActuator.NAME);
 
     @BeforeClass
     public static void setupClass()
@@ -60,7 +61,8 @@ public class ActuatorContractCoverageTest
             tested.add(actuator.name());
         }
         assertEquals(Set.of("compaction_throughput", "concurrent_compactors", "stream_throughput", "hint_throttle", "key_cache_capacity",
-                            "row_cache_capacity", "counter_cache_capacity", "advertised_severity", "read_pool", "mutation_pool", "counter_mutation_pool", "view_mutation_pool", "request_throttle", "garbage_collect", "repair_priority", "scale_out"),
+                            "row_cache_capacity", "counter_cache_capacity", "advertised_severity", "read_pool", "mutation_pool", "counter_mutation_pool", "view_mutation_pool", "request_throttle", "garbage_collect", "repair_priority", "scale_out",
+                            "partition_split"),
                      tested);
     }
 }

@@ -55,7 +55,10 @@ public interface AutonomicServiceMBean
     /** Restores every managed knob to its configured value. Not available until knob actuators exist. */
     void revert();
 
-    /** Approves an action that is awaiting manual approval; the governor's other checks are evaluated again. */
+    /**
+     * Approves an action that is awaiting manual approval; the governor's other checks are evaluated again. For a
+     * partition split in CUTOVER it is the second approval, of the commit point ({@code layout.commit_approval}).
+     */
     void approve(String actionId);
 
     /** Rejects an action that is awaiting manual approval. */
@@ -110,4 +113,31 @@ public interface AutonomicServiceMBean
 
     /** Most recently released claims of the cluster ledger, newest first. */
     List<Map<String, String>> getClusterRecentActions();
+
+    /**
+     * {@code layout status}: one record per key of every adapted layout (phase, generation, reports, owning action,
+     * and what it waits for). Works whether or not the layer is enabled on this node.
+     */
+    List<Map<String, String>> getLayoutStatus();
+
+    /**
+     * {@code layout split}: proposes the split of one partition, given as the hex of its raw key bytes, into
+     * {@code buckets} buckets (0 for {@code layout.default_buckets}). The proposal passes the same validation and
+     * governor as one from a policy, and waits for {@code approve} under manual approval. Returns the action record.
+     */
+    Map<String, String> splitPartition(String keyspace, String table, String keyHex, int buckets);
+
+    /**
+     * {@code layout abort}: asks the owner of the migration of the key to take the abort path. Refused once the
+     * migration is past its commit point.
+     *
+     * @throws IllegalStateException if refused
+     */
+    String abortSplit(String keyspace, String table, String keyHex);
+
+    /**
+     * {@code layout resume}: proposes a new action for a key whose migration has no live action: it aborts a
+     * migration that stopped before its commit point and finishes one that stopped after it.
+     */
+    Map<String, String> resumeSplit(String keyspace, String table, String keyHex);
 }

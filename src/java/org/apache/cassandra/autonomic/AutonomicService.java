@@ -66,6 +66,7 @@ import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepScheduler;
 import org.apache.cassandra.autonomic.execute.actuators.Actuators;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
+import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
 import org.apache.cassandra.autonomic.execute.actuators.ScaleOutActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
@@ -82,11 +83,15 @@ import org.apache.cassandra.autonomic.monitor.sensors.DiskSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.GcSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.PeerSensor;
+import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.monitor.sensors.TableSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.ThreadPoolSensor;
+import org.apache.cassandra.autonomic.plan.Action;
+import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.PlanSink;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.plan.VerifySpec;
 import org.apache.cassandra.autonomic.plan.policies.LoadSpikePolicy;
 import org.apache.cassandra.autonomic.plan.policies.Policies;
 import org.apache.cassandra.autonomic.safety.ClusterGate;
@@ -154,6 +159,8 @@ public class AutonomicService implements AutonomicServiceMBean
     public static final String ACTION_FAILED = "autonomic.action_failed";
     public static final String CIRCUIT_BREAKER = "autonomic.circuit_breaker";
     public static final String POLICY_QUARANTINED = "autonomic.policy_quarantined";
+    /** Policy name of the proposals of operator commands ({@code nodetool autonomic layout split | resume}). */
+    public static final String OPERATOR_POLICY = "operator";
     private static final String ACTUATOR_STALLED_KEY = LOOP_STALLED + ":actuator";
     private static final String KILLED_PREFIX = "KILLED|";
     private static final String PAUSED_PREFIX = "PAUSED|";
@@ -1465,7 +1472,19 @@ public class AutonomicService implements AutonomicServiceMBean
     @Override
     public void approve(String actionId)
     {
-        requireExecutor().approve(UUID.fromString(actionId));
+        UUID id = UUID.fromString(actionId);
+        ActionExecutor ex = requireExecutor();
+        try
+        {
+            ex.approve(id);
+        }
+        catch (IllegalArgumentException e)
+        {
+            // not a held proposal: perhaps the commit point of a partition split (T6.9)
+            if (!PartitionSplitActuator.approveCommit(coordinator, id))
+                throw e;
+            logger.info("Autonomic partition split {}: commit point approved by operator command", id);
+        }
     }
 
     @Override
@@ -1698,6 +1717,54 @@ public class AutonomicService implements AutonomicServiceMBean
         m.put("proposed_at", String.valueOf(r.proposedMillis));
         m.put("updated_at", String.valueOf(r.updatedMillis));
         return m;
+    }
+
+    @Override
+    public List<Map<String, String>> getLayoutStatus()
+    {
+        ClusterMetadata metadata = ClusterMetadata.currentNullable();
+        return metadata == null ? Collections.emptyList() : PartitionSplitActuator.status(metadata, clock.getAsLong(), config().layout,
+                                                                                                  DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS));
+    }
+
+    @Override
+    public Map<String, String> splitPartition(String keyspace, String table, String keyHex, int buckets)
+    {
+        return proposeSplit(keyspace, table, keyHex, PartitionSplitActuator.params(buckets, PartitionSplitActuator.MODE_SPLIT));
+    }
+
+    @Override
+    public Map<String, String> resumeSplit(String keyspace, String table, String keyHex)
+    {
+        return proposeSplit(keyspace, table, keyHex, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME));
+    }
+
+    /** An operator's proposal: the governor, the actuator's validation and approval as for a policy's (design 8). */
+    private Map<String, String> proposeSplit(String keyspace, String table, String keyHex, Map<String, String> params)
+    {
+        ActionExecutor ex = requireExecutor();
+        Subject target = PartitionSplitActuator.target(keyspace, table, keyHex);
+        // the actuator verifies its own action (FC4); the spec names what stage B (T6.11) will compare
+        VerifySpec verify = new VerifySpec(Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS, Subject.table(keyspace, table), true, 0.0,
+                                           Collections.emptyList(), 0, 0);
+        Action action = new Action(coordinator.newActionId(), PartitionSplitActuator.NAME, ActionScope.CLUSTER, target, params, verify);
+        Plan plan = new Plan(UUID.randomUUID(), UUID.randomUUID(), OPERATOR_POLICY, Collections.singletonList(action),
+                             "nodetool autonomic layout " + params.get(PartitionSplitActuator.PARAM_MODE));
+        ActionRecord record = ex.propose(plan, action, view);
+        if (record == null)
+            throw new IllegalStateException("The proposal was rejected for the same reason as an identical one just before; see `autonomic history`");
+        return describe(record);
+    }
+
+    @Override
+    public String abortSplit(String keyspace, String table, String keyHex)
+    {
+        if (ClusterMetadata.currentNullable() == null)
+            throw new IllegalStateException("Cluster metadata is not available");
+        String done = PartitionSplitActuator.requestAbort(coordinator, ClusterMetadata::current, PartitionSplitActuator.target(keyspace, table, keyHex),
+                                                          "aborted by operator command");
+        logger.warn("Autonomic partition split of {}.{} key {}: {}", keyspace, table, keyHex, done);
+        return done;
     }
 
     private static Map<String, String> describe(Diagnosis d, boolean cleared)

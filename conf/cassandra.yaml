@@ -3165,6 +3165,10 @@ storage_compatibility_mode: NONE
 #     # on capacity_exhausted. Never proposed while the provider cannot add a node. A node that started to join is
 #     # never removed or cancelled by the layer
 #     scale_out: { enabled: false }
+#     # cluster action (needs `nodetool autonomic cluster enable`, manual approval by default; one at a time in the
+#     # cluster): splits one hot partition into buckets of a companion table (adaptive schema). Proposed by
+#     # `nodetool autonomic layout split`; has a commit point after which it is not rolled back
+#     partition_split: { enabled: false }
 #   scale_out:
 #     # class implementing org.apache.cassandra.autonomic.elastic.ScaleOutProvider, built when the layer starts with
 #     # `parameters` (a public constructor taking a Map<String, String>, or a no-argument one). The default cannot
@@ -3192,6 +3196,25 @@ storage_compatibility_mode: NONE
 #     # markers, each written at ALL and then recorded locally so that a restart continues after it
 #     backfill_throughput: 1MiB/s
 #     backfill_chunk_rows: 1000
+#     # the owner of a split (the node that drives it). Buckets when `layout split` names none; tables never split
+#     default_buckets: 8
+#     excluded_tables: []
+#     # how often every node is asked for its epoch: a phase changes only once every node has acknowledged the last
+#     ack_poll_interval: 5s
+#     # ANNOUNCED waits at least this, and at least the longest write, CAS, range and truncate timeout, once acknowledged
+#     cas_drain: 15s
+#     # the equivalence check of VERIFY, and how many new backfill generations a failed check gets before an abort
+#     verify_page_rows: 1000
+#     verify_recheck_delay: 2s
+#     verify_retries: 1
+#     # CUTOVER is held this long before the commit point; with manual, the commit point also waits for
+#     # `nodetool autonomic approve <id>`
+#     cutover_soak: 10m
+#     commit_approval: manual
+#     # CLEANUP waits this long for late writes before the reconcile pass and the base partition tombstone
+#     straggler_window: 3h
+#     # longest time before the commit point (the deadline is also kept below half of gc_grace_seconds)
+#     max_migration_duration: 24h
 
 # Dictionary compression settings for ZSTD dictionary-based compression
 # These settings control the automatic training and caching of compression dictionaries

@@ -793,6 +793,57 @@ public class LayoutTransformationTest
         assertEquals(6, registry(done).layout(LOGICAL).version);
     }
 
+    /** The expired claim of A replaced by a RECOVERING claim of action B of node 2 (a takeover); the key stays owned by A. */
+    static ClusterMetadata takenOver(ClusterMetadata md)
+    {
+        Claim held = ledger(md).claim(A);
+        long later = held.leaseExpiresAtMillis + 1;
+        Claim takeover = new Claim(B, held.actuator, held.target, N2, Claim.RECOVERING, 0, later, later + LEASE, held.state);
+        return execute(md, new ClaimAction(Lane.SCHEMA_LAYOUT, takeover, later, 0).wrap());
+    }
+
+    @Test
+    public void adoptKeyHandsTheKeyToTheNewActionAndNothingElse() throws IOException
+    {
+        for (Phase phase : Phase.values())
+        {
+            if (phase == Phase.STEADY)
+                continue;
+            ClusterMetadata md = takenOver(keyIn(phase));
+            KeyState before = key(md, K1);
+            AdoptKey adopt = new AdoptKey(B, N2, 0, LOGICAL, K1, phase, A, NOW + 4, LEASE);
+            assertEquals(adopt, roundTrip(adopt));
+            ClusterMetadata next = execute(md, adopt);
+            KeyState after = key(next, K1);
+            assertEquals(B, after.actionId);
+            assertEquals(before.phase, after.phase);
+            assertEquals(before.phaseEpoch, after.phaseEpoch);
+            assertEquals(before.generation, after.generation);
+            assertEquals(before.generationEpoch, after.generationEpoch);
+            assertEquals(before.incarnation, after.incarnation);
+            assertEquals(before.phaseSinceMillis, after.phaseSinceMillis);
+            assertEquals(phase.name(), ledger(next).claim(B).phase);
+            assertEquals(1, ledger(next).claim(B).step);
+            // the new owner can move the key
+            if (phase == Phase.ABORTING)
+                execute(next, new RemoveKey(B, N2, 1, LOGICAL, K1, NOW + 5, LEASE));
+        }
+    }
+
+    @Test
+    public void adoptKeyRejections()
+    {
+        ClusterMetadata md = takenOver(keyIn(Phase.BACKFILL));
+        assertRejected("not VERIFY", md, new AdoptKey(B, N2, 0, LOGICAL, K1, Phase.VERIFY, A, NOW, LEASE));
+        assertRejected("is owned by action " + A, md, new AdoptKey(B, N2, 0, LOGICAL, K1, Phase.BACKFILL, new UUID(9, 9), NOW, LEASE));
+        assertRejected("does not hold lane", md, new AdoptKey(A, N1, 0, LOGICAL, K1, Phase.BACKFILL, B, NOW, LEASE));
+        assertRejected("key is not registered", md, new AdoptKey(B, N2, 0, LOGICAL, K2, Phase.BACKFILL, A, NOW, LEASE));
+        // the old owner still holding a claim: no adoption (it holds the lane, so the new action cannot)
+        assertRejected("does not hold lane", keyIn(Phase.BACKFILL), new AdoptKey(B, N1, 0, LOGICAL, K1, Phase.BACKFILL, A, NOW, LEASE));
+        // a finished key is owned by nobody
+        assertRejected("owned by no action", takenOver(keyIn(Phase.STEADY)), new AdoptKey(B, N2, 0, LOGICAL, K1, Phase.STEADY, A, NOW, LEASE));
+    }
+
     @Test
     public void removeOrphanLayoutOnlyWhenTheLogicalTableIsGone()
     {
@@ -898,7 +949,7 @@ public class LayoutTransformationTest
     public void replayedCodeDoesNotReadClocksOrConfiguration() throws IOException
     {
         String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase", "Eligibility", "PhysicalTables",
-                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout" };
+                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey" };
         String[] forbidden = { "Clock", "currentTimeMillis", "nanoTime", "DatabaseDescriptor", "AutonomicService", "AutonomicConfig",
                                "FBUtilities", "Random", "randomUUID", "TimeUUID", "System.", "ClusterMetadata.current", "ClusterMetadataService",
                                "StorageService", "Schema.instance", "Instant", "new Date" };

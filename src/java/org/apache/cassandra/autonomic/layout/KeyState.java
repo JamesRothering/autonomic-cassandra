@@ -106,6 +106,13 @@ public final class KeyState
                             ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis);
     }
 
+    /** The same state owned by another action ({@code AdoptKey}). */
+    KeyState withAction(UUID newActionId)
+    {
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone,
+                            Objects.requireNonNull(newActionId), dualWriteSinceMillis);
+    }
+
     KeyState finished(Epoch epoch, long nowMillis)
     {
         return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis);

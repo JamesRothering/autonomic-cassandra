@@ -56,6 +56,7 @@ public final class Actuators
         out.add(GarbageCollectActuator.create());
         out.add(RepairPriorityActuator.create());
         out.add(ScaleOutActuator.create(config, knowledge));
+        out.add(PartitionSplitActuator.create(() -> config));
         return out;
     }
 

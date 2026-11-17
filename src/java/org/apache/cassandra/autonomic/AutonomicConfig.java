@@ -17,7 +17,9 @@
  */
 package org.apache.cassandra.autonomic;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.cassandra.config.DataRateSpec;
@@ -115,6 +117,30 @@ public class AutonomicConfig
         public DataRateSpec.LongBytesPerSecondBound backfill_throughput = new DataRateSpec.LongBytesPerSecondBound("1MiB/s");
         /** Rows and range tombstone markers a backfill reads, writes at ALL and records as copied in one step. */
         public int backfill_chunk_rows = 1000;
+
+        // the owner of a partition split (T6.9); read only on the node that drives the migration
+        /** Buckets of a split when the operator names none. */
+        public int default_buckets = 8;
+        /** Tables ({@code keyspace.table}) that are never split (ADR-024, decision 1). */
+        public List<String> excluded_tables = new ArrayList<>();
+        /** How often the owner asks every node for its epoch (rule O1) and re-checks what it waits for. */
+        public DurationSpec.IntMillisecondsBound ack_poll_interval = new DurationSpec.IntMillisecondsBound("5s");
+        /** Lower bound of the wait in ANNOUNCED after every node acknowledged it (design 4.1, ADR-028). */
+        public DurationSpec.IntMillisecondsBound cas_drain = new DurationSpec.IntMillisecondsBound("15s");
+        /** Rows per page of the equivalence check in VERIFY. */
+        public int verify_page_rows = 1000;
+        /** Delay before a row that differed is read again. */
+        public DurationSpec.IntMillisecondsBound verify_recheck_delay = new DurationSpec.IntMillisecondsBound("2s");
+        /** Backfill generations started again after a failed verification before the migration is aborted (ADR-030). */
+        public int verify_retries = 1;
+        /** How long CUTOVER is held after every node acknowledged it, before the commit point. */
+        public DurationSpec.IntMillisecondsBound cutover_soak = new DurationSpec.IntMillisecondsBound("10m");
+        /** {@code manual}: the commit point also waits for {@code nodetool autonomic approve <id>} (ADR-024, decision 8). */
+        public String commit_approval = "manual";
+        /** How long CLEANUP waits for late base-only writes before the reconcile pass (design 4.6). */
+        public DurationSpec.LongMillisecondsBound straggler_window = new DurationSpec.LongMillisecondsBound("3h");
+        /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
+        public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
     }
 
     public static class ScaleOutConfig
@@ -146,6 +172,7 @@ public class AutonomicConfig
         m.put("request_pools", options("enabled", false, "min_factor", 0.5, "max_factor", 2.0));
         m.put("request_throttle", options("enabled", false, "min_requests_per_second", 1000));
         m.put("scale_out", options("enabled", false));
+        m.put("partition_split", options("enabled", false));
         return m;
     }
 

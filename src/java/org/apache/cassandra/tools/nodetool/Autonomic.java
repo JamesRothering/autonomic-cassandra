@@ -50,7 +50,8 @@ import static com.google.common.base.Preconditions.checkArgument;
                          Autonomic.Events.class,
                          Autonomic.Actuator.class,
                          Autonomic.Actuators.class,
-                         Autonomic.Cluster.class })
+                         Autonomic.Cluster.class,
+                         Autonomic.Layout.class })
 public class Autonomic extends AbstractCommand
 {
     static final String ENABLE_WARNING =
@@ -361,6 +362,97 @@ public class Autonomic extends AbstractCommand
             {
                 String released = proxy(probe).releaseClaim(lane);
                 output.out.printf("Released lane %s, held by action %s%n", lane, released);
+            }
+        }
+    }
+
+    @Command(name = "layout",
+             description = "Operate adaptive layouts: split hot partitions and follow their migration",
+             subcommands = { Layout.Status.class,
+                             Layout.Split.class,
+                             Layout.Abort.class,
+                             Layout.Resume.class })
+    public static class Layout extends AbstractCommand
+    {
+        @Override
+        protected void execute(NodeProbe probe)
+        {
+            AbstractCommand cmd = new Status();
+            cmd.probe(probe);
+            cmd.logger(output);
+            cmd.run();
+        }
+
+        @Command(name = "status", description = "Print every adapted partition: phase, generation, owning action and what it waits for")
+        public static class Status extends AbstractCommand
+        {
+            @Override
+            protected void execute(NodeProbe probe)
+            {
+                printRecords(output.out, proxy(probe).getLayoutStatus());
+            }
+        }
+
+        @Command(name = "split", description = "Propose to split one partition into buckets (passes the governor; manual approval by default)")
+        public static class Split extends AbstractCommand
+        {
+            @Parameters(index = "0", arity = "1", paramLabel = "keyspace", description = "Keyspace of the table")
+            private String keyspace;
+
+            @Parameters(index = "1", arity = "1", paramLabel = "table", description = "Table")
+            private String table;
+
+            @Parameters(index = "2", arity = "1", paramLabel = "key-hex", description = "Raw partition key bytes in hex")
+            private String keyHex;
+
+            @Option(names = { "--buckets" }, description = "Number of buckets, 2 to 64 (default layout.default_buckets)")
+            private int buckets = 0;
+
+            @Override
+            protected void execute(NodeProbe probe)
+            {
+                checkArgument(buckets == 0 || (buckets >= 2 && buckets <= 64), "--buckets must be between 2 and 64");
+                Map<String, String> record = proxy(probe).splitPartition(keyspace, table, keyHex, buckets);
+                printRecords(output.out, List.of(record));
+            }
+        }
+
+        @Command(name = "abort", description = "Abort the split of a partition; refused past its commit point")
+        public static class Abort extends AbstractCommand
+        {
+            @Parameters(index = "0", arity = "1", paramLabel = "keyspace", description = "Keyspace of the table")
+            private String keyspace;
+
+            @Parameters(index = "1", arity = "1", paramLabel = "table", description = "Table")
+            private String table;
+
+            @Parameters(index = "2", arity = "1", paramLabel = "key-hex", description = "Raw partition key bytes in hex")
+            private String keyHex;
+
+            @Override
+            protected void execute(NodeProbe probe)
+            {
+                output.out.println(proxy(probe).abortSplit(keyspace, table, keyHex));
+            }
+        }
+
+        @Command(name = "resume", description = "Take over a split that has no live action: abort it before its commit point, finish it after")
+        public static class Resume extends AbstractCommand
+        {
+            @Parameters(index = "0", arity = "1", paramLabel = "keyspace", description = "Keyspace of the table")
+            private String keyspace;
+
+            @Parameters(index = "1", arity = "1", paramLabel = "table", description = "Table")
+            private String table;
+
+            @Parameters(index = "2", arity = "1", paramLabel = "key-hex", description = "Raw partition key bytes in hex")
+            private String keyHex;
+
+            @Override
+            protected void execute(NodeProbe probe)
+            {
+                Map<String, String> record = proxy(probe).resumeSplit(keyspace, table, keyHex);
+                printRecords(output.out, List.of(record));
             }
         }
     }

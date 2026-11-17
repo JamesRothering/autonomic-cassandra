@@ -78,6 +78,12 @@ SYNOPSIS
                 [(-u <username> | --username <username>)] autonomic cluster <command>
                 [<args>]
 
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout <command>
+                [<args>]
+
 OPTIONS
         -h <host>, --host <host>
             Node hostname or ip address
@@ -129,3 +135,5 @@ COMMANDS
             List the actuators and their scopes
         cluster
             Operate the cluster-scoped actions gate and ledger
+        layout
+            Operate adaptive layouts: split hot partitions and follow their migration
