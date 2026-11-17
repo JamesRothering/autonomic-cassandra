@@ -83,7 +83,7 @@ public class PartitionSplitEndToEndTest extends TestBaseImpl
     private static final int BUCKETS = 8;
     private static final long DEADLINE_MILLIS = 240_000;
 
-    private static void configure(IInstanceConfig c)
+    static void configure(IInstanceConfig c)
     {
         c.with(NETWORK, GOSSIP)
          .set("write_request_timeout", "2000ms")

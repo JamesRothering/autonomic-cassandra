@@ -102,7 +102,7 @@ public class LayoutReadsTest extends TestBaseImpl
             cluster.coordinator(node).execute(String.format(cql, KEYSPACE + '.' + table), ConsistencyLevel.ALL);
     }
 
-    private static List<String> render(Iterator<Object[]> rows)
+    static List<String> render(Iterator<Object[]> rows)
     {
         List<String> rendered = new ArrayList<>();
         while (rows.hasNext())
@@ -110,7 +110,7 @@ public class LayoutReadsTest extends TestBaseImpl
         return rendered;
     }
 
-    private static List<String> rows(Cluster cluster, int node, String cql, String table, int pageSize)
+    static List<String> rows(Cluster cluster, int node, String cql, String table, int pageSize)
     {
         String query = String.format(cql, KEYSPACE + '.' + table);
         return pageSize == 0 ? render(Arrays.asList(cluster.coordinator(node).execute(query, ConsistencyLevel.QUORUM)).iterator())
@@ -121,7 +121,7 @@ public class LayoutReadsTest extends TestBaseImpl
      * One page of the statement, fetched the way the native transport does: the rows, then the paging state as hex
      * (empty after the last page). Each page is a request of its own, as it is for a driver.
      */
-    private static String[] page(Cluster cluster, int node, String query, int pageSize, String pagingState)
+    static String[] page(Cluster cluster, int node, String query, int pageSize, String pagingState)
     {
         String result = cluster.get(node).callOnInstance(() -> {
             org.apache.cassandra.service.QueryState queryState = org.apache.cassandra.service.QueryState.forInternalCalls();
