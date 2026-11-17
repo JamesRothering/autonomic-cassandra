@@ -276,7 +276,7 @@ Notes:
 
 ### 3.4 Read path, single partition (`LayoutReads.read`)
 
-For each command in the group whose table has a layout and whose key K is in class C2 or C3, replace the command by a fan-out; other commands run unchanged. If nothing is replaced return `null`. `SERIAL` and `LOCAL_SERIAL` on a replaced command throw `InvalidRequestException`.
+For each command in the group whose table has a layout and whose key K is in class C2 or C3, replace the command by a fan-out; other commands run unchanged. If nothing is replaced return `null`. `SERIAL` and `LOCAL_SERIAL` reads of K throw `InvalidRequestException` in every class other than "absent", whether or not the command is replaced (ADR-032; this matches 3.6 and N1).
 
 Fan-out for one logical command `cmd` (table T, key K, filter F, limits Lm, `nowInSec`):
 

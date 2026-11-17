@@ -526,3 +526,29 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Leaving enforcement to the owner's deadline handling in T6.9 and documenting the gap: rejected by the owner, because the guarantee then depends on one node being present at the right time. Stopping tombstone purging on the overflow table for the life of a migration: rejected as a change to compaction on a core path.
 
 **Consequences.** One more field in the registry's wire format. The limit is judged by each replica's own clock, so it is as good as clock synchronisation between nodes, like `gc_grace_seconds` itself. A key that passes the limit in `CLEANUP` cannot complete its reconcile pass: the action ends in a terminal state that needs an operator, the key stays routed to the overflow copy, and the base partition tombstone is not written (T6.9).
+
+## ADR-032: SERIAL reads of an adapted key are rejected from ANNOUNCED on
+
+- **Date:** 2026-11-17
+- **Status:** Accepted (orchestrator decision during T6.12; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** The design contradicted itself. Section 3.6 and limitation N1 (the operator-facing contract) reject lightweight transactions and `SERIAL` reads on an adapted key from `ANNOUNCED` on; section 3.4 rejected `SERIAL` only on a command replaced by a fan-out, which happens in classes C2 and C3. The code followed 3.4, and the T6.12 compatibility suite confirmed that `SERIAL` reads were accepted in C0 and C1.
+
+**Decision.** `SERIAL` and `LOCAL_SERIAL` reads of a key in any class other than "absent" are rejected with the same `InvalidRequestException` as lightweight transactions. Section 3.4 is corrected to say so.
+
+**Alternatives considered.** Keeping 3.4's narrower rule and amending N1 instead. Rejected: a `SERIAL` read runs Paxos on the base partition and can complete a proposal left in flight from before registration, which writes the base copy only and bypasses the dual write of C1 (inferred, not demonstrated). The narrower rule buys nothing a client of an LWT-free table needs, since such tables are the only ones proposed.
+
+**Consequences.** A client issuing `SERIAL` reads on a key that has just been announced gets an error where it previously succeeded; this is the documented contract. T6.12's expectations for C0 and C1 change accordingly.
+
+## ADR-033: The base partition tombstone is written after FinishKey, and FinishKey requires a complete reconcile
+
+- **Date:** 2026-11-17
+- **Status:** Accepted (orchestrator decision on the T6.9 build and its review; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** Section 4.1 lists the base partition tombstone before `FinishKey` in `CLEANUP`. With that order, a natural replica that has not reported (a node that became a replica during `CLEANUP`) runs a reconcile pass after the tombstone, reads it from base and copies a partition deletion into every bucket, deleting acknowledged overflow data. The T6.9 review found a second path to the same loss even with the reordering: a replica that joins between the reconcile report and `FinishKey` and whose pass stalls.
+
+**Decision.** The owner writes the base partition tombstone at `ALL` only after `FinishKey` has been acknowledged by every node, when no replica runs a pass for the key any more. Before committing `FinishKey` the owner re-checks that the reconcile generation is complete and that placement has not changed, and starts a new reconcile generation otherwise. `FinishKey` itself is rejected unless every natural replica of the key's token has reported the current generation. A kill between `FinishKey` and the tombstone is recovered by takeover or restart of the claim, which writes the tombstone again.
+
+**Consequences.** Base rows of a split key remain live until the tombstone is written; they are unreachable, because every read of the key in `STEADY` goes to the overflow copy and range scans exclude the key from base. Reverse migration (T6.17) must not assume the base partition is empty, and must wait `gc_grace_seconds` after the tombstone and force a purge before copying back (open issue O3).
