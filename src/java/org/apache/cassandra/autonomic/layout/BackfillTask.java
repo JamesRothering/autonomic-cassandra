@@ -278,6 +278,10 @@ public final class BackfillTask
 
     public static final Stats stats = new Stats();
 
+    /** Test seam (T6.13): if set, run after a chunk was read and before it is written; a failure test blocks in it. */
+    @VisibleForTesting
+    public static volatile Runnable beforeChunkWriteForTesting;
+
     static final long DEFAULT_MIN_BACKOFF_MILLIS = 500;
     static final long DEFAULT_MAX_BACKOFF_MILLIS = 15_000;
 
@@ -591,6 +595,9 @@ public final class BackfillTask
                 // judged here, with the chunk in hand: the read may have taken long
                 if (pastDeadline(pass, base, true))
                     return Outcome.NOTHING;
+                Runnable seam = beforeChunkWriteForTesting;
+                if (seam != null)
+                    seam.run();
                 try
                 {
                     env.write(mutations);

@@ -21,6 +21,7 @@ package org.apache.cassandra.autonomic.layout;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -66,6 +67,16 @@ import io.netty.util.concurrent.FastThreadLocal;
 public final class LayoutWrites
 {
     public static final int MAX_ATTEMPTS = 3;
+
+    /** Routed writes executed again because the routing of a key they wrote changed while they ran (rule C1). */
+    public static final AtomicLong reexecutions = new AtomicLong();
+
+    /**
+     * Test seam (T6.13): if set, run between the two copies of a non-atomic routed write, after the first copy was
+     * acknowledged; a failure test throws from it to stop the coordinator there, or blocks in it.
+     */
+    @VisibleForTesting
+    public static volatile Runnable betweenCopiesForTesting;
 
     /** How this class reaches {@code StorageProxy}; replaced by tests to record the calls. */
     @VisibleForTesting
@@ -185,6 +196,7 @@ public final class LayoutWrites
             ClusterMetadata after = metadata.get();
             if (after == cm || RoutedKey.unchanged(plan.routed, after))
                 return true;
+            reexecutions.incrementAndGet();
             cm = after;
             registry = LayoutRegistry.of(cm);
         }
@@ -309,16 +321,31 @@ public final class LayoutWrites
                 return;
             }
             if (!plan.shadowsFirst.isEmpty())
+            {
                 sink.write(plan.shadowsFirst, plan.consistencyLevel, plan.shadowsFirst.size() > 1, requestTime, preserveTimestamps);
+                if (!plan.main.isEmpty())
+                    betweenCopies();
+            }
             if (!plan.main.isEmpty())
                 sink.write(plan.main, plan.consistencyLevel, plan.replaced && plan.main.size() > 1, requestTime, preserveTimestamps);
             if (!plan.shadowsLast.isEmpty())
+            {
+                if (!plan.main.isEmpty())
+                    betweenCopies();
                 sink.write(plan.shadowsLast, plan.consistencyLevel, plan.shadowsLast.size() > 1, requestTime, preserveTimestamps);
+            }
         }
         finally
         {
             reentrant.set(outer);
         }
+    }
+
+    private static void betweenCopies()
+    {
+        Runnable seam = betweenCopiesForTesting;
+        if (seam != null)
+            seam.run();
     }
 
     /**
