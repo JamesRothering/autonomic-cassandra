@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -93,7 +94,17 @@ import org.apache.cassandra.utils.MD5Digest;
  *
  * <p><b>A pass belongs to one generation</b> of one attempt: layout, incarnation, phase, generation number and the
  * epoch at which the generation started. Before every chunk and before the report the pass looks at the current
- * metadata and ends without reporting if any of them changed or this node is no longer a natural replica.
+ * metadata and ends without reporting if any of them changed or this node is no longer a natural replica. A key that
+ * enters {@code CLEANUP} brings the generation of its backfill with it; only a generation started in {@code CLEANUP},
+ * the reconcile pass, is run there ({@link KeyState#backfillDue}).
+ *
+ * <p><b>The tombstone deadline</b> (invariant I9, ADR-031). A delete made while the key is split may exist in the
+ * overflow table only, and is purged there {@code gc_grace_seconds} after it was made at the earliest; a base row
+ * copied after that would come back to life. So nothing is copied later than half of {@code gc_grace_seconds} after
+ * the key entered {@code DUAL_WRITE}, by this node's clock: before every chunk write and before the report the pass
+ * compares the clock with {@link KeyState#backfillLimitMillis} less the write timeout, the longest a write handed to
+ * the stock path can still take to reach a replica that is up. Past it, the pass writes nothing more and does not
+ * report, for as long as the key stays in that incarnation.
  */
 public final class BackfillTask
 {
@@ -140,6 +151,12 @@ public final class BackfillTask
 
         /** Returns false if the thread was interrupted. */
         boolean sleep(long millis);
+
+        /** This node's wall clock. */
+        long nowMillis();
+
+        /** The longest a write of {@link #write} can take to reach a live replica after it was handed over. */
+        long writeTimeoutMillis();
     }
 
     private static final class NodeEnv implements Env
@@ -216,6 +233,18 @@ public final class BackfillTask
         }
 
         @Override
+        public long nowMillis()
+        {
+            return Clock.Global.currentTimeMillis();
+        }
+
+        @Override
+        public long writeTimeoutMillis()
+        {
+            return DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS);
+        }
+
+        @Override
         public boolean sleep(long millis)
         {
             try
@@ -241,6 +270,8 @@ public final class BackfillTask
         public final AtomicLong passesResumed = new AtomicLong();
         public final AtomicLong passesAbandoned = new AtomicLong();
         public final AtomicLong reportsCommitted = new AtomicLong();
+        /** Times a pass was not started, or was stopped before a chunk or its report, because the deadline had passed. */
+        public final AtomicLong refusedPastDeadline = new AtomicLong();
         /** The record the last resumed pass continued from. */
         public volatile String lastResumeRecord;
     }
@@ -258,6 +289,8 @@ public final class BackfillTask
     private final long maxBackoffMillis;
     private RateLimiter limiter;
     private long limiterRate;
+    /** Layout, key and incarnation of the keys whose deadline was seen to have passed; each is logged once. */
+    private final Set<String> pastDeadline = new HashSet<>();
 
     @VisibleForTesting
     BackfillTask(Env env, long minBackoffMillis, long maxBackoffMillis)
@@ -424,10 +457,10 @@ public final class BackfillTask
             for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
             {
                 KeyState state = e.getValue();
-                if (!state.phase.acceptsBackfillReports() || state.backfillDone.contains(self))
+                if (!state.backfillDue() || state.backfillDone.contains(self))
                     continue;
                 Pass pass = new Pass(layout, e.getKey(), state);
-                if (reported.contains(pass.identity()))
+                if (reported.contains(pass.identity()) || pastDeadline(pass, logical, false))
                     continue;
                 if (env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(e.getKey())))
                     owed.add(pass);
@@ -444,7 +477,7 @@ public final class BackfillTask
             Set<String> current = new HashSet<>();
             for (TableLayout layout : LayoutRegistry.of(cm).byLogical.values())
                 for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
-                    if (e.getValue().phase.acceptsBackfillReports())
+                    if (e.getValue().backfillDue())
                         current.add(new Pass(layout, e.getKey(), e.getValue()).stateKey());
             for (String key : env.scanState(STATE_PREFIX).keySet())
                 if (!current.contains(key))
@@ -476,6 +509,35 @@ public final class BackfillTask
         return state.phase == pass.state.phase && state.incarnation == pass.state.incarnation
                && state.generation == pass.state.generation && state.generationEpoch.equals(pass.state.generationEpoch)
                && env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(pass.key));
+    }
+
+    /**
+     * True if this node's clock is past the time after which nothing may be copied for the key (ADR-031). The limit
+     * moves with {@code gc_grace_seconds} of the logical table as it is now.
+     *
+     * @param counted false for the look that decides whether a pass is owed at all, which is repeated
+     */
+    private boolean pastDeadline(Pass pass, TableMetadata logical, boolean counted)
+    {
+        long limit = pass.state.backfillLimitMillis(logical.params.gcGraceSeconds);
+        if (limit != Long.MIN_VALUE)
+            limit -= env.writeTimeoutMillis();
+        long now = env.nowMillis();
+        if (now < limit)
+            return false;
+        if (counted)
+            stats.refusedPastDeadline.incrementAndGet();
+        String key = pass.layout.layoutId + "/" + ByteBufferUtil.bytesToHex(pass.key) + '/' + pass.state.incarnation;
+        if (pastDeadline.add(key))
+        {
+            if (!counted)
+                stats.refusedPastDeadline.incrementAndGet();
+            logger.warn("Not copying for the {}: {}. Nothing is written or reported for this key any more; it needs an operator",
+                        pass, limit == Long.MIN_VALUE
+                              ? "the registry does not say when dual write started"
+                              : "the clock (" + now + ") is past the tombstone deadline (" + limit + "), half of gc_grace_seconds after dual write started");
+        }
+        return true;
     }
 
     private Outcome run(Pass pass)
@@ -526,6 +588,9 @@ public final class BackfillTask
                 List<Mutation> mutations = new ArrayList<>();
                 for (PartitionUpdate update : RowMapper.toPhysical(chunk.update, physical, pass.layout, pass.state.incarnation).values())
                     mutations.add(new Mutation(update));
+                // judged here, with the chunk in hand: the read may have taken long
+                if (pastDeadline(pass, base, true))
+                    return Outcome.NOTHING;
                 try
                 {
                     env.write(mutations);
@@ -554,8 +619,12 @@ public final class BackfillTask
         }
 
         // the report is for the generation the copy was made for and nothing else
-        if (!current(env.metadata(), pass))
+        cm = env.metadata();
+        if (!current(cm, pass))
             return abandoned(pass);
+        // a pass that could not finish in time is not vouched for, even if its last chunk was written in time
+        if (pastDeadline(pass, RoutedKey.logical(cm, pass.layout), true))
+            return Outcome.NOTHING;
         ReportBackfill report = new ReportBackfill(pass.layout.logical, pass.key, pass.state.generation, pass.state.generationEpoch,
                                                    env.self(cm));
         if (!env.report(report))

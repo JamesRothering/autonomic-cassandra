@@ -75,6 +75,13 @@ public class LayoutsVirtualTableTest extends CQLTester
                        "HASH_SPLIT", 8, 5L, "BACKFILL", k.phaseEpoch.getEpoch(), new Date(LayoutTransformationTest.NOW), 1, 3, k.generationEpoch.getEpoch(),
                        ImmutableSet.of(LayoutTransformationTest.N1.toUUID(), LayoutTransformationTest.N2.toUUID()), LayoutTransformationTest.A, false));
 
+        // when dual write started: empty before DUAL_WRITE, the proposer's time afterwards
+        assertRows(execute("SELECT dual_write_since FROM " + KS + ".autonomic_layouts"), row((Object) null));
+        ClusterMetadata dual = LayoutTransformationTest.execute(LayoutTransformationTest.execute(LayoutTransformationTest.start(), LayoutTransformationTest.register(LayoutTransformationTest.K1, 0)),
+                                                               LayoutTransformationTest.advance(1, Phase.ANNOUNCED, Phase.DUAL_WRITE, 1));
+        METADATA.set(dual);
+        assertRows(execute("SELECT phase, dual_write_since FROM " + KS + ".autonomic_layouts"), row("DUAL_WRITE", new Date(LayoutTransformationTest.NOW + 2)));
+
         // two keys: two rows, in key order
         ClusterMetadata two = LayoutTransformationTest.execute(LayoutTransformationTest.execute(LayoutTransformationTest.start(), LayoutTransformationTest.register(LayoutTransformationTest.K2, 0)),
                                                               LayoutTransformationTest.register(LayoutTransformationTest.K1, 1));

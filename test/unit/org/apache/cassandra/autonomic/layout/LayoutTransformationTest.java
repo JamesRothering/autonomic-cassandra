@@ -642,6 +642,81 @@ public class LayoutTransformationTest
         assertEquals(ImmutableSet.of(N2), key(execute(md, report(md, LOGICAL, K1, 1, N2)), K1).backfillDone);
     }
 
+    private static AdvanceLayout advanceAt(int step, Phase from, Phase to, int generation, long nowMillis)
+    {
+        return new AdvanceLayout(A, N1, step, LOGICAL, K1, from, to, generation, nowMillis, LEASE);
+    }
+
+    /** ADR-031: the time dual write started is set by ANNOUNCED -> DUAL_WRITE and by nothing else. */
+    @Test
+    public void dualWriteStartIsSetOnceAndKeptByEveryTransition() throws IOException
+    {
+        long t = NOW + 1000;
+        long started = t + 1;
+        int step = 0;
+        ClusterMetadata md = execute(start(), register(K1, step++));
+        assertEquals(0, key(md, K1).dualWriteSinceMillis);
+        assertEquals(Long.MIN_VALUE, key(md, K1).backfillLimitMillis(864000));
+        md = execute(md, advanceAt(step++, Phase.ANNOUNCED, Phase.DUAL_WRITE, 1, started));
+        assertEquals(started, key(md, K1).dualWriteSinceMillis);
+        assertEquals(started + 432_000_000L, key(md, K1).backfillLimitMillis(864000));
+        Object[][] forward = { { Phase.DUAL_WRITE, Phase.BACKFILL, 1 }, { Phase.BACKFILL, Phase.BACKFILL, 2 }, { Phase.BACKFILL, Phase.VERIFY, 2 },
+                               { Phase.VERIFY, Phase.BACKFILL, 3 }, { Phase.BACKFILL, Phase.VERIFY, 3 }, { Phase.VERIFY, Phase.CUTOVER, 3 } };
+        long later = started;
+        for (Object[] move : forward)
+        {
+            later += 10_000;
+            md = execute(md, advanceAt(step++, (Phase) move[0], (Phase) move[1], (int) move[2], later));
+            assertEquals(move[0] + " -> " + move[1], started, key(md, K1).dualWriteSinceMillis);
+            assertEquals(later, key(md, K1).phaseSinceMillis);
+        }
+        // the abort path from here
+        ClusterMetadata abort = execute(md, advanceAt(step, Phase.CUTOVER, Phase.ROLLBACK_DUAL, 3, later + 1));
+        assertEquals(started, key(abort, K1).dualWriteSinceMillis);
+        abort = execute(abort, advanceAt(step + 1, Phase.ROLLBACK_DUAL, Phase.ABORTING, 3, later + 2));
+        assertEquals(started, key(abort, K1).dualWriteSinceMillis);
+        // and the forward path to the end
+        Object[][] commit = { { Phase.CUTOVER, Phase.NEW_ONLY, 3 }, { Phase.NEW_ONLY, Phase.CLEANUP, 3 }, { Phase.CLEANUP, Phase.CLEANUP, 4 } };
+        for (Object[] move : commit)
+        {
+            later += 10_000;
+            md = execute(md, advanceAt(step++, (Phase) move[0], (Phase) move[1], (int) move[2], later));
+            assertEquals(move[0] + " -> " + move[1], started, key(md, K1).dualWriteSinceMillis);
+        }
+        md = execute(md, report(md, LOGICAL, K1, 4, N2));
+        assertEquals(started, key(md, K1).dualWriteSinceMillis);
+        assertEquals(started, key(roundTrip(md), K1).dualWriteSinceMillis);
+        assertEquals(registry(md), registry(roundTrip(md)));
+        md = execute(md, new FinishKey(A, N1, step, LOGICAL, K1, later + 5, LEASE));
+        assertEquals(Phase.STEADY, key(md, K1).phase);
+        assertEquals(started, key(md, K1).dualWriteSinceMillis);
+        // it is part of the state
+        KeyState k = key(md, K1);
+        KeyState other = new KeyState(k.phase, k.phaseEpoch, k.phaseSinceMillis, k.incarnation, k.generation, k.generationEpoch, k.backfillDone,
+                                      k.actionId, started + 1);
+        assertFalse(k.equals(other));
+        assertTrue(k.toString(), k.toString().contains("dualWriteSince=" + started));
+    }
+
+    /** A key enters CLEANUP with the generation of its backfill; reports are due again only for a generation started there. */
+    @Test
+    public void cleanupTakesReportsForTheReconcileGenerationOnly()
+    {
+        ClusterMetadata md = keyIn(Phase.NEW_ONLY, 2, ImmutableSet.of(N1, N2));
+        md = execute(md, advance(0, Phase.NEW_ONLY, Phase.CLEANUP, 2));
+        assertFalse(key(md, K1).backfillDue());
+        assertEquals("the reports of the backfill are still there", ImmutableSet.of(N1, N2), key(md, K1).backfillDone);
+        assertRejected("the reconcile generation has not started", md, new ReportBackfill(LOGICAL, K1, 2, key(md, K1).generationEpoch, new NodeId(3)));
+        md = execute(md, advance(1, Phase.CLEANUP, Phase.CLEANUP, 3));
+        assertTrue(key(md, K1).backfillDue());
+        assertTrue(key(md, K1).backfillDone.isEmpty());
+        assertEquals(ImmutableSet.of(N2), key(execute(md, report(md, LOGICAL, K1, 3, N2)), K1).backfillDone);
+        assertTrue(key(keyIn(Phase.BACKFILL), K1).backfillDue());
+        for (Phase phase : Phase.values())
+            if (phase != Phase.BACKFILL && phase != Phase.CLEANUP)
+                assertFalse(phase.name(), key(keyIn(phase), K1).backfillDue());
+    }
+
     @Test
     public void backfillDoneIsBoundedTo32Nodes()
     {

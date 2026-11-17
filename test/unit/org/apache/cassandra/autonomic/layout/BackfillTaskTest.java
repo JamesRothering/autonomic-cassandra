@@ -87,6 +87,8 @@ public class BackfillTaskTest extends CQLTester
     private static final int BUCKETS = 4;
     private static final int K = 1;
     private static final NodeId SELF = new NodeId(1);
+    private static final long DUAL_WRITE_SINCE = 1_000_000_000L;
+    private static final long WRITE_TIMEOUT = 2000;
 
     private TableMetadata logical;
     private TableMetadata physical;
@@ -130,6 +132,7 @@ public class BackfillTaskTest extends CQLTester
         Runnable onSleep = () -> {};
         boolean acceptReports = true;
         int metadataLookups;
+        long now = DUAL_WRITE_SINCE + 1;
 
         @Override
         public ClusterMetadata metadata()
@@ -208,6 +211,18 @@ public class BackfillTaskTest extends CQLTester
         }
 
         @Override
+        public long nowMillis()
+        {
+            return now;
+        }
+
+        @Override
+        public long writeTimeoutMillis()
+        {
+            return WRITE_TIMEOUT;
+        }
+
+        @Override
         public boolean sleep(long millis)
         {
             sleeps.add(millis);
@@ -230,8 +245,13 @@ public class BackfillTaskTest extends CQLTester
 
     private ClusterMetadata keyIn(Phase phase, int incarnation, int generation, long generationEpoch, NodeId... done)
     {
-        KeyState state = new KeyState(phase, Epoch.create(generationEpoch), 1000, incarnation, generation, Epoch.create(generationEpoch),
-                                      ImmutableSet.copyOf(done), phase == Phase.STEADY ? null : ACTION);
+        return with(new KeyState(phase, Epoch.create(generationEpoch), 1000, incarnation, generation, Epoch.create(generationEpoch),
+                                 ImmutableSet.copyOf(done), phase == Phase.STEADY ? null : ACTION, DUAL_WRITE_SINCE));
+    }
+
+    private ClusterMetadata with(KeyState state)
+    {
+        int incarnation = state.incarnation;
         LayoutRegistry registry = new LayoutRegistry(LayoutRegistry.FORMAT_VERSION,
                                                      ImmutableMap.of(logical.id, new TableLayout(header, incarnation + 1, ImmutableMap.of(key(), state), 5)));
         return ClusterMetadata.current().transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(registry)).build().metadata;
@@ -507,6 +527,8 @@ public class BackfillTaskTest extends CQLTester
     public void gcAbleTombstonesAndExpiredCellsTheNodeStillHoldsAreCopied() throws Throwable
     {
         setUp(" WITH gc_grace_seconds = 0");
+        // gc_grace is 0 to show the purge; the deadline that follows from it is not the subject here
+        env.now = 0;
         for (int c2 = 0; c2 < 4; c2++)
             execute("INSERT INTO %s (p, c1, c2, v) VALUES (?, 1, ?, 'x') USING TIMESTAMP 1000", K, c2);
         execute("DELETE FROM %s USING TIMESTAMP 2000 WHERE p = ? AND c1 = 1 AND c2 = 0", K);
@@ -970,6 +992,18 @@ public class BackfillTaskTest extends CQLTester
         {
             return to.sleep(millis);
         }
+
+        @Override
+        public long nowMillis()
+        {
+            return to.nowMillis();
+        }
+
+        @Override
+        public long writeTimeoutMillis()
+        {
+            return to.writeTimeoutMillis();
+        }
     }
 
     @Test
@@ -979,8 +1013,8 @@ public class BackfillTaskTest extends CQLTester
         load(0);
         execute("INSERT INTO %s (p, c1, c2, v) VALUES (2, 2, 2, 'two') USING TIMESTAMP 1000");
         ByteBuffer k2 = Int32Type.instance.decompose(2);
-        KeyState one = new KeyState(Phase.BACKFILL, Epoch.create(30), 1000, 1, 1, Epoch.create(30), ImmutableSet.of(), ACTION);
-        KeyState two = new KeyState(Phase.BACKFILL, Epoch.create(31), 1000, 2, 1, Epoch.create(31), ImmutableSet.of(), ACTION);
+        KeyState one = new KeyState(Phase.BACKFILL, Epoch.create(30), 1000, 1, 1, Epoch.create(30), ImmutableSet.of(), ACTION, DUAL_WRITE_SINCE);
+        KeyState two = new KeyState(Phase.BACKFILL, Epoch.create(31), 1000, 2, 1, Epoch.create(31), ImmutableSet.of(), ACTION, DUAL_WRITE_SINCE);
         LayoutRegistry registry = new LayoutRegistry(LayoutRegistry.FORMAT_VERSION,
                                                      ImmutableMap.of(logical.id, new TableLayout(header, 3, ImmutableMap.of(key(), one, k2, two), 5)));
         env.metadata = ClusterMetadata.current().transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(registry)).build().metadata;
@@ -1006,6 +1040,108 @@ public class BackfillTaskTest extends CQLTester
         assertEquals(3, env.sleeps.size());
         assertEquals(2, env.reports.size());
         assertEquals(key(), env.reports.get(1).keyBytes);
+        assertCopied(1);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // the tombstone deadline (I9, ADR-031) and the reconcile generation
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** gc_grace_seconds 1000: nothing is copied later than 500 s after dual write started, less the write timeout. */
+    private static final long LIMIT = DUAL_WRITE_SINCE + 500_000 - WRITE_TIMEOUT;
+
+    @Test
+    public void passThatCrossesTheDeadlineStopsBeforeTheNextChunkAndDoesNotReport() throws Throwable
+    {
+        setUp(" WITH gc_grace_seconds = 1000");
+        load(0);
+        env.metadata = backfill(1);
+        env.chunkRows = 10;
+        env.now = LIMIT - 1;
+        int[] calls = { 0 };
+        // the clock passes the limit while the third chunk is being written
+        env.beforeWrite = () -> {
+            if (++calls[0] == 3)
+                env.now = LIMIT;
+        };
+        long refused = BackfillTask.stats.refusedPastDeadline.get();
+        task().runPending();
+        assertEquals("the chunk in flight is the last", 3, env.writes.size());
+        assertTrue(env.reports.isEmpty());
+        assertTrue("it is not retried", env.sleeps.isEmpty());
+        assertEquals(1, BackfillTask.stats.refusedPastDeadline.get() - refused);
+        assertEquals(30, overflow(1).rowCount());
+
+        // not later either, by the same task or after a restart, for as long as the key is in this incarnation
+        BackfillTask sameTask = task();
+        for (BackfillTask task : new BackfillTask[]{ sameTask, sameTask, task() })
+        {
+            env.now += 1000;
+            task.runPending();
+        }
+        env.metadata = keyIn(Phase.BACKFILL, 1, 2, 31);
+        task().runPending();
+        assertEquals(3, env.writes.size());
+        assertTrue(env.reports.isEmpty());
+        assertTrue(env.sleeps.isEmpty());
+
+        // one millisecond earlier a chunk is still written
+        env.metadata = backfill(2);
+        env.now = LIMIT - 1;
+        env.writes.clear();
+        task().runPending();
+        assertEquals(5, env.writes.size());
+        assertEquals(1, env.reports.size());
+    }
+
+    @Test
+    public void passWhoseLastChunkCrossesTheDeadlineDoesNotReport() throws Throwable
+    {
+        setUp(" WITH gc_grace_seconds = 1000");
+        load(0);
+        env.metadata = backfill(1);
+        env.now = LIMIT - 1;
+        env.beforeWrite = () -> env.now = LIMIT + 5;
+        task().runPending();
+        assertEquals(1, env.writes.size());
+        assertTrue(env.reports.isEmpty());
+        // nor does a pass that had copied everything and only has its report left
+        env.beforeWrite = () -> {};
+        task().runPending();
+        assertEquals(1, env.writes.size());
+        assertTrue(env.reports.isEmpty());
+        assertTrue(env.sleeps.isEmpty());
+    }
+
+    @Test
+    public void nothingIsCopiedIfTheRegistryDoesNotSayWhenDualWriteStarted() throws Throwable
+    {
+        setUp("");
+        load(0);
+        env.metadata = with(new KeyState(Phase.BACKFILL, Epoch.create(30), 1000, 1, 1, Epoch.create(30), ImmutableSet.of(), ACTION));
+        long refused = BackfillTask.stats.refusedPastDeadline.get();
+        task().runPending();
+        assertTrue(env.writes.isEmpty());
+        assertTrue(env.reports.isEmpty());
+        assertEquals(1, BackfillTask.stats.refusedPastDeadline.get() - refused);
+    }
+
+    @Test
+    public void cleanupWaitsForTheReconcileGeneration() throws Throwable
+    {
+        setUp("");
+        load(0);
+        // CLEANUP entered at epoch 50 with generation 1 of the backfill, started at epoch 30; this node is not in backfillDone
+        env.metadata = with(new KeyState(Phase.CLEANUP, Epoch.create(50), 1000, 1, 1, Epoch.create(30), ImmutableSet.of(), ACTION, DUAL_WRITE_SINCE));
+        task().runPending();
+        assertTrue(env.writes.isEmpty());
+        assertTrue(env.reports.isEmpty());
+        assertEquals(0, overflow(1).rowCount());
+        // the owner starts the reconcile generation: phase epoch and generation epoch are the same
+        env.metadata = with(new KeyState(Phase.CLEANUP, Epoch.create(51), 2000, 1, 2, Epoch.create(51), ImmutableSet.of(), ACTION, DUAL_WRITE_SINCE));
+        task().runPending();
+        assertEquals(1, env.reports.size());
+        assertEquals(2, env.reports.get(0).generation);
         assertCopied(1);
     }
 

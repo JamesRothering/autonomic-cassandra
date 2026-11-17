@@ -50,10 +50,25 @@ public final class KeyState
     public final ImmutableSortedSet<NodeId> backfillDone;
     /** The action that owns the current migration; null in {@link Phase#STEADY}. */
     public final UUID actionId;
+    /**
+     * Proposer-supplied time at which this incarnation entered {@link Phase#DUAL_WRITE}; 0 before that. No later
+     * transition changes it. From it every replica derives the time after which it copies nothing more (ADR-031).
+     */
+    public final long dualWriteSinceMillis;
 
+    /** A state that never entered {@link Phase#DUAL_WRITE}, or a hand-built one for which that does not matter. */
     public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
                     Collection<NodeId> backfillDone, UUID actionId)
     {
+        this(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, 0);
+    }
+
+    public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
+                    Collection<NodeId> backfillDone, UUID actionId, long dualWriteSinceMillis)
+    {
+        if (dualWriteSinceMillis < 0)
+            throw new IllegalArgumentException("dual write start " + dualWriteSinceMillis + " is negative");
+        this.dualWriteSinceMillis = dualWriteSinceMillis;
         if (incarnation < 1 || incarnation >= LayoutRegistry.MAX_INCARNATION)
             throw new IllegalArgumentException("incarnation " + incarnation + " is out of range");
         if (generation < 1)
@@ -81,18 +96,39 @@ public final class KeyState
     {
         boolean restarted = toGeneration != generation;
         return new KeyState(to, epoch, nowMillis, incarnation, toGeneration, restarted ? epoch : generationEpoch,
-                            restarted ? ImmutableSortedSet.<NodeId>of() : backfillDone, actionId);
+                            restarted ? ImmutableSortedSet.<NodeId>of() : backfillDone, actionId,
+                            to == Phase.DUAL_WRITE && phase == Phase.ANNOUNCED ? nowMillis : dualWriteSinceMillis);
     }
 
     KeyState withBackfillDone(NodeId node)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch,
-                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId);
+                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis);
     }
 
     KeyState finished(Epoch epoch, long nowMillis)
     {
-        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, null);
+        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis);
+    }
+
+    /**
+     * True if replicas have a backfill pass to run for {@link #generation} and may report it: in {@link Phase#BACKFILL}
+     * always; in {@link Phase#CLEANUP} only for a generation that was started there, the reconcile pass. A key enters
+     * {@code CLEANUP} with the generation of its backfill, which is not to be run again.
+     */
+    public boolean backfillDue()
+    {
+        return phase == Phase.BACKFILL || (phase == Phase.CLEANUP && generationEpoch.equals(phaseEpoch));
+    }
+
+    /**
+     * The time after which no replica writes a backfill chunk for this incarnation (invariant I9, ADR-031): half of
+     * {@code gc_grace_seconds} after dual write started. {@code Long.MIN_VALUE} if the start is not recorded: nothing
+     * may then be copied.
+     */
+    public long backfillLimitMillis(int gcGraceSeconds)
+    {
+        return dualWriteSinceMillis <= 0 ? Long.MIN_VALUE : dualWriteSinceMillis + gcGraceSeconds * 1000L / 2;
     }
 
     @Override
@@ -105,13 +141,13 @@ public final class KeyState
         KeyState k = (KeyState) o;
         return phase == k.phase && phaseEpoch.equals(k.phaseEpoch) && phaseSinceMillis == k.phaseSinceMillis
                && incarnation == k.incarnation && generation == k.generation && generationEpoch.equals(k.generationEpoch)
-               && backfillDone.equals(k.backfillDone) && Objects.equals(actionId, k.actionId);
+               && backfillDone.equals(k.backfillDone) && Objects.equals(actionId, k.actionId) && dualWriteSinceMillis == k.dualWriteSinceMillis;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId);
+        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis);
     }
 
     @Override
@@ -119,7 +155,7 @@ public final class KeyState
     {
         return "KeyState{" + phase + " phaseEpoch=" + phaseEpoch.getEpoch() + " since=" + phaseSinceMillis + " incarnation=" + incarnation
                + " generation=" + generation + " generationEpoch=" + generationEpoch.getEpoch() + " backfillDone=" + backfillDone
-               + " action=" + actionId + '}';
+               + " action=" + actionId + " dualWriteSince=" + dualWriteSinceMillis + '}';
     }
 
     static void serialize(KeyState k, DataOutputPlus out, Version version) throws IOException
@@ -139,6 +175,7 @@ public final class KeyState
             out.writeLong(k.actionId.getMostSignificantBits());
             out.writeLong(k.actionId.getLeastSignificantBits());
         }
+        out.writeLong(k.dualWriteSinceMillis);
     }
 
     static KeyState deserialize(DataInputPlus in, Version version) throws IOException
@@ -159,9 +196,10 @@ public final class KeyState
         for (int i = 0; i < nodes; i++)
             done.add(NodeId.serializer.deserialize(in, version));
         UUID actionId = in.readBoolean() ? new UUID(in.readLong(), in.readLong()) : null;
+        long dualWriteSince = in.readLong();
         try
         {
-            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId);
+            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince);
         }
         catch (IllegalArgumentException e)
         {
@@ -176,6 +214,6 @@ public final class KeyState
                     + Epoch.serializer.serializedSize(k.generationEpoch, version) + TypeSizes.sizeofUnsignedVInt(k.backfillDone.size());
         for (NodeId node : k.backfillDone)
             size += NodeId.serializer.serializedSize(node, version);
-        return size + 1 + (k.actionId == null ? 0 : 2 * Long.BYTES);
+        return size + 1 + (k.actionId == null ? 0 : 2 * Long.BYTES) + Long.BYTES;
     }
 }

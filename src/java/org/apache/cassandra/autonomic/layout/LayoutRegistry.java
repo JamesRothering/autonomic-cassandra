@@ -235,6 +235,8 @@ public final class LayoutRegistry
         KeyState state = layout.keyState(key);
         if (!state.phase.acceptsBackfillReports())
             return reject("key is in phase " + state.phase + ", which takes no backfill reports");
+        if (!state.backfillDue())
+            return reject("key is in phase " + state.phase + " with the generation of its backfill; the reconcile generation has not started");
         if (state.generation != generation)
             return reject("key is at generation " + state.generation + ", not " + generation);
         if (!state.generationEpoch.equals(generationEpoch))
