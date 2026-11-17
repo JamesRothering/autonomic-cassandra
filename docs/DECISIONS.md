@@ -512,3 +512,17 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Writing base first in C1 was rejected because it breaks the adjacency argument of 4.2 (a C2 reader could miss an acknowledged write). Deleting overflow-only rows before cutover was rejected because the delete would race with a retry of the same write.
 
 **Consequences.** A cell in a `MISSING_FROM_BASE` row that differs only in content from its base counterpart is still `CONTENT_DIFFERS` and fails. The tolerated count is recorded in the action's verdict so that an unexpectedly large number is visible. The TLA+ model's verification guard must be read as `base \subseteq overflow`, not equality.
+
+## ADR-031: The registry records when dual write started, and replicas refuse backfill writes past the tombstone deadline
+
+- **Date:** 2026-11-17
+- **Status:** Accepted (owner decision, 2026-11-17, on a hazard reported by T6.7)
+- **Deliverable:** D6
+
+**Context.** Invariant I9 (adaptive-schema 4.10) forbids any backfill or reconcile write for a key later than the start of `DUAL_WRITE` plus `gc_grace_seconds / 2`: after that, a tombstone that exists only in the overflow table may have been purged, and an older base row copied afterwards would come back to life. As designed only the action's owner enforced this, through `backfill_deadline` (4.5). After the commit point there is no abort, so a reconcile pass that starts or stalls past the deadline while the owner is absent could copy such a row. A replica could not refuse on its own because the registry did not record when dual write started.
+
+**Decision.** `KeyState` records the wall-clock time at which the key entered `DUAL_WRITE` for the current incarnation; later transitions keep it. Before each chunk write, `BackfillTask` on every replica compares its clock with that time plus half of the logical table's `gc_grace_seconds` and, once past it, writes nothing more for the key and commits no `ReportBackfill`. The owner's `backfill_deadline` stays and must fire first, so replicas reach their own limit only when the owner has failed to act.
+
+**Alternatives considered.** Leaving enforcement to the owner's deadline handling in T6.9 and documenting the gap: rejected by the owner, because the guarantee then depends on one node being present at the right time. Stopping tombstone purging on the overflow table for the life of a migration: rejected as a change to compaction on a core path.
+
+**Consequences.** One more field in the registry's wire format. The limit is judged by each replica's own clock, so it is as good as clock synchronisation between nodes, like `gc_grace_seconds` itself. A key that passes the limit in `CLEANUP` cannot complete its reconcile pass: the action ends in a terminal state that needs an operator, the key stays routed to the overflow copy, and the base partition tombstone is not written (T6.9).
