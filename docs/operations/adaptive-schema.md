@@ -61,7 +61,7 @@ May degrade, within the stated bounds:
 | D1 | Write latency on the split partition. Dual writes are two sequential writes; range and partition deletes go through the batchlog for good. | Dual-write phases last at most `max_migration_duration` (default 24h). Deletes: permanent. |
 | D2 | Reads that do not name the full primary key on the split partition cost N sub-reads instead of one. | Permanent while the partition is split. |
 | D3 | Availability of fan-out reads and multi-bucket deletes. Every touched bucket's replicas must meet the consistency level. | Permanent while split. |
-| D4 | A few transient timeouts around phase changes. A write at `ANY` behaves as `ONE`. | Per phase change; `ANY` permanent while split. |
+| D4 | A few transient timeouts around phase changes. A write at `ANY` to the key behaves as `ONE` from `ANNOUNCED` on. Writes at `ANY` made before the split are not lost: the split waits for their hints (section 2.1). | Per phase change; `ANY` as `ONE` permanent while split. |
 | D5 | Multi-row writes inside the split partition are applied by a logged batch. A concurrent read can see some rows and not others. | Permanent while split. |
 | D6 | A write whose outcome the client never learned (timeout, coordinator failure) during a migration may appear only at cutover, or be discarded. | Settles by the end of `CLEANUP`. |
 | D7 | Column changes on a table with a layout. | Column `ADD` and `DROP` are mirrored to the overflow table (ADR-034). Renames, type changes and other changes are rejected while the table has a layout. |
@@ -130,7 +130,10 @@ t  t_al_14810cff
 
 ### 2.1 Other things that look like bugs but are documented behavior
 
-- **Writes at `ANY` can be lost** if their hint outlives the migration (ADR-028). Do not split a key that is written at `ANY`, or accept the risk for that key.
+- **A split waits in `ANNOUNCED` for old hints** (ADR-035). Before `DUAL_WRITE`, every node must report that it holds no hint, created before the split, for any replica of the key. Hint replay writes to the base table only, so a hint delivered after the migration would be lost; a write at `ANY` can be acknowledged on such a hint alone. The check is by hint file age and target host, not by key: hints created after the split started, for any key, do not hold it up. The wait runs alongside the `cas_drain` wait and normally adds nothing.
+  - What holds it: hint delivery paused (`nodetool pausehandoff`) on any node, a replica that refuses or times out on hints, a corrupt hints file, or a large backlog toward one of the key's replicas. `nodetool autonomic layout status` shows `waits for hint reports (ADR-035), <n> of <m> nodes reported`, and each waiting node logs `waits in ANNOUNCED until this node has delivered the hints created before the split` once a minute with the oldest file per host.
+  - If the reports are not all in within `layout.hint_drain_timeout` (default 10m) after every node acknowledged `ANNOUNCED`, the migration aborts before the commit point. The abort reason starts with `HINTS_NOT_DRAINED` and names the nodes that still hold hints (`nodetool autonomic events <id>`, `layout status` while it aborts). No data is lost: the key goes back to the base table, where the hints land.
+  - To clear it: on each named node, run `nodetool listpendinghints` and `nodetool statushandoff`; resume delivery with `nodetool resumehandoff` and wait for the backlog to drain, or, if you accept losing those hints (and repair the replicas afterwards), drop them with `nodetool truncatehints <replica address>`. Then propose the split again.
 - **Base rows stay on disk** after `CLEANUP` until the base partition tombstone is written. They are unreachable through the logical table. Reverse migration must not assume the base partition is empty (ADR-033).
 - **Replicas stop backfilling** once the local clock is past `DUAL_WRITE` start plus half of the table's `gc_grace_seconds` (ADR-031). This depends on clock sync between nodes.
 - **A split that verification finds ineffective stays split.** It raises `layout.split_not_effective`. Until reverse migration exists, the only way back is an abort before the commit point (ADR-025).
@@ -181,6 +184,7 @@ autonomic:
     max_migration_duration: 24h    # the longest time before the commit point
     backfill_throughput: 1MiB/s    # per node, 0 is unlimited
     cas_drain: 15s                 # ANNOUNCED waits at least this, and the longest request timeout
+    hint_drain_timeout: 10m        # longest wait in ANNOUNCED for pre-split hints to be delivered; then abort (ADR-035)
 ```
 
 The rest of the `layout:` block (eligibility thresholds, verification, triggers) is documented with its defaults in `conf/cassandra.yaml`. Read the comments there before you change them.
@@ -419,7 +423,7 @@ Empty result (`(0 rows)`) means no key is split.
 
 | Phase | Meaning for a client |
 |-------|----------------------|
-| `ANNOUNCED` | Every node knows about the split. LWT and `SERIAL` reads are rejected. Waits `cas_drain` after acknowledgement. |
+| `ANNOUNCED` | Every node knows about the split. LWT and `SERIAL` reads are rejected. Waits `cas_drain` after acknowledgement, and until no node holds hints from before the split for the key's replicas (at most `hint_drain_timeout`). |
 | `DUAL_WRITE` | Writes go to both copies. Reads still come from the base table. |
 | `BACKFILL` | Replicas copy their local data to the overflow table. Writes still go to both. |
 | `VERIFY` | Both copies are compared row by row. A mismatch fails the check and starts one more backfill generation. |

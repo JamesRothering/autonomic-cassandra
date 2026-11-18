@@ -776,6 +776,42 @@ public class LayoutTransformationTest
         }
     }
 
+    // ---- ReportHints (ADR-035) ----
+
+    @Test
+    public void hintReportsAreTakenInAnnouncedAtItsEpochOnlyAndClearedByTheNextTransition() throws IOException
+    {
+        ClusterMetadata md = keyIn(Phase.ANNOUNCED);
+        Epoch announced = key(md, K1).phaseEpoch;
+        assertRejected("not 1", md, new ReportHints(LOGICAL, K1, Epoch.create(1), N1));
+        md = execute(md, new ReportHints(LOGICAL, K1, announced, N2));
+        md = execute(md, new ReportHints(LOGICAL, K1, announced, N1));
+        assertEquals(ImmutableSet.of(N1, N2), key(md, K1).hintsClear);
+        assertTrue("a report does not count as a backfill report", key(md, K1).backfillDone.isEmpty());
+        assertSame("idempotent", md.extensions.get(LayoutRegistryValue.KEY),
+                   execute(md, new ReportHints(LOGICAL, K1, announced, N1)).extensions.get(LayoutRegistryValue.KEY));
+        // kept by a round trip, and by an adoption
+        assertEquals(ImmutableSet.of(N1, N2), key(roundTrip(md), K1).hintsClear);
+        assertEquals(registry(md), registry(roundTrip(md)));
+        ClusterMetadata dual = execute(md, advance(0, Phase.ANNOUNCED, Phase.DUAL_WRITE, 1));
+        assertTrue("the next phase clears them", key(dual, K1).hintsClear.isEmpty());
+        assertRejected("which takes no hint reports", dual, new ReportHints(LOGICAL, K1, announced, new NodeId(3)));
+        assertRejected("which takes no hint reports", dual, new ReportHints(LOGICAL, K1, key(dual, K1).phaseEpoch, new NodeId(3)));
+        for (Phase phase : Phase.values())
+            if (phase != Phase.ANNOUNCED)
+                assertRejected("which takes no hint reports", keyIn(phase), new ReportHints(LOGICAL, K1, key(keyIn(phase), K1).phaseEpoch, N1));
+        assertRejected("has no layout", start(), new ReportHints(LOGICAL, K1, announced, N1));
+        try
+        {
+            new KeyState(Phase.DUAL_WRITE, Epoch.create(1), 0, 1, 1, Epoch.create(1), ImmutableSet.of(), A, 1, ImmutableSet.of(N1));
+            fail();
+        }
+        catch (IllegalArgumentException expected)
+        {
+            // only in ANNOUNCED
+        }
+    }
+
     // ---- RemoveKey, FinishKey, RemoveOrphanLayout ----
 
     @Test
@@ -1014,7 +1050,7 @@ public class LayoutTransformationTest
     public void replayedCodeDoesNotReadClocksOrConfiguration() throws IOException
     {
         String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase", "Eligibility", "PhysicalTables",
-                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey", "ReleaseKey", "NaturalReplicas" };
+                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "ReportHints", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey", "ReleaseKey", "NaturalReplicas" };
         String[] forbidden = { "Clock", "currentTimeMillis", "nanoTime", "DatabaseDescriptor", "AutonomicService", "AutonomicConfig",
                                "FBUtilities", "Random", "randomUUID", "TimeUUID", "System.", "ClusterMetadata.current", "ClusterMetadataService",
                                "StorageService", "Schema.instance", "Instant", "new Date" };
@@ -1103,6 +1139,7 @@ public class LayoutTransformationTest
                                        advance(4, Phase.VERIFY, Phase.BACKFILL, 2),
                                        advance(0, Phase.CLEANUP, Phase.CLEANUP, 9),
                                        new ReportBackfill(LOGICAL, K1, 3, Epoch.create(41), N2),
+                                       new ReportHints(LOGICAL, K1, Epoch.create(42), N1),
                                        new RemoveKey(A, N1, 7, LOGICAL, K2, NOW, LEASE),
                                        new FinishKey(A, N1, 8, LOGICAL, K2, NOW, LEASE),
                                        new ReleaseKey(B, N2, 9, LOGICAL, K1, NOW, LEASE),

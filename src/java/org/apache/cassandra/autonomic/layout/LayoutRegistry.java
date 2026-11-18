@@ -55,6 +55,8 @@ public final class LayoutRegistry
     public static final int MAX_KEYS = 8;
     public static final int MAX_KEY_BYTES = 1024;
     public static final int MAX_BACKFILL_NODES = 32;
+    /** Nodes of {@link KeyState#hintsClear}: every directory member reports, not only the replicas (ADR-035). */
+    public static final int MAX_HINT_REPORTS = 1024;
     public static final int MIN_BUCKETS = 2;
     public static final int MAX_BUCKETS = 64;
     /** Exclusive: {@code incarnation * 256 + bucket} must fit an int. */
@@ -249,6 +251,31 @@ public final class LayoutRegistry
         if (state.backfillDone.size() >= MAX_BACKFILL_NODES)
             return reject("backfill_done already has " + MAX_BACKFILL_NODES + " nodes");
         return changed(logical, layout.withKey(key, state.withBackfillDone(node)));
+    }
+
+    /**
+     * {@code ReportHints} (ADR-035): adds the node to {@link KeyState#hintsClear}. Idempotent. Accepted only while the
+     * key is in {@link Phase#ANNOUNCED} at {@code phaseEpoch}: a report made for an earlier attempt, or for a phase the
+     * key has left, does not count.
+     */
+    public Result withHintsReported(TableId logical, ByteBuffer key, Epoch phaseEpoch, NodeId node)
+    {
+        if (logical == null || key == null || phaseEpoch == null || node == null)
+            return reject("missing argument");
+        String missing = lookup(logical, key);
+        if (missing != null)
+            return reject(missing);
+        TableLayout layout = byLogical.get(logical);
+        KeyState state = layout.keyState(key);
+        if (state.phase != Phase.ANNOUNCED)
+            return reject("key is in phase " + state.phase + ", which takes no hint reports");
+        if (!state.phaseEpoch.equals(phaseEpoch))
+            return reject("key entered ANNOUNCED at epoch " + state.phaseEpoch.getEpoch() + ", not " + phaseEpoch.getEpoch());
+        if (state.hintsClear.contains(node))
+            return new Result(this, null, true);
+        if (state.hintsClear.size() >= MAX_HINT_REPORTS)
+            return reject("hints_clear already has " + MAX_HINT_REPORTS + " nodes");
+        return changed(logical, layout.withKey(key, state.withHintsClear(node)));
     }
 
     /**

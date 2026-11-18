@@ -906,6 +906,7 @@ autonomic:
     excluded_tables: []               # keyspace.table names never split (ADR-024)
     ack_poll_interval: 5s
     cas_drain: 15s                    # lower bound of the drain wait in ANNOUNCED (ADR-028)
+    hint_drain_timeout: 10m           # longest wait in ANNOUNCED for pre-split hints to be delivered; then abort (ADR-035)
     verify_page_rows: 1000
     verify_recheck_delay: 2s
     verify_retries: 1

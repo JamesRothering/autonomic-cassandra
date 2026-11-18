@@ -58,6 +58,12 @@ public final class KeyState
      * transition changes it. From it every replica derives the time after which it copies nothing more (ADR-031).
      */
     public final long dualWriteSinceMillis;
+    /**
+     * Nodes that reported, for this {@link Phase#ANNOUNCED} phase epoch, that they hold no hint created before the split
+     * for a natural replica of the key ({@code ReportHints}, ADR-035); sorted, at most
+     * {@link LayoutRegistry#MAX_HINT_REPORTS}. Empty in every other phase: any transition clears it.
+     */
+    public final ImmutableSortedSet<NodeId> hintsClear;
 
     /** A state that never entered {@link Phase#DUAL_WRITE}, or a hand-built one for which that does not matter. */
     public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
@@ -68,6 +74,13 @@ public final class KeyState
 
     public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
                     Collection<NodeId> backfillDone, UUID actionId, long dualWriteSinceMillis)
+    {
+        this(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis,
+             ImmutableSortedSet.of());
+    }
+
+    public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
+                    Collection<NodeId> backfillDone, UUID actionId, long dualWriteSinceMillis, Collection<NodeId> hintsClear)
     {
         if (dualWriteSinceMillis < 0)
             throw new IllegalArgumentException("dual write start " + dualWriteSinceMillis + " is negative");
@@ -86,6 +99,11 @@ public final class KeyState
         this.generationEpoch = Objects.requireNonNull(generationEpoch);
         this.backfillDone = ImmutableSortedSet.copyOf(backfillDone);
         this.actionId = actionId;
+        if (hintsClear.size() > LayoutRegistry.MAX_HINT_REPORTS)
+            throw new IllegalArgumentException("hints_clear has " + hintsClear.size() + " nodes, the limit is " + LayoutRegistry.MAX_HINT_REPORTS);
+        if (!hintsClear.isEmpty() && phase != Phase.ANNOUNCED)
+            throw new IllegalArgumentException("hints_clear is kept in ANNOUNCED only, not in " + phase);
+        this.hintsClear = ImmutableSortedSet.copyOf(hintsClear);
     }
 
     /** A key just registered: {@link Phase#ANNOUNCED}, generation 1, nothing backfilled. */
@@ -94,7 +112,10 @@ public final class KeyState
         return new KeyState(Phase.ANNOUNCED, epoch, nowMillis, incarnation, 1, epoch, ImmutableSortedSet.of(), Objects.requireNonNull(actionId));
     }
 
-    /** The state after moving to {@code to}; a different {@code generation} clears {@link #backfillDone}. */
+    /**
+     * The state after moving to {@code to}; a different {@code generation} clears {@link #backfillDone}, and every
+     * transition clears {@link #hintsClear}.
+     */
     KeyState advanced(Phase to, int toGeneration, Epoch epoch, long nowMillis)
     {
         boolean restarted = toGeneration != generation;
@@ -106,14 +127,21 @@ public final class KeyState
     KeyState withBackfillDone(NodeId node)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch,
-                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis);
+                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis, hintsClear);
+    }
+
+    /** {@code ReportHints} (ADR-035): the node holds no hint created before the split for the key's replicas. */
+    KeyState withHintsClear(NodeId node)
+    {
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis,
+                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(hintsClear).add(node).build());
     }
 
     /** The same state owned by another action ({@code AdoptKey}). */
     KeyState withAction(UUID newActionId)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone,
-                            Objects.requireNonNull(newActionId), dualWriteSinceMillis);
+                            Objects.requireNonNull(newActionId), dualWriteSinceMillis, hintsClear);
     }
 
     /** {@link Phase#STEADY}, still owned by the action until its base partition tombstone is written. */
@@ -158,13 +186,14 @@ public final class KeyState
         KeyState k = (KeyState) o;
         return phase == k.phase && phaseEpoch.equals(k.phaseEpoch) && phaseSinceMillis == k.phaseSinceMillis
                && incarnation == k.incarnation && generation == k.generation && generationEpoch.equals(k.generationEpoch)
-               && backfillDone.equals(k.backfillDone) && Objects.equals(actionId, k.actionId) && dualWriteSinceMillis == k.dualWriteSinceMillis;
+               && backfillDone.equals(k.backfillDone) && Objects.equals(actionId, k.actionId) && dualWriteSinceMillis == k.dualWriteSinceMillis
+               && hintsClear.equals(k.hintsClear);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis);
+        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear);
     }
 
     @Override
@@ -172,7 +201,7 @@ public final class KeyState
     {
         return "KeyState{" + phase + " phaseEpoch=" + phaseEpoch.getEpoch() + " since=" + phaseSinceMillis + " incarnation=" + incarnation
                + " generation=" + generation + " generationEpoch=" + generationEpoch.getEpoch() + " backfillDone=" + backfillDone
-               + " action=" + actionId + " dualWriteSince=" + dualWriteSinceMillis + '}';
+               + " action=" + actionId + " dualWriteSince=" + dualWriteSinceMillis + (hintsClear.isEmpty() ? "" : " hintsClear=" + hintsClear) + '}';
     }
 
     static void serialize(KeyState k, DataOutputPlus out, Version version) throws IOException
@@ -193,6 +222,9 @@ public final class KeyState
             out.writeLong(k.actionId.getLeastSignificantBits());
         }
         out.writeLong(k.dualWriteSinceMillis);
+        out.writeUnsignedVInt32(k.hintsClear.size());
+        for (NodeId node : k.hintsClear)
+            NodeId.serializer.serialize(node, out, version);
     }
 
     static KeyState deserialize(DataInputPlus in, Version version) throws IOException
@@ -214,9 +246,15 @@ public final class KeyState
             done.add(NodeId.serializer.deserialize(in, version));
         UUID actionId = in.readBoolean() ? new UUID(in.readLong(), in.readLong()) : null;
         long dualWriteSince = in.readLong();
+        int clear = in.readUnsignedVInt32();
+        if (clear < 0 || clear > LayoutRegistry.MAX_HINT_REPORTS)
+            throw new IOException("Corrupt autonomic layout registry: " + clear + " hint reports");
+        ImmutableSortedSet.Builder<NodeId> hintsClear = ImmutableSortedSet.naturalOrder();
+        for (int i = 0; i < clear; i++)
+            hintsClear.add(NodeId.serializer.deserialize(in, version));
         try
         {
-            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince);
+            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince, hintsClear.build());
         }
         catch (IllegalArgumentException e)
         {
@@ -231,6 +269,9 @@ public final class KeyState
                     + Epoch.serializer.serializedSize(k.generationEpoch, version) + TypeSizes.sizeofUnsignedVInt(k.backfillDone.size());
         for (NodeId node : k.backfillDone)
             size += NodeId.serializer.serializedSize(node, version);
-        return size + 1 + (k.actionId == null ? 0 : 2 * Long.BYTES) + Long.BYTES;
+        size += 1 + (k.actionId == null ? 0 : 2 * Long.BYTES) + Long.BYTES + TypeSizes.sizeofUnsignedVInt(k.hintsClear.size());
+        for (NodeId node : k.hintsClear)
+            size += NodeId.serializer.serializedSize(node, version);
+        return size;
     }
 }

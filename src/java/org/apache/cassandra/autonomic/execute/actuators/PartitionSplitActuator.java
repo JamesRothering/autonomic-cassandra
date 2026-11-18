@@ -59,6 +59,7 @@ import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.Eligibility;
 import org.apache.cassandra.autonomic.layout.EpochWatermarks;
 import org.apache.cassandra.autonomic.layout.FinishKey;
+import org.apache.cassandra.autonomic.layout.HintReport;
 import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
@@ -86,6 +87,7 @@ import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Mutation;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
+import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.SchemaTransformation;
@@ -125,7 +127,9 @@ import org.apache.cassandra.utils.LocalizeString;
  * {@code AdoptKey}, which hands the key to this action.
  *
  * <p><b>Forward</b> (design 4.1; every wait is a STAY): ANNOUNCED, after every node acknowledged it, waits the
- * drain of ADR-028; DUAL_WRITE waits for acknowledgement; BACKFILL waits until {@code backfillDone} holds every natural
+ * drain of ADR-028 and, at the same time, until every directory member that is not LEFT has reported that it holds no
+ * hint created before the split for a natural replica of the key ({@code ReportHints}, ADR-035); if the reports are not
+ * all in {@code hint_drain_timeout} after the acknowledgement, the migration aborts ({@value #HINTS_NOT_DRAINED}); DUAL_WRITE waits for acknowledgement; BACKFILL waits until {@code backfillDone} holds every natural
  * replica of the key at the current generation and the placement has not changed since the generation started (4.7,
  * else a new generation); VERIFY runs {@link LayoutVerifier} at ALL (ADR-030: CONTENT_DIFFERS and
  * MISSING_FROM_OVERFLOW send the key back to BACKFILL with a new generation up to {@code verify_retries} times, then
@@ -223,8 +227,10 @@ public class PartitionSplitActuator implements ClusterActuator
 
     public static final String RECONCILE_PAST_DEADLINE = "RECONCILE_PAST_DEADLINE";
     public static final String TABLE_DROPPED = "TABLE_DROPPED";
+    /** The start of the abort reason when not every node delivered its pre-split hints in time (ADR-035). */
+    public static final String HINTS_NOT_DRAINED = "HINTS_NOT_DRAINED";
     /** Added to the ADR-028 drain. */
-    static final long DRAIN_MARGIN_MILLIS = 1000;
+    static final long DRAIN_MARGIN_MILLIS = HintReport.DRAIN_MARGIN_MILLIS;
     static final int MAX_DELETE_ATTEMPTS = 3;
     private static final int MAX_TEXT = 300;
 
@@ -807,11 +813,20 @@ public class PartitionSplitActuator implements ClusterActuator
                 StepResult acked = ackedFor(v, ctx);
                 if (acked != null)
                     return acked;
-                long drain = Math.max(layoutConfig().cas_drain.toMilliseconds(), env.requestTimeoutsMillis()) + DRAIN_MARGIN_MILLIS;
+                long drain = HintReport.drainMillis(layoutConfig().cas_drain.toMilliseconds(), env.requestTimeoutsMillis());
                 // a split the policy proposed is also held for its baseline window from registration (design 7.3)
                 boolean judged = SplitEvaluation.Baseline.fromMap(v.claim.state) != null;
                 long baselineEnd = judged ? key.phaseSinceMillis + layoutConfig().baseline_window.toMilliseconds() : Long.MIN_VALUE;
                 long remaining = Math.max(ackedAt(v) + drain, baselineEnd) - ctx.nowMillis();
+                // ADR-035, alongside the drain: every node has reported that it holds no hint from before the split
+                List<NodeId> withHints = hintsPending(v);
+                if (!withHints.isEmpty())
+                {
+                    long timeoutEnd = ackedAt(v) + layoutConfig().hint_drain_timeout.toMilliseconds();
+                    if (ctx.nowMillis() >= timeoutEnd)
+                        return abortStep(v, ctx, hintsNotDrained(v, withHints));
+                    remaining = Math.max(remaining, Math.min(pollMillis(), timeoutEnd - ctx.nowMillis()));
+                }
                 if (remaining > 0)
                     return StepResult.stay(Math.min(remaining, pollMillis()));
                 if (!v.claim.state.containsKey(S_BASELINE_AT))
@@ -1344,6 +1359,33 @@ public class PartitionSplitActuator implements ClusterActuator
         return !replicas.isEmpty() && state.backfillDone.containsAll(replicas);
     }
 
+    /** ADR-035: the directory members that are not LEFT and have not reported their hints for this ANNOUNCED epoch. */
+    private static List<NodeId> hintsPending(View v)
+    {
+        List<NodeId> out = new ArrayList<>();
+        for (NodeId id : EpochWatermarks.required(v.cm))
+            if (!v.key.hintsClear.contains(id))
+                out.add(id);
+        return out;
+    }
+
+    /** The diagnosis of an abort on {@code hint_drain_timeout}: the nodes that still hold hints, by id and address. */
+    private String hintsNotDrained(View v, List<NodeId> withHints)
+    {
+        StringBuilder nodes = new StringBuilder();
+        for (NodeId id : withHints)
+        {
+            if (nodes.length() > 0)
+                nodes.append(", ");
+            nodes.append(id.id());
+            InetAddressAndPort endpoint = v.cm.directory.endpoint(id);
+            if (endpoint != null)
+                nodes.append(" (").append(endpoint).append(')');
+        }
+        return HINTS_NOT_DRAINED + ": hint_drain_timeout " + layoutConfig().hint_drain_timeout + " passed in ANNOUNCED; node(s) " + nodes
+               + " still hold hints created before the split for replicas of the key (ADR-035)";
+    }
+
     private int replicaCount(View v)
     {
         return env.replicas(v.cm, v.logical, v.target.key).size();
@@ -1565,6 +1607,9 @@ public class PartitionSplitActuator implements ClusterActuator
                     status = "aborting: " + claim.state.get(S_ABORT);
                 else if (key.phase == Phase.CUTOVER && !"auto".equalsIgnoreCase(lc.commit_approval) && !"true".equals(claim.state.get(S_COMMIT_APPROVED)))
                     status = "running; the commit point waits for `nodetool autonomic approve " + claim.actionId + '`';
+                else if (key.phase == Phase.ANNOUNCED && key.hintsClear.size() < EpochWatermarks.required(cm).size())
+                    status = "running on node " + claim.owner.id() + "; waits for hint reports (ADR-035), " + key.hintsClear.size() + " of "
+                             + EpochWatermarks.required(cm).size() + " nodes reported: " + key.hintsClear;
                 else
                     status = "running on node " + claim.owner.id();
                 m.put("status", status);
@@ -1689,11 +1734,7 @@ public class PartitionSplitActuator implements ClusterActuator
         @Override
         public long requestTimeoutsMillis()
         {
-            long max = DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS);
-            max = Math.max(max, DatabaseDescriptor.getCounterWriteRpcTimeout(TimeUnit.MILLISECONDS));
-            max = Math.max(max, DatabaseDescriptor.getCasContentionTimeout(TimeUnit.MILLISECONDS));
-            max = Math.max(max, DatabaseDescriptor.getRangeRpcTimeout(TimeUnit.MILLISECONDS));
-            return Math.max(max, DatabaseDescriptor.getTruncateRpcTimeout(TimeUnit.MILLISECONDS));
+            return HintReport.requestTimeoutsMillis();
         }
 
         @Override

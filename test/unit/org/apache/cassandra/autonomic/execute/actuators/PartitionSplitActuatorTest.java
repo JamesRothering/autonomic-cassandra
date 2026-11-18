@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -69,6 +70,7 @@ import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.ReleaseKey;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.autonomic.layout.ReportBackfill;
+import org.apache.cassandra.autonomic.layout.ReportHints;
 import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.autonomic.monitor.Observation;
@@ -556,6 +558,7 @@ public class PartitionSplitActuatorTest
             String phase = state == null ? "absent" : state.phase + "/" + state.generation;
             if (phases.isEmpty() || !phases.get(phases.size() - 1).equals(phase))
                 phases.add(phase);
+            reportHints();
             KeyState now = key(cluster.log);
             if (autoReport && (reportReconcile || now == null || now.phase != Phase.CLEANUP))
                 report();
@@ -622,6 +625,25 @@ public class PartitionSplitActuatorTest
         assertNotNull(state);
         assertTrue(child + " committed before every node had epoch " + state.phaseEpoch.getEpoch() + " of " + state.phase,
                    env.allAt(state.phaseEpoch));
+    }
+
+    /** Directory members that hold hints from before the split: they make no hint report (ADR-035). */
+    private final Set<NodeId> holdHints = new HashSet<>();
+
+    /** In ANNOUNCED every directory member not in {@link #holdHints} reports its hints, as HintReport does. */
+    private void reportHints()
+    {
+        KeyState state = key(cluster.log);
+        if (state != null && state.phase == Phase.ANNOUNCED)
+        {
+            for (NodeId node : cluster.log.directory.peerIds())
+                if (!holdHints.contains(node) && !state.hintsClear.contains(node))
+                {
+                    cluster.log = new ReportHints(LOGICAL, KEY, state.phaseEpoch, node).wrap().execute(cluster.log).success().metadata;
+                    state = key(cluster.log);
+                }
+            catchUp();
+        }
     }
 
     /** The replicas commit their reports, as BackfillTask does, for the generation that is due. */
@@ -701,6 +723,45 @@ public class PartitionSplitActuatorTest
         long drain = 3000 + PartitionSplitActuator.DRAIN_MARGIN_MILLIS;
         assertTrue("DUAL_WRITE at " + key(cluster.log).phaseSinceMillis + ", acknowledged at " + acknowledgedAt,
                    key(cluster.log).phaseSinceMillis >= acknowledgedAt + drain);
+    }
+
+    @Test
+    public void announcedWaitsForEveryNodesHintReportAlongsideTheDrain() throws Exception
+    {
+        // ADR-035
+        holdHints.add(cluster.id(3));
+        Owner owner = owner().reach(Phase.ANNOUNCED);
+        long until = cluster.now.get() + 60_000;
+        owner.until(o -> cluster.now.get() > until);
+        assertEquals("node 3 has not reported: the drain is long over, the key stays", Phase.ANNOUNCED, key(cluster.log).phase);
+        assertEquals(ImmutableSet.of(cluster.id(1), cluster.id(2)), key(cluster.log).hintsClear);
+        String status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status");
+        assertTrue(status, status.contains("waits for hint reports (ADR-035), 2 of 3 nodes reported"));
+        holdHints.clear();
+        owner.reach(Phase.DUAL_WRITE);
+        assertTrue("the next phase clears the reports", key(cluster.log).hintsClear.isEmpty());
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+    }
+
+    @Test
+    public void announcedAbortsWhenHintsAreNotDeliveredInHintDrainTimeout() throws Exception
+    {
+        config.layout.hint_drain_timeout = new DurationSpec.LongMillisecondsBound("2m");
+        holdHints.add(cluster.id(3));
+        Owner owner = owner().reach(Phase.ANNOUNCED);
+        owner.until(o -> o.claim() != null && o.claim().state.containsKey(PartitionSplitActuator.S_ABORT));
+        long acked = Long.parseLong(owner.claim().state.get(PartitionSplitActuator.S_ACKED).replaceAll(".*/", ""));
+        assertTrue("not before the timeout", cluster.now.get() >= acked + 120_000);
+        String why = owner.claim().state.get(PartitionSplitActuator.S_ABORT);
+        assertTrue(why, why.startsWith(PartitionSplitActuator.HINTS_NOT_DRAINED + ": hint_drain_timeout 2m passed in ANNOUNCED; node(s) "
+                                       + cluster.id(3).id() + " ("));
+        assertTrue(why, why.contains("still hold hints created before the split"));
+        assertFalse("nodes that reported are not named", why.contains("node(s) " + cluster.id(1).id() + ' '));
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(owner.phases.toString(), owner.phases.contains("ABORTING/1"));
+        assertFalse(owner.phases.toString(), owner.phases.contains("DUAL_WRITE/1"));
+        assertRemovedAndDropped();
     }
 
     /** Node 3 has every epoch before the current phase epoch and not that one: it is one phase behind. */

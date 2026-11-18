@@ -25,6 +25,7 @@ import org.apache.cassandra.autonomic.layout.ReleaseKey;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.autonomic.layout.RemoveOrphanLayout;
 import org.apache.cassandra.autonomic.layout.ReportBackfill;
+import org.apache.cassandra.autonomic.layout.ReportHints;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 
 /**
@@ -57,5 +58,7 @@ public final class AutonomicTransformations
         CustomTransformation.registerExtension(RemoveOrphanLayout.NAME, RemoveOrphanLayout.serializer);
         CustomTransformation.registerExtension(AdoptKey.NAME, AdoptKey.serializer);
         CustomTransformation.registerExtension(ReleaseKey.NAME, ReleaseKey.serializer);
+        // ADR-035
+        CustomTransformation.registerExtension(ReportHints.NAME, ReportHints.serializer);
     }
 }

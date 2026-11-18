@@ -3203,6 +3203,9 @@ storage_compatibility_mode: NONE
 #     ack_poll_interval: 5s
 #     # ANNOUNCED waits at least this, and at least the longest write, CAS, range and truncate timeout, once acknowledged
 #     cas_drain: 15s
+#     # ANNOUNCED also waits until no node holds a hint created before the split for the key's replicas (ADR-035);
+#     # if that takes longer than this from the acknowledgement, the migration is aborted
+#     hint_drain_timeout: 10m
 #     # the equivalence check of VERIFY, and how many new backfill generations a failed check gets before an abort
 #     verify_page_rows: 1000
 #     verify_recheck_delay: 2s

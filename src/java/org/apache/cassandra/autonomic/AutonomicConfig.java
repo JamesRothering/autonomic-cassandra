@@ -127,6 +127,11 @@ public class AutonomicConfig
         public DurationSpec.IntMillisecondsBound ack_poll_interval = new DurationSpec.IntMillisecondsBound("5s");
         /** Lower bound of the wait in ANNOUNCED after every node acknowledged it (design 4.1, ADR-028). */
         public DurationSpec.IntMillisecondsBound cas_drain = new DurationSpec.IntMillisecondsBound("15s");
+        /**
+         * Longest the owner waits in ANNOUNCED, from every node's acknowledgement, for every node to report that it holds
+         * no hint created before the split for the key's replicas (ADR-035); then the migration is aborted.
+         */
+        public DurationSpec.LongMillisecondsBound hint_drain_timeout = new DurationSpec.LongMillisecondsBound("10m");
         /** Rows per page of the equivalence check in VERIFY. */
         public int verify_page_rows = 1000;
         /** Delay before a row that differed is read again. */

@@ -41,7 +41,8 @@ import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFac
  *
  * <p>It registers one {@link ChangeListener} and reacts to changes of the registry only. It creates no thread while
  * the registry holds no key in a phase that needs backfill (BACKFILL or CLEANUP); the {@code LayoutBackfill} thread
- * is created lazily when one appears and released when none is left. What the thread does is a hook (T6.7).
+ * is created lazily when one appears and released when none is left. What the thread does is a hook (T6.7). While a key
+ * is in ANNOUNCED it also has {@link HintReport} report this node's hints (ADR-035), on the shared optional-tasks executor.
  */
 public final class LayoutService implements ChangeListener
 {
@@ -56,6 +57,7 @@ public final class LayoutService implements ChangeListener
     /** Threads released without an interrupt that may still be finishing a step; interrupted at shutdown. */
     private final List<ExecutorService> released = new ArrayList<>();
     private volatile Consumer<LayoutRegistry> backfillHook = BackfillTask::onRegistryChange;
+    private volatile Consumer<ClusterMetadata> hintHook = HintReport.instance::onRegistryChange;
 
     private volatile boolean active;
 
@@ -75,7 +77,9 @@ public final class LayoutService implements ChangeListener
         service.log().addListener(this);
         registered = service;
         active = true;
-        react(LayoutRegistry.of(ClusterMetadata.current()));
+        ClusterMetadata current = ClusterMetadata.current();
+        react(LayoutRegistry.of(current));
+        hints(current);
     }
 
     /** Removes the listener and releases the backfill thread. */
@@ -97,6 +101,25 @@ public final class LayoutService implements ChangeListener
     public void setBackfillHook(Consumer<LayoutRegistry> hook)
     {
         backfillHook = hook == null ? registry -> {} : hook;
+    }
+
+    /** What is called on every registry change for the hint report of ADR-035; {@link HintReport} unless replaced. */
+    @VisibleForTesting
+    public void setHintHook(Consumer<ClusterMetadata> hook)
+    {
+        hintHook = hook == null ? metadata -> {} : hook;
+    }
+
+    private void hints(ClusterMetadata metadata)
+    {
+        try
+        {
+            hintHook.accept(metadata);
+        }
+        catch (Throwable t)
+        {
+            logger.error("Layout hint report hook failed", t);
+        }
     }
 
     /** Test seam: reacts to notifications without a metadata log. */
@@ -122,7 +145,10 @@ public final class LayoutService implements ChangeListener
         synchronized (this)
         {
             if (active)
+            {
                 react(after);
+                hints(next);
+            }
         }
     }
 
