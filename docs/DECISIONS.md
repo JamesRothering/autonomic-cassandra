@@ -544,7 +544,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-033: The base partition tombstone is written after FinishKey, and FinishKey requires a complete reconcile
 
 - **Date:** 2026-11-17
-- **Status:** Accepted (orchestrator decision on the T6.9 build and its review; confirmed by the owner at the D6 review, 2026-11-18)
+- **Status:** Accepted (orchestrator decision on the T6.9 build and its review; confirmed by the owner at the D6 review, 2026-11-18); the timing of the tombstone would be amended by ADR-036, which is Proposed
 - **Deliverable:** D6
 
 **Context.** Section 4.1 lists the base partition tombstone before `FinishKey` in `CLEANUP`. With that order, a natural replica that has not reported (a node that became a replica during `CLEANUP`) runs a reconcile pass after the tombstone, reads it from base and copies a partition deletion into every bucket, deleting acknowledged overflow data. The T6.9 review found a second path to the same loss even with the reordering: a replica that joins between the reconcile report and `FinishKey` and whose pass stalls.
@@ -580,3 +580,39 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** Documenting the gap as a limitation for tables written at `ANY` (the ADR-028 position): rejected by the owner, since the fix is cheap and removes a limitation from the contract. Rejecting `ANY` on adapted keys: rejected, because it does not close the gap: the dangerous hint predates registration.
 
 **Consequences.** A cluster with a stuck hint backlog toward one of the key's replicas cannot split that key until the backlog drains, or until the operator truncates the hints. The limitation on `ANY` writes is removed from the operator guide. A coordinator thread stalled for longer than the ADR-028 wait is still not covered.
+
+## ADR-036: Reverse migration keeps the base residue for a window instead of writing the base tombstone at cleanup (O3)
+
+- **Date:** 2026-11-18
+- **Status:** Proposed (owner to review before code)
+- **Deliverable:** D6 follow-up (T6.17)
+
+**Context.** T6.17 must return a split key to the base table (adaptive-schema section 11). After a split, forward cleanup writes a base partition tombstone at time `Tt` once `FinishKey` is acknowledged (ADR-033). The overflow copy holds cells with their original timestamps, many older than `Tt`. Copied back into the same base partition, they stay invisible until the tombstone is purged, `gc_grace_seconds` plus a compaction later (open issue O3). Without the tombstone, the stale base rows (the residue) come back after an unsplit if a delete made while split, which exists only in the overflow table, has meanwhile been purged there. Section 11.1 and 11.2 work both hazards with timestamps. The reverse must keep every acknowledged write with its original timestamp, keep deletes made while split deleted, and lose nothing during the reverse.
+
+**Decision.** Proposed option (d) of section 11.2.
+
+- **Forward cleanup no longer writes the base partition tombstone in `STEADY`.** This reverses ADR-033's timing; its ordering rule stays: no tombstone while a reconcile pass can run, and `FinishKey` requires a complete reconcile. The registry records when the key entered class C3 (`frozenSince`) and the base state `RESIDUE`. Range-scan exclusion and C3 routing keep the residue unreachable, as today.
+- **Fast mode.** A reverse migration whose copy and reconcile writes are all issued before `frozenSince + gc_grace_seconds / 2` merges into the residue. Every delete that exists only in overflow is younger than `frozenSince` and cannot have been purged yet, so last-write-wins gives the overflow state. The limit is enforced by the owner and by every replica, as ADR-031 does.
+- **Reclaim.** When fast mode can no longer finish in time and no reverse owns the key, a `reclaim` continuation of the split action writes the base tombstone at `ALL`, as `deleteBase` does today, and records `Tt` in the registry.
+- **Slow mode** (option (a)): once a tombstone exists, a reverse starts only after every base replica has passed the tombstone's local deletion time plus `gc_grace_seconds`, run `forceCompactionForKey` for the key, and found its partition empty in a local unfiltered probe. Residue newer than the tombstone stops the reverse for an operator decision. Keys split under the current forward cleanup use this mode.
+- **Reverse protocol** (section 11.4): `BeginUnsplit` (C3), reverse dual write, backfill and verify (C2, overflow authoritative and written last), `CUTBACK` (C1), `BASE_ONLY` (C0, the reverse commit point), reverse cleanup with a reconcile pass, `RemoveKey`, then deletion of the bucket partitions or drop of the overflow table, only after every node acknowledged the removal. The reverse reuses the coordinator classes, rules O1 and C1, the validation of ADR-027, the replica deadline of ADR-031 with new limits, and the verification of ADR-030 with roles swapped. The drain wait (ADR-028) and the hint wait (ADR-035) are not needed, because every operation on the key is routed and validated. Abort before the commit point returns to `STEADY`. New invariants I8-R and I16 to I22, and an amended I10.
+
+**Alternatives considered.**
+- (a) alone (wait out `gc_grace_seconds` after the tombstone, then force a purge): correct with a residue probe, but no unsplit for at least 10 days after cleanup by default. The main trigger, `layout.split_not_effective`, fires minutes after the commit. Kept as the slow mode.
+- (b) No base tombstone ever, with a purge or overwrite of stale rows at reverse time: resurrects a row whose overflow delete was purged. Purging the stale rows needs a tombstone (back to (a)). Subtracting them atom by atom can destroy acknowledged cells through row deletions and cannot tell a purged delete from an unacknowledged straggler. The residue's space is never reclaimed.
+- (c1) A generation in the base partition key: changes the logical table, breaking contract P1 and evicting prepared statements. Rejected.
+- (c2) Re-stamping copied cells above the tombstone, or copying deletion info explicitly into a fresh target: changes original timestamps (P6, I7), or is impossible because the logical table id is fixed. Rejected.
+- (c3) Re-split to one bucket: keeps LWT withdrawn and DDL restricted, so it is not an unsplit. Rejected.
+
+**Consequences.**
+- The base residue of a split key (one partition times RF) stays on disk for up to about half of `gc_grace_seconds` after the commit (5 days by default), where today it goes at the end of `CLEANUP`.
+- The registry format goes to version 2, with new `KeyState` fields, legacy decoding and an upgrade gate. The reverse report set is bounded by `MAX_HINT_REPORTS` rather than 32, at no growth of the worst-case size.
+- An unacknowledged straggler that reached the residue can become visible after a fast unsplit, so contract D6's bound needs a clause.
+- Tables at the minimum `gc_grace_seconds` (28800) get practically no fast window unless a reverse may start from `NEW_ONLY` or `CLEANUP`.
+- The TLA+ model must gain timestamps, deletes and purging (section 11.7). The negative variants without the window, without the purge, without the probe, and with an early bucket deletion must each fail.
+- Hazards recorded for the forward path as built:
+  - `Tt` is not in the registry, and adoption can move it later than `STEADY`.
+  - Residue newer than `Tt` survives cleanup and purge.
+  - Keys stuck at `RECONCILE_PAST_DEADLINE` have no way out.
+  - A single timed-out update to an existing row aborts verification.
+- Subtasks T6.17a to T6.17l and nine owner questions are in sections 11.10 and 11.11. T6.17b, the forward change, waits for this ADR to be accepted.

@@ -460,7 +460,7 @@ What verification cannot see: tombstones (reads are filtered). Tombstone equival
 
 **Stragglers.** A base-only mutation sent before all coordinators were dual-writing can reach a base replica after that replica's backfill pass: a hint delivered late, a batchlog replay, a delayed message. If the original write was acknowledged, at least one base replica already had it when its backfill ran, so it was copied. If it was **not** acknowledged (timeout, coordinator crash), its outcome was already unknown to the client. To converge these to "applied" rather than silently dropping them, `CLEANUP` waits `straggler_window` (default: `max_hint_window`, 3 h) and then runs one more full backfill generation (the same code) before deleting. Anything arriving later than that is discarded by cleanup. `straggler_reconcile: none` skips the second pass and discards all stragglers; both are legal outcomes for a write whose outcome was unknown.
 
-**Cleanup.** After the reconcile generation completes, the owner re-checks that it is complete and that placement has not changed (otherwise it starts a new generation), and commits `FinishKey`, which is rejected unless every natural replica of K's token has reported the current generation. Only after every node has acknowledged `FinishKey`, when no replica runs a pass for K any more, it writes one partition deletion for K on the base table with the current timestamp at `ALL` (ADR-033: written earlier, the tombstone would be read from base by a late reconcile pass and copied into every bucket). A kill between `FinishKey` and the tombstone is recovered by takeover, which writes it again. Reads never consult the base table for a C3 key, and range scans exclude K explicitly (3.5), so correctness does not depend on this delete; it reclaims space, and base rows of K stay live but unreachable until it is written. Cells with client timestamps in the future survive it as invisible garbage. If K passes the replica-side limit of 4.5 in `CLEANUP` (ADR-031), the reconcile pass cannot complete: the action ends in a terminal state that needs an operator, K stays routed to the overflow copy and the tombstone is not written.
+**Cleanup.** After the reconcile generation completes, the owner re-checks that it is complete and that placement has not changed (otherwise it starts a new generation), and commits `FinishKey`, which is rejected unless every natural replica of K's token has reported the current generation. Only after every node has acknowledged `FinishKey`, when no replica runs a pass for K any more, it writes one partition deletion for K on the base table with the current timestamp at `ALL` (ADR-033: written earlier, the tombstone would be read from base by a late reconcile pass and copied into every bucket). A kill between `FinishKey` and the tombstone is recovered by takeover, which writes it again. Reads never consult the base table for a C3 key, and range scans exclude K explicitly (3.5), so correctness does not depend on this delete; it reclaims space, and base rows of K stay live but unreachable until it is written. Cells with client timestamps in the future survive it as invisible garbage. **Proposed change (section 11.3, ADR-036):** the tombstone is no longer written here but by a later `reclaim` continuation, at the end of the residue window, unless the key is unsplit first. If K passes the replica-side limit of 4.5 in `CLEANUP` (ADR-031), the reconcile pass cannot complete: the action ends in a terminal state that needs an operator, K stays routed to the overflow copy and the tombstone is not written.
 
 ### 4.7 Topology changes during a migration
 
@@ -493,7 +493,7 @@ What verification cannot see: tombstones (reads are filtered). Tombstone equival
 | `ANNOUNCED` | `ABORTING` -> removed | yes; nothing was written |
 | `DUAL_WRITE`, `BACKFILL`, `VERIFY` | `ABORTING` -> removed | yes; base is authoritative and has every acknowledged write. Writes whose shadow succeeded but whose base write did not were never acknowledged and are discarded |
 | `CUTOVER` | `ROLLBACK_DUAL` -> `ABORTING` -> removed | yes; in C2 the base copy is written first for every write, so it has every acknowledged write |
-| `NEW_ONLY`, `CLEANUP`, `STEADY` | none | **no.** The base copy is stale. Undoing is a *reverse migration*: a new action with the roles swapped (dual write overflow-authoritative, backfill overflow to base, verify, cut back). It is not in the MVP. Its additional problem: the base partition tombstone written by cleanup shadows reverse-backfilled cells with older timestamps until it is purged, so the reverse target cannot be the same base partition before `gc_grace` has passed and compaction has purged it. Open issue O3 |
+| `NEW_ONLY`, `CLEANUP`, `STEADY` | none | **no.** The base copy is stale. Undoing is a *reverse migration*: a new action with the roles swapped (dual write overflow-authoritative, backfill overflow to base, verify, cut back). It is not in the MVP. Its additional problem: the base partition tombstone written by cleanup shadows reverse-backfilled cells with older timestamps until it is purged, so the reverse target cannot be the same base partition before `gc_grace` has passed and compaction has purged it. Open issue O3; the reverse protocol and a proposed resolution are in section 11 (ADR-036) |
 
 Each abort step obeys rule O1, so an abort can also stall on an unreachable node; it stalls in a base-authoritative phase.
 
@@ -706,7 +706,7 @@ Replaces the D6 outline of overview section 13. New code is under `src/java/org/
 | T6.14 | Mirror `ALTER TABLE ADD` / `DROP` of regular columns onto the overflow table inside H21; router tolerance for the epoch in which columns change | `layout/LayoutSchemaCoupling.java`, `RowMapper.java` | T6.10, T6.12 | dtest: add and drop a column on an adapted table in `STEADY` and during `BACKFILL`; both tables change in one epoch; writes and reads of the new column work on adapted and normal partitions | sonnet |
 | T6.15 | TLA+ model of sections 4.1 to 4.3: owner, N coordinators with independent epochs, two copies, acked and unacked writes; check I1, I4, I5, I10 and that removing O1 or C1 produces a counterexample | `docs/specs/layout-migration.tla` | none (can start with T6.1) | model checks with 3 coordinators and 2 writes; both negative variants fail | fable |
 | T6.16 | Operator documentation: the contract of section 5, limitations N1 to N4, backup obligation, `nodetool autonomic layout`, how to read `autonomic_layouts` | `docs/` | T6.9 | each command executed against a running node | haiku |
-| T6.17 | **Reverse migration** (follow-up after D6; ADR-024 as amended by ADR-025): a `partition_unsplit` cluster actuator that returns an adapted key in `STEADY` to the base table, with the roles of the two copies swapped (dual write with overflow authoritative, backfill overflow to base, verify, cut back, clean up the buckets, `RemoveKey`). First step is a design note, appended to this document and recorded as an ADR, that resolves open issue O3 (the base partition tombstone written by forward cleanup shadows reverse-backfilled cells with older timestamps); candidate approaches: skip the base tombstone in forward cleanup and rely on range-scan exclusion plus a purge at reverse time, or wait out `gc_grace_seconds` plus a forced purge before reverse backfill. Triggered by `nodetool autonomic layout unsplit` and proposed automatically on `layout.split_not_effective`, under manual approval | `layout/*`, `autonomic/execute/actuators/PartitionUnsplitActuator.java`, phase and transition additions in `layout/Phase.java` and the registry transformations | T6.9, T6.12, T6.13, T6.15 (model extended to the reverse path) | design note reviewed before code; unit: every reverse transition and abort; dtest: split a key, write through it, unsplit it, and compare every statement of the T6.12 catalogue against the model in each reverse phase; data written before the split, during it and after it is all present with original timestamps after the unsplit; a delete issued while split stays deleted | fable |
+| T6.17 | **Reverse migration** (follow-up after D6; ADR-024 as amended by ADR-025): a `partition_unsplit` cluster actuator that returns an adapted key in `STEADY` to the base table, with the roles of the two copies swapped (dual write with overflow authoritative, backfill overflow to base, verify, cut back, clean up the buckets, `RemoveKey`). First step is a design note, appended to this document and recorded as an ADR, that resolves open issue O3 (written: section 11 and ADR-036, Proposed; subtasks T6.17a to T6.17l in 11.10 replace this row once accepted) (the base partition tombstone written by forward cleanup shadows reverse-backfilled cells with older timestamps); candidate approaches: skip the base tombstone in forward cleanup and rely on range-scan exclusion plus a purge at reverse time, or wait out `gc_grace_seconds` plus a forced purge before reverse backfill. Triggered by `nodetool autonomic layout unsplit` and proposed automatically on `layout.split_not_effective`, under manual approval | `layout/*`, `autonomic/execute/actuators/PartitionUnsplitActuator.java`, phase and transition additions in `layout/Phase.java` and the registry transformations | T6.9, T6.12, T6.13, T6.15 (model extended to the reverse path) | design note reviewed before code; unit: every reverse transition and abort; dtest: split a key, write through it, unsplit it, and compare every statement of the T6.12 catalogue against the model in each reverse phase; data written before the split, during it and after it is all present with original timestamps after the unsplit; a delete issued while split stays deleted | fable |
 
 Order: T6.1, T6.2, T6.15 in parallel; then T6.3, T6.4, T6.6, T6.10; then T6.5, T6.7, T6.8; then T6.9; then T6.11, T6.12, T6.13; T6.14 and T6.16 after those; T6.17 is the first follow-up after D6 and is not required for the D6 tag (ADR-025); T6.9 must choose its base-cleanup method with open issue O3 in mind. The `layout:` configuration also gains `excluded_tables` (ADR-024, decision 1).
 
@@ -744,7 +744,7 @@ All ten are folded into `overview.md` as built in D6 (T6.1 to T6.16); the last c
 | R11 | In a cluster with nodes equal to RF (including the 3-node dtest at RF 3) a split moves no load between nodes. | Policy precondition 7.2 step 5; the demonstration test uses RF 2 on 3 nodes |
 | R12 | Coordinator load for the hot key stays on the base replicas with token-aware drivers (shape H). | Stated in the contract; not fixable on the server |
 
-Open issues for later design: O1 LWT on adapted partitions; O2 `RANGE_SPLIT` and the choice between split kinds from the shape profile; O3 reverse migration and the base tombstone; O4 hiding managed tables; O5 several keys per action and whole-table promotion when many keys of one table are split.
+Open issues for later design: O1 LWT on adapted partitions; O2 `RANGE_SPLIT` and the choice between split kinds from the shape profile; O3 reverse migration and the base tombstone (resolution proposed in section 11, ADR-036: deferred base tombstone with a fast mode inside a residue window and a slow mode after purge; changes forward cleanup); O4 hiding managed tables; O5 several keys per action and whole-table promotion when many keys of one table are split.
 
 Questions the owner must answer:
 
@@ -756,6 +756,337 @@ Questions the owner must answer:
 6. Are six more core hook statements, five of them in `StorageProxy`, within the spirit of ADR-011?
 7. Should DDL mirroring (T6.14) be part of the MVP rather than a follow-up?
 8. Is raising `ANY` to `ONE` for writes to adapted partitions acceptable?
+
+## 11. Reverse migration (T6.17) and the base tombstone (O3)
+
+Status: design note opening T6.17. **Proposed; the owner reviews it before any code is written** (ADR-036). It resolves open issue O3 and states the reverse protocol. The recommendation **changes forward cleanup**: the base partition tombstone that ADR-033 has the owner write right after `FinishKey` is deferred to the end of a "residue window" and skipped when the key is unsplit first. ADR-033's ordering rule (no tombstone while a reconcile pass can still read the base partition) stays. Its timing is reversed (11.3).
+
+Code read for this note: `PartitionSplitActuator` (`steady`, `deleteBase`, adoption in STEADY), `layout/Phase`, `KeyState`, `LayoutRegistry` bounds, `ReleaseKey`, `BackfillTask`, `LayoutVerifier`, `LayoutWrites` (class table), `LayoutReads` (range exclusion), `RowMapper`, `CompactionManager.forceCompactionForKey` and `CompactionController` (purge rules), and `docs/specs/layout-migration.tla`.
+
+### 11.1 Starting point and requirements
+
+The state of a split key K as built (incarnation i, N buckets):
+
+| Copy | Content in `STEADY` |
+|------|---------------------|
+| Overflow, buckets of incarnation i | Authoritative. Every acknowledged write, with original timestamps, TTLs and local deletion times. Includes deletes issued while split, until compaction purges them `gc_grace_seconds` after their local deletion time, together with the data they shadow |
+| Base partition K | Unreachable: reads of K go to the overflow copy and range scans exclude K from base (3.5). Holds the **residue**: the base copy as it was when coordinators stopped writing it (the commit, `NEW_ONLY`), plus stragglers that arrived later (4.6). Also holds the partition tombstone written by the owner after `FinishKey` at timestamp `Tt` with local deletion time `Tt / 10^6` s (ADR-033, `Env.deleteBase`) |
+
+Requirements for an unsplit (T6.17 acceptance, contract P2, P3, P6):
+
+| ID | Requirement |
+|----|-------------|
+| R1 | Every write acknowledged before, during or after the split is present after the unsplit with its original timestamp, TTL and local deletion time |
+| R2 | A delete acknowledged while the key was split stays deleted (no resurrection) |
+| R3 | No write acknowledged during the reverse migration is lost, in any phase or across abort |
+| R4 | Unacknowledged writes may appear or not (contract D6); nothing else may appear |
+
+**The problem (O3), worked.** Times and cell timestamps in seconds since a reference. Real timestamps are microseconds; only the order matters. `gc_grace_seconds = 864000` (10 days).
+
+| Time | Event | Base | Overflow |
+|------|-------|------|----------|
+| 1 000 | `INSERT r1 (v=a)`, `INSERT r3 (v=c)`, ts 1 000 | r1@1000, r3@1000 | |
+| 10 000 | `DUAL_WRITE` | | |
+| 12 000 | backfill | | r1@1000, r3@1000 |
+| 20 000 | `NEW_ONLY` committed (commit point) | frozen from here | |
+| 31 000 | `FinishKey` acked; owner writes base partition deletion `Tt = 31000` | `PD@31000` shadows r1, r3 | |
+| 40 000 | `UPDATE r2 SET v=b`, ts 40 000 | | r2@40000 |
+| 50 000 | a reverse copies overflow to base | r1@1000, r3@1000, r2@40000 written; **r1, r3 shadowed by `PD@31000`** | |
+
+After the unsplit, r1 and r3 are invisible although they were never deleted. This violates R1 until `PD@31000` is purged. That cannot happen before `31000 + 864000 = 895000` and takes a compaction that includes every sstable holding K.
+
+### 11.2 Options for O3
+
+**(a) Wait out `gc_grace_seconds` after the tombstone, force a targeted purge, then reverse.** This is the plan recorded in ADR-033. Each base replica waits until its clock passes the tombstone's local deletion time plus `gc_grace_seconds`. It then flushes K's memtable and runs `CompactionManager.forceCompactionForKey(cfs, K)`. That method is a public stock method that compacts every live sstable that may contain K, honouring `gc_grace` (no core change). The tombstone and everything it shadows are dropped together. The reverse copy then lands in an empty partition.
+
+Hazard: residue above `Tt`. A cell whose timestamp is above `Tt` is not shadowed by the tombstone and survives the purge. Such cells come from client timestamps in the future, or from a straggler sent by a coordinator whose clock runs ahead of the owner's. 4.6 calls them "invisible garbage". After an unsplit they are visible again, which is a resurrection when the key's delete exists only in overflow and has been purged there:
+
+| Time | Event | Base | Overflow |
+|------|-------|------|----------|
+| 2 000 | `INSERT r4 (v=e) USING TIMESTAMP 5000000` (client clock in the future) | r4@5000000 | |
+| 12 000 | backfill | | r4@5000000 |
+| 31 000 | `PD@31000` | r4 survives (5 000 000 > 31 000) | |
+| 100 000 | `DELETE r4 USING TIMESTAMP 5000001` | | tombstone r4@5000001, ldt 100 000 |
+| 964 000+ | compaction on overflow | | tombstone and r4 purged |
+| 1 000 000 | option (a): base purge, then reverse copy | `PD` purged, **r4@5000000 remains** | nothing for r4 |
+
+So (a) also needs a **residue probe**: after the purge, a local unfiltered read of K (`nowInSec = 0`, as `BackfillTask` reads) must find nothing on every base replica. Other ways the purge can fail to happen: `only_purge_repaired_tombstones` with unrepaired sstables (`CompactionController`), and sstables held in a pending incremental repair. Whether `forceCompaction` compacts repaired, unrepaired and pending sstables together is **unverified**. If it does not, the probe fails and the replica retries later.
+
+Time to unsplit: at least `Tt + gc_grace_seconds` plus compaction, that is 10 days after forward cleanup by default. Throughout, the key keeps the costs of a split (D1 to D5, N1) that may have been judged not effective.
+
+**(b) No base tombstone in forward cleanup; rely on range-scan exclusion; at reverse time purge or overwrite the stale base rows.** Forward correctness does not depend on the tombstone: C3 reads never consult base and range scans cut K out (3.5, 4.6). With no tombstone, the reverse copy merges into the residue by last-write-wins. Cells changed while split carry higher timestamps and win. Deletes made while split are copied as tombstones and shadow the residue, **as long as the overflow tombstone has not been purged**. After a purge there is nothing left to copy, and the stale base row comes back:
+
+| Time | Event | Base | Overflow |
+|------|-------|------|----------|
+| 1 000 to 20 000 | as in 11.1, but no tombstone at 31 000 | residue r1@1000, r3@1000 | r1@1000, r3@1000 |
+| 100 000 | `DELETE r3` (ts 100 000, ldt 100 000), C3: overflow only | r3@1000 still live | tombstone r3@100000 |
+| 964 000+ | compaction on overflow | | tombstone and r3@1000 purged |
+| 2 000 000 | reverse copy | r1 and r3 from the residue, r2 copied | r1, r2 |
+
+r3 is visible after the unsplit: R2 is violated. This is the I9 hazard with source and target swapped. A deletion exists only in the source copy, it is purged, and older data in the target is then read as current.
+
+Variants:
+- "Purge the stale rows" at reverse time needs a tombstone, which brings back (a).
+- "Overwrite the stale rows" works only for rows that still have a newer atom in overflow. A row whose deletion was purged has nothing to overwrite it with.
+- **Subtraction.** Every base replica deletes, at each residue atom's own timestamp, every atom that has no counterpart in overflow. This loses acknowledged data. Example: overflow row r6 holds `v@3000` from an `UPDATE` (no row liveness), and the residue holds an unacknowledged straggler `INSERT r6` with liveness at 3 500. Removing liveness needs a row deletion at 3 500, which also shadows the acknowledged `v@3000` once it is copied back. Subtraction also cannot tell a purged delete from an unacknowledged straggler. It needs a second full comparison pass, and it races with client writes that carry older client timestamps.
+- Pure (b) also never reclaims the residue's disk space.
+
+**(c1) A key incarnation or generation in the base partition.** After `RemoveKey` the stock path reads base partition K by its logical key. A generation would have to be part of the logical table's key or a hidden column. That is a change to the logical table (contract P1), evicts prepared statements (F3) and affects every partition of the table. Rejected.
+
+**(c2) Treat the base copy as a fresh target behind its own tombstone, with deletion info copied explicitly.** Copying deletions explicitly does not help the problem, which is live atoms older than the tombstone. Getting them past `PD@Tt` means raising their timestamps, which violates R1, P6 and I7. Writing the reverse copy elsewhere and swapping tables is impossible, because the logical `TableId` is fixed. Rejected.
+
+**(c3) "Unsplit" to one bucket.** Re-splitting to N = 1 keeps the indirection, so LWT stays withdrawn (N1) and DDL stays restricted (D7). It is not an unsplit. Rejected.
+
+**(d) Deferred base tombstone with two reverse modes (recommended).** Forward cleanup writes no base tombstone at `STEADY`. It records in `KeyState` the time `frozenSince` at which the key entered class C3. Any delete that exists only in overflow was issued by a C3 coordinator, so it is no older than `frozenSince` (up to clock skew, which is covered by halving `gc_grace` as I9 does). None can be purged before `frozenSince + gc_grace_seconds`. Until then the residue is an **older version** of the overflow copy, and a reverse copy merged into it by last-write-wins gives exactly the overflow state, plus unacknowledged stragglers (R4).
+
+- **Fast mode.** If the reverse migration copies everything before `W = frozenSince + gc_grace/2`, its writes merge into the residue. No wait and no purge are needed. The deadline is enforced by the owner and by every replica, as ADR-031 does.
+- **Reclaim.** If no reverse has started when fast mode can no longer finish before `W`, a short continuation of the split action writes the base partition tombstone (today's `deleteBase`, at `ALL`) and records its timestamp `Tt` in `KeyState`. This brings back the space ADR-033 reclaims, a few days later.
+- **Slow mode** (option (a)) applies once the tombstone exists: the tombstone's local deletion time plus `gc_grace_seconds` has passed, a forced targeted purge has run, and the residue probe is clean on every base replica. **Keys already split under the current forward cleanup start here.**
+
+On the worked examples:
+- 11.1 under (d): the reverse at 50 000 is in fast mode (`W = 20000 + 432000 = 452000`). r1 and r3 merge into identical residue atoms and stay visible. R1 holds.
+- (b)'s example: a reverse at 150 000 copies the r3 tombstone@100000 into base, where it shadows the residue r3@1000. R2 holds. A request at 2 000 000 is refused fast mode. The reclaim tombstone was written at about 430 000, so slow mode is possible from about `430000 + 864000 = 1294000`, into a purged, empty base.
+- The r4 example: fast mode handles it, because the overflow tombstone still exists within the window. In slow mode the residue probe stops it (11.5).
+
+**Comparison.**
+
+| Criterion | (a) wait + purge | (b) no tombstone | (c1) base generation | (c2) re-stamp | (d) deferred tombstone, two modes |
+|-----------|------------------|------------------|----------------------|---------------|-----------------------------------|
+| No lost acked write (R1, R3) | yes, after purge and a clean residue probe | yes | n/a | **no** (timestamps changed) | yes |
+| No resurrection (R2) | yes with the residue probe; **no** without it (r4) | **no** after `gc_grace` (r3); subtraction loses acked data (r6) | n/a | yes | yes: window (fast), purge and probe (slow) |
+| Original timestamps (R1, P6, I7) | yes | yes | yes | **no** | yes |
+| Time to unsplit | at least `Tt + gc_grace` + compaction (default 10 days) | immediate | n/a | immediate | fast: hours (a backfill, soak, straggler window), any time before `W` (default 5 days after commit); later: as (a), counted from the reclaim tombstone |
+| Keys already split today | works | not applicable (they have the tombstone) | n/a | n/a | slow mode, same as (a) |
+| Forward change | none | remove the tombstone | logical schema change | none | tombstone deferred to the reclaim continuation (reverses ADR-033's timing) |
+| Hook and core changes | none (`forceCompactionForKey` is public) | none | P1 broken, F3 | none | none |
+| Space | residue reclaimed at `Tt` | never | | | residue kept until the reclaim (at most about `gc_grace/2` after commit) |
+
+**Check against I1 to I10** (4.10). The reverse path reuses the coordinator classes, so I1 to I4 and I6 follow from O1 and C1 unchanged for every option.
+
+| Invariant | (a) | (b) | (c1) | (c2) | (d) |
+|-----------|-----|-----|------|------|-----|
+| I1 one authoritative copy per class | holds | holds | holds | holds | holds |
+| I2 to I4 (O1, C1, adjacency) | hold | hold | hold | hold | hold |
+| I5 acked write in the authoritative copy for later reads | holds only once the target is purged and clean; a reverse into a base with `PD@Tt` breaks it (11.1) | holds for writes; resurrection is not covered by I5 (new I22) | | **broken** (value with a different timestamp) | holds |
+| I6 dual-write order | holds | holds | holds | holds | holds |
+| I7 identical cells in both copies | holds | holds | holds | **broken** | holds |
+| I8 verification completeness | mirrored (I8-R) | mirrored | | | mirrored |
+| I9 tombstone deadline | forward unchanged; reverse needs I18 | **broken in spirit**: residue read after a source-only tombstone was purged | | | forward unchanged; I16 (window) and I18 (reverse) |
+| I10 no return below C3 after `NEW_ONLY` | **must be amended for every option**: a reverse returns to C2, C1 and C0 | | | | amended (11.6) |
+
+### 11.3 Recommendation
+
+Option (d). It is the only option that is correct for R1 to R4, undoes a split found not effective within hours, and handles keys already split (through the slow mode, which is option (a) plus a residue probe). It needs no new core hook and no change to the logical schema. The automatic trigger matters most here: `layout.split_not_effective` is raised in stage B, minutes after the commit (7.3), when fast mode is always available. Under the current forward cleanup the same trigger could only lead to an unsplit about 10 days later.
+
+**Change to forward cleanup (reverses part of ADR-033):**
+1. In `STEADY`, the owner no longer writes the base partition tombstone. `ReleaseKey` records the base state `RESIDUE` and ends ownership, once every node has acknowledged `STEADY`. `KeyState.frozenSinceMillis` is set when the key enters a C3 phase from a lower class (`NEW_ONLY`, or `STEADY` on a reverse abort). Later C3 transitions keep it.
+2. A `reclaim` continuation of the split action (mode `reclaim` of `PartitionSplitActuator`, FC5 `Actuator.continuation`, no new approval) is proposed by the preferred proposer for a `STEADY`, unowned key in state `RESIDUE` once a fast reverse could no longer be completed. It adopts the key, waits for the all-node acknowledgement, writes the partition tombstone at `ALL` with `Env.deleteBase`, and releases the key with base state `TOMBSTONED(Tt)`.
+3. Kept from ADR-033: the tombstone is never written while a reconcile pass can still run (it is only ever written in `STEADY`); `FinishKey` still requires a complete reconcile.
+4. Not changed: range-scan exclusion of K from base (3.5) and routing of all reads to overflow in C3.
+
+The reclaim is for space and for starting the slow-mode clock, not for safety. A reclaim that is late (a base replica down, the lane busy) only delays both. Safety comes from the window check, enforced by the owner and by every replica.
+
+### 11.4 Reverse protocol
+
+**Phases.** New `Phase` values, ids after the existing ones. Routing needs no change: classes C0 to C3 and their write orders (3.2, 3.3) are exactly what the reverse needs. In C2 the authoritative overflow copy is written last; in C1 the authoritative base copy is written last.
+
+| Phase (id) | Class | Mirrors | Owner work (O) | Replica work |
+|------------|-------|---------|----------------|--------------|
+| `REVERSE_ANNOUNCED` (10) | C3 | `ANNOUNCED` | Entered by `BeginUnsplit` from `STEADY`, or optionally from `NEW_ONLY` or `CLEANUP` (owner question 2). Records the mode and `reverseActionId`. Takes a per-key baseline over `baseline_window` (latency and error rate of the split key). Fast mode: wait for the all-node ack. Slow mode: also wait until every natural base replica of K has reported a clean purge (`ReportBackfill` for generation g in this phase). Abort with `layout.unsplit_residue` after `purge_timeout`, naming the nodes and the largest residue timestamp | Slow mode only: once the replica's clock passes the local deletion time of its partition deletion for K plus `gc_grace_seconds`, flush, `forceCompactionForKey`, then the residue probe. Report if clean. If not, retry with backoff and record why (still shadowed, residue above `Tt`, `only_purge_repaired_tombstones`) |
+| `REVERSE_DUAL_WRITE` (11) | C2 | `DUAL_WRITE` | Wait for the all-node ack. Sets `reverseDualSinceMillis` | none |
+| `REVERSE_BACKFILL` (12) | C2 | `BACKFILL` | Watch `backfillDone`. Completion test over the union of the natural replicas of every bucket token of incarnation i, with no placement change for any of them since `generationEpoch`; otherwise restart the generation. Enforce the reverse deadline (11.5) | Every natural replica of a bucket partition copies its local unfiltered data of each bucket it replicates into base K, at `ALL`, through `RowMapper.toLogical`, with the router bypassed. It commits `ReportBackfill` once all its buckets are done |
+| `REVERSE_VERIFY` (13) | C2 | `VERIFY` | `LayoutVerifier` with roles swapped: overflow authoritative, base target, both at `ALL`. The base read must bypass H17, which in C2 would send it to overflow. Fails on `CONTENT_DIFFERS` and `MISSING_FROM_BASE`. Tolerates and counts `MISSING_FROM_OVERFLOW` (C2 writes base first, so a base-only row is an unacknowledged write; in fast mode it may also be an unacknowledged straggler in the residue). One re-backfill, then abort | none |
+| `CUTBACK` (14) | C1 | `CUTOVER` | Wait for the all-node ack. Soak `cutover_soak` with the C1 guards of 7.3 against the `REVERSE_ANNOUNCED` baseline. With `commit_approval: manual`, wait for a second approval. Take the commit point only before the reverse commit window end (11.5) | none |
+| `BASE_ONLY` (15) | C0 | `NEW_ONLY` | **Reverse commit point.** Wait for the all-node ack | none |
+| `REVERSE_CLEANUP` (16) | C0 | `CLEANUP` | Wait `straggler_window`. Start a reconcile generation (overflow to base) and wait for it. Re-check completeness and placement, then `RemoveKey`, which is rejected unless every natural replica of every bucket token reported (ADR-033 mirrored). After every node acknowledged the removal, wait the write timeout, then delete the N bucket partitions of incarnation i at `ALL`, or `DROP TABLE` the overflow table if the layout has no key left | reconcile pass, same code as `REVERSE_BACKFILL` |
+| `REVERSE_ROLLBACK` (17) | C2 | `ROLLBACK_DUAL` | Wait for the all-node ack, then `STEADY` | none |
+
+After `RemoveKey` the key is absent: stock path, LWT and `SERIAL` allowed again. The incarnation is never reused (I13).
+
+**Transitions** (additions to `Phase.TRANSITIONS` and `AdvanceLayout`):
+
+```
+ STEADY --BeginUnsplit--> REVERSE_ANNOUNCED --> REVERSE_DUAL_WRITE --> REVERSE_BACKFILL --> REVERSE_VERIFY --> CUTBACK --> BASE_ONLY --> REVERSE_CLEANUP --RemoveKey--> (absent)
+   ^                            |                      |                   |  ^                |             |      (reverse commit)
+   |                            |                      |                   |  +-(re-backfill)--+             v
+   |                            |                      |                   |                   |      REVERSE_ROLLBACK
+   +----------------------------+----------------------+-------------------+-------------------+-------------+
+                                         abort: back to STEADY (C3), then ReleaseKey
+```
+
+Allowed pairs: the reverse chain; `REVERSE_VERIFY -> REVERSE_BACKFILL`; `{REVERSE_ANNOUNCED, REVERSE_DUAL_WRITE, REVERSE_BACKFILL, REVERSE_VERIFY, REVERSE_ROLLBACK} -> STEADY`; `CUTBACK -> REVERSE_ROLLBACK`; `X -> X` with generation + 1 for X in `{REVERSE_ANNOUNCED, REVERSE_BACKFILL, REVERSE_CLEANUP}`. Every transition stays within one class or moves to an adjacent class. The adjacency table of 4.2 applies read upwards: in C3 + C2 both write overflow and readers read overflow; in C2 + C1 every acked write is in both copies; in C1 + C0 readers read base and C1 additionally writes overflow. Nothing leaves `BASE_ONLY` or `REVERSE_CLEANUP` except forward.
+
+**Coordinator rules (C).** Unchanged: capture `cm0`, execute under its class, compare layout id, physical table id, incarnation and phase before acknowledging (ADR-027), re-execute up to 3 times, then time out.
+
+| Class | Phases in the reverse | Reads | Writes, and when the client is acked |
+|-------|-----------------------|-------|--------------------------------------|
+| C3 | `REVERSE_ANNOUNCED` | overflow fan-out | overflow only; acked once it is acknowledged at `cl'` and validation passes |
+| C2 | `REVERSE_DUAL_WRITE`, `REVERSE_BACKFILL`, `REVERSE_VERIFY`, `REVERSE_ROLLBACK` | overflow fan-out | base at `cl'`, then overflow at `cl'`, then validation, then ack; a logged batch is one `mutateAtomically` of both |
+| C1 | `CUTBACK` | base | overflow at `cl'`, then base, then validation, then ack |
+| C0 | `BASE_ONLY`, `REVERSE_CLEANUP` | base | base only |
+
+`ANY` stays raised to `ONE` while K is in the registry. LWT and `SERIAL` stay rejected until K is absent. `TRUNCATE` is rejected while any key is outside `STEADY` (H20).
+
+**Abort before the reverse commit point.** Each step obeys O1, so an abort can stall, always in a phase whose authoritative copy has every acked write.
+
+| From | Path | Loss-free because | Base afterwards |
+|------|------|-------------------|-----------------|
+| `REVERSE_ANNOUNCED` | `STEADY` | nothing was routed differently | fast: the residue unchanged. Slow: purged and empty; the state stays `TOMBSTONED` with a clean probe, so a retry skips the wait |
+| `REVERSE_DUAL_WRITE`, `REVERSE_BACKFILL`, `REVERSE_VERIFY` | `STEADY` | overflow is authoritative and written last in C2 | residue = old residue plus partial copies plus C2 writes; see the rule below |
+| `CUTBACK` | `REVERSE_ROLLBACK` -> `STEADY` | in C1 overflow is written first, so it has every acked write | the generation was complete; see the rule below |
+
+Base state after an abort from C2 or C1. A partial copy is not an older version of the overflow copy. One overflow replica may have copied a row whose delete is held only by a replica that had not run its pass yet. So:
+
+- If the current reverse generation was complete (I8-R holds; abort from `REVERSE_VERIFY`, `CUTBACK` or `REVERSE_ROLLBACK`), the state is `RESIDUE` with `frozenSince` = the commit time of `STEADY`. The window restarts.
+- Otherwise, in fast mode the state is `RESIDUE` with the **old** `frozenSince`. Every delete missing from base is younger than that, and the old window still covers it.
+- Otherwise, in slow mode the state is `RESIDUE` with the window already closed. The reclaim is then due at once, and the slow-mode clock restarts from the new tombstone.
+| `BASE_ONLY`, `REVERSE_CLEANUP` | none; continue to `RemoveKey` | | |
+
+Kill and takeover follow 4.4: before `BASE_ONLY` the owner drives the abort path; at or after it the claim is released `COMMITTED_CLEANUP_PENDING` and resumed forward (FC5).
+
+**Reuse and differences.**
+
+| Forward machinery | In the reverse |
+|-------------------|----------------|
+| Validation (ADR-027) | reused unchanged; the reverse phases are new phase values, so a phase change is detected |
+| Drain wait (ADR-028) | **not needed at the start**: K is already in the registry, so every operation is routed and validated. Not needed at the end either: operations after `RemoveKey` take the stock path to base, which is authoritative in C0. Its only remnant is the write-timeout wait before the bucket partitions are deleted |
+| Hint wait (ADR-035) | **not needed**: writes to a routed key are never acked on a hint alone (`ANY` -> `ONE`), so every acked write is on `cl'` overflow replicas, and every replica's pass copies it. Late overflow hints are stragglers for the reconcile pass. Pre-split hints were drained before the forward `DUAL_WRITE` |
+| Replica deadline (ADR-031) | reused with a new limit (I16, I18): `BackfillTask` compares its clock with the reverse limit of 11.5 before every chunk and before the report |
+| Verification (ADR-030) | roles swapped: tolerate rows only in the non-authoritative copy (`MISSING_FROM_OVERFLOW`); fail `MISSING_FROM_BASE` and `CONTENT_DIFFERS`. The model reads the check as `overflow \subseteq base` |
+| Backfill (ADR-018) | sources are the replicas of the N bucket tokens, not of K. Reports are per node, after all the buckets it replicates. The completion test covers every bucket token. The report set can be up to `N x RF` nodes (11.8, limits) |
+| Base tombstone after `FinishKey` (ADR-033) | mirrored: the bucket partitions are deleted only after `RemoveKey` is acknowledged by every node, plus the write timeout. A reverse pass that read a bucket partition deletion would map it through `RowMapper.toLogical` to a **base** partition deletion and wipe K. Where possible, the overflow table is dropped instead |
+| Topology hold (4.7) | reused; a placement change of any bucket token restarts the generation; changes to the base target are covered by writes at `ALL` and stock streaming |
+| Stage A/B (7.3) | a C1/C2 guard and a soak in `CUTBACK`; there is no improvement goal; the verdict records the counts |
+
+### 11.5 Base state, windows and deadlines
+
+New `KeyState` fields (registry format version 2; 2.3 rules apply). The deserializer currently rejects any version other than 1, so every node must run code that reads version 2 before the first version-2 value is committed (an upgrade gate in T6.17a).
+
+| Field | Meaning |
+|-------|---------|
+| `baseState` | `RESIDUE` (no base tombstone since the last freeze) or `TOMBSTONED` |
+| `frozenSinceMillis` | proposer time of the commit at which the key last entered C3 from a lower class |
+| `baseTombstoneMicros` | `Tt` of the reclaim tombstone; 0 if unknown |
+| `reverseMode` | `FAST` or `SLOW`, fixed by `BeginUnsplit` |
+| `reverseDualSinceMillis` | proposer time of `REVERSE_DUAL_WRITE`; 0 before it |
+
+Legacy values (format 1) decode as follows:
+- A released `STEADY` key decodes as `TOMBSTONED` with `Tt` unknown. Today `ReleaseKey` follows the tombstone, so the tombstone exists. Its time is learned by the probe, which reads each replica's partition deletion. `STEADY.phaseSinceMillis` is not a safe bound: an adopted key gets a later `Tt` (11.9).
+- An owned `STEADY`, `NEW_ONLY` or `CLEANUP` key decodes as `RESIDUE` with `frozenSince = dualWriteSinceMillis`, which is earlier than the real freeze and therefore conservative.
+
+**Limits.** `G = gc_grace_seconds * 1000 / 2`, `wt` = write timeout.
+
+| Limit | Value |
+|-------|-------|
+| Replica limit (no reverse write after it), fast | `min(frozenSince, reverseDualSince) + G - wt`; `frozenSince` is always the smaller |
+| Replica limit, slow | `reverseDualSince + G - wt` (I9 mirrored: deletes in C0 exist in base only) |
+| Reverse commit window end (owner) | replica limit `- straggler_window - reconcile_budget - 2 x ack_poll_interval`; after it `CUTBACK` rolls back (as `commitWindowEnd`) |
+| Owner deadline before the commit | replica limit `- straggler_window`, capped by `max_migration_duration` from `REVERSE_DUAL_WRITE`; exceeded means abort to `STEADY` |
+| Fast mode allowed by `BeginUnsplit` | `RESIDUE` and `now + estimate` before the commit window end, where `estimate` is the backfill estimate (bytes x RF / throughput) plus `cutover_soak` |
+| Reclaim due | `RESIDUE`, unowned `STEADY`, and fast mode no longer allowed for the smallest estimate (`frozenSince + G - straggler_window - reconcile_budget - cutover_soak`) |
+| Slow mode allowed | `TOMBSTONED`; each replica purges when its clock passes the partition deletion's local deletion time plus `gc_grace_seconds` |
+
+Tables at the eligibility minimum (`gc_grace_seconds = 28800`) have `G` = 4 h. That is shorter than `straggler_window` (3 h) plus a reverse, so fast mode is in practice only available when starting from `NEW_ONLY` (owner question 2). Slow mode is short for them: 8 h after the reclaim.
+
+**Residue probe.** A local read of K at `nowInSec = 0` (no purge, nothing judged expired) on a base replica. Clean means no row, no range tombstone marker and no partition deletion. Data newer than the tombstone that survived the purge (the r4 case) is never purgeable. The replica keeps reporting it and the owner aborts at `purge_timeout` with `layout.unsplit_residue`, naming the largest residue timestamp. The operator decides (owner question 3).
+
+### 11.6 Invariants for the reverse path
+
+To be added to 4.10 once ADR-036 is accepted.
+
+| ID | Invariant |
+|----|-----------|
+| I10 (amended) | After `NEW_ONLY` is committed, no transition returns to C0, C1 or C2, and no acked read of K uses base, **until `BeginUnsplit` commits `REVERSE_ANNOUNCED`** for that incarnation |
+| I8-R | At the commit of `REVERSE_VERIFY -> CUTBACK`, every atom that any current natural replica of any bucket of incarnation i held when its pass started is stored on all base replicas of K |
+| I16 | (residue window) A reverse backfill or reconcile write into a base partition in state `RESIDUE` is issued only before `frozenSince + gc_grace/2` |
+| I17 | (clean target) In slow mode, no reverse write for K is issued before every base replica has reported a clean probe for the current reverse attempt, and no base tombstone for K is written from then until `RemoveKey` |
+| I18 | (reverse tombstone deadline, I9 mirrored) No reverse backfill or reconcile write for K is issued after `reverseDualSince + gc_grace/2` |
+| I19 | (reclaim) The base partition tombstone is written only while K is in `STEADY` and owned by a reclaim action; afterwards `baseState = TOMBSTONED` and fast mode is refused |
+| I20 | (bucket deletion order) The bucket partitions of incarnation i are deleted only after every node acknowledged `RemoveKey` of K and the write timeout has passed |
+| I21 | After `BASE_ONLY` is committed, no acked read of K uses overflow, and no transition returns to C1, C2 or C3 for incarnation i |
+| I22 | (no resurrection, client level) In every phase and after removal, a row whose newest acknowledged operation is a delete is not visible in the authoritative copy unless an unacknowledged write with a newer timestamp exists; every acknowledged write that no newer acknowledged operation overrides is visible with its own timestamp |
+
+I11 to I15 hold unchanged. For I12, the overflow table is dropped only after the last key's removal. For I13, the incarnation is retired at `RemoveKey`. For I15, the reverse report set is bounded in 11.8.
+
+### 11.7 Extending the TLA+ model (T6.15 dependency)
+
+The current model abstracts each copy as a set of write ids and the base tombstone as `base' = {}` at `STEADY`. O3 is about timestamps, deletes and purging, which that abstraction cannot express. Proposed: move the shared coordinator part (classes, `Learn`, O1, C1, `WriteStep`, `ReadStep`) into `layout-core.tla`. `layout-migration.tla` keeps its configurations and results unchanged. A new `layout-reverse.tla` reuses the core.
+
+| Element | Addition |
+|---------|----------|
+| Constants | `Rows` (2), `MaxTime` (about 8), `GcGrace` (4 ticks, so `G` = 2), switches `EnforceResidueWindow`, `EnforcePurge`, `EnforceReverseDeadline`, `EnforceBucketDeleteOrder`, `ForwardTombstone` (TRUE models today's cleanup) |
+| Operations | writes become `put` or `del` on a row; the timestamp is the clock at start, or for one write `clock + MaxTime` (a client timestamp in the future, the r4 case) |
+| Variables | `clock`; `base` and `overflow` as sets of atoms `[row, ts, kind, ldt]`; `basePD` (partition deletion timestamp or none); `baseState`, `frozenSince`, `reverseDualSince`, `mode`; `probeClean` |
+| Actions | `Tick`; `Purge(copy, atom)` when `clock >= ldt + GcGrace`, which removes the tombstone and the atoms of its row with lower timestamps (compaction drops shadowed data with it); `Reclaim` (sets `basePD`); `ForcedPurge` (clears `basePD` when due, sets `probeClean` if nothing is left); `BeginUnsplit(mode)`; `ReverseBackfill` and `ReverseReconcile` (`base` gains the merged, unshadowed atoms of `overflow`, guarded by the limits of 11.5 when enforced); `DeleteBuckets`; the reverse transitions in `Allowed` |
+| Initial state | `STEADY` after a forward history summarized nondeterministically: residue equal to the overflow at the commit plus at most one unacknowledged straggler; one configuration also runs forward and reverse together with `MaxAttempts = 1` |
+| Invariants | `TypeOK`, I1 (with visibility by last-write-wins and `basePD`), I2, I4, I5, amended I10, I21, I22; I16 to I20 as history variables (a late or out-of-order step sets a flag that must stay false) |
+| Probes | `ProbeFastUnsplit` (absent after a fast reverse, all operations acked), `ProbeSlowUnsplit` (after reclaim and purge), `ProbeReverseAbort` |
+
+Negative variants that must fail:
+
+| Config | Switch | Expected counterexample |
+|--------|--------|-------------------------|
+| `layout-reverse-no-window.cfg` | `EnforceResidueWindow = FALSE` | I22: the r3 example of (b), a delete purged from overflow, resurrected from the residue |
+| `layout-reverse-no-purge.cfg` | `ForwardTombstone = TRUE`, `EnforcePurge = FALSE` | I1/I22: the 11.1 example, an acked write shadowed by `basePD` after the unsplit |
+| `layout-reverse-no-probe.cfg` | the probe ignores residue | I22: the r4 example |
+| `layout-reverse-no-O1.cfg`, `-no-C1.cfg` | as forward | I1: a C3 coordinator writes overflow only while readers are in C1 |
+| `layout-reverse-bucket-early.cfg` | `EnforceBucketDeleteOrder = FALSE` | I1: a bucket partition deletion is copied to base by a reconcile pass |
+| `layout-reverse-no-deadline.cfg` | `EnforceReverseDeadline = FALSE` | I22: a base-only delete made in C0 is purged, then the reconcile copies the older overflow row |
+
+Budget: 2 coordinators (3 if it fits), 3 operations, under an hour for the positive run, recorded in `docs/specs/README.md` as for the forward model.
+
+### 11.8 Triggers and interactions
+
+| Topic | Design |
+|-------|--------|
+| `nodetool autonomic layout unsplit <ks> <table> <key-hex> [--when-ready]` | Creates a proposed `partition_unsplit` action: lane `SCHEMA_LAYOUT`, scope `CLUSTER`, `reversible() = false`, manual approval. `validate` requires: K in `STEADY` and unowned (or `NEW_ONLY`/`CLEANUP` if owner question 2 is accepted, with the forward action handing over); the table exists; all directory members alive; `inProgressSequences` empty; a mode available now. Otherwise it is rejected with the earliest time (for example "slow mode from <time>: reclaim tombstone at <Tt> plus gc_grace_seconds"). With `--when-ready` the request is recorded as diagnosis `layout.unsplit_pending` carrying that time, and the policy proposes it then |
+| Automatic | `PartitionUnsplitPolicy` handles `layout.split_not_effective` (WARN, raised in stage B) by proposing an unsplit for the same key with `approval: manual`, whatever `approval` is configured for the lane; the plan states the mode and the estimate. The forward action's quarantine of the key (7.3) also stops the split policy from re-proposing it. A reverse that aborts counts toward the unsplit policy's cooldown (overview 7.1) |
+| Another key's forward migration | The `SCHEMA_LAYOUT` lane holds one claim, so a reverse and a forward migration never run together, and the single `LayoutBackfill` thread never runs both passes. An unsplit that waits for the lane can lose its fast window; the policy proposes pending unsplits before new splits, and `validate` re-checks the mode at claim time. Reclaim continuations queue in the same lane; a late reclaim only delays space reclamation and the slow-mode clock |
+| DDL coupling (H21, ADR-034) | Reverse phases count as "not `STEADY`" for H20 and H21 exactly as forward phases do. `ADD` and `DROP` of regular columns are mirrored during a reverse; `RowMapper.toLogical` maps cells of dropped columns away and fails a chunk on an unseen column (retry), as ADR-034 specifies. `DROP TABLE` ends the action `FAILED(TABLE_DROPPED)`. Once `RemoveKey` empties the layout and the overflow table is dropped, renames, type changes, indexes, views and CDC are no longer restricted by H21 for this table (the 5 tightening "DDL must always work" relies on this) |
+| Layout limits | `RemoveKey` frees the key slot (8 per layout) and, if it was the last key, the layout slot (8). Reverse reports come from up to `N x RF` nodes (64 x 3 = 192), above `MAX_BACKFILL_NODES = 32`. Proposed: in reverse phases `backfillDone` is bounded by `MAX_HINT_REPORTS` (1024). `hintsClear` is non-empty only in `ANNOUNCED` and `backfillDone` is empty there, so the worst-case registry size does not grow (owner question 4) |
+| LWT after the unsplit | Allowed again once K is absent. A Paxos proposal accepted before the split and never committed can be completed by the next round; it carries its old timestamp, so it is an unknown-outcome write (D6). Paxos state expires as in stock |
+| Contract D6 | Under (d) an unacknowledged straggler that reached the base residue after the forward reconcile becomes visible after a fast unsplit, days after the forward cleanup. Stock repair can make an unacknowledged write visible as late, so P3 is unaffected, but D6's bound "visibility settles by the end of `CLEANUP`" must say "or after an unsplit" |
+| Bulk load into base (R4) | Data loaded into base for a split key becomes visible after an unsplit; the operator guide says so |
+
+### 11.9 Hazards found in the forward path as built
+
+1. **`Tt` is not in the registry.** After `ReleaseKey`, only the action's claim state (node-local history) knows whether and when the base tombstone was written. An adopted key gets a new `Tt = now` in `STEADY` (`PartitionSplitActuator`, adoption and `steady`), later than `STEADY.phaseSinceMillis`, so that field is not a safe lower bound for the purge time. Handled: slow mode relies on each replica's actual partition deletion (probe), and format 2 records `baseTombstoneMicros`.
+2. **Residue above `Tt` survives cleanup and purge** (client timestamps in the future, stragglers from a coordinator whose clock is ahead). Harmless while split, but a resurrection after an unsplit under option (a) (the r4 example). Handled by the residue probe.
+3. **Keys stuck at `RECONCILE_PAST_DEADLINE`** (ADR-031) stay in `CLEANUP` with no tombstone and no way forward. Their residue window has also closed, so they can only be unsplit in slow mode after a tombstone. A tombstone is safe only once no replica can run a pass, that is after the replicas' limit (owner question 6).
+4. **Verification aborts on one timed-out update** (liveness, already noted in ADR-030). In C1 an update to an existing row whose overflow write succeeded and base write did not gives `CONTENT_DIFFERS` with the overflow cell newer. Re-backfill (base to overflow) cannot remove it, so the migration aborts after one retry. The reverse verifier would hit the mirror case. Proposed for both directions (owner question 8): tolerate a cell difference where the non-authoritative copy's cell has the strictly greater timestamp (`NEWER_IN_TARGET`), counted. The target then shows an unknown-outcome write after cutover, which D6 allows.
+
+### 11.10 Tasks
+
+Paths as in section 9. Tiers: haiku, sonnet, opus.
+
+| ID | Description | Files | Depends | Acceptance and tests | Tier |
+|----|-------------|-------|---------|----------------------|------|
+| T6.17a | Registry: reverse phases and classes, transition table, `KeyState` fields of 11.5, format version 2 with legacy decoding and an upgrade gate, `BeginUnsplit` (claim, owner, mode, from `STEADY` and optionally `NEW_ONLY`/`CLEANUP`), `ReportBackfill` accepted in `REVERSE_ANNOUNCED`/`REVERSE_BACKFILL`/`REVERSE_CLEANUP`, `RemoveKey` from `REVERSE_CLEANUP` with a complete reconcile, `ReleaseKey` carrying base state and `Tt`, report bound of 11.8; `autonomic_layouts` columns `base_state`, `frozen_since`, `reverse_mode` | `layout/Phase.java`, `KeyState.java`, `LayoutRegistry.java`, `LayoutRegistryValue.java`, `AdvanceLayout.java`, `ReportBackfill.java`, `RemoveKey.java`, `ReleaseKey.java`, new `BeginUnsplit.java`, `autonomic/coord/AutonomicTransformations.java`, `autonomic/knowledge/AutonomicVirtualTables.java` | T6.1 | unit: every new accept and reject case; every class adjacency; format 1 values decode as 11.5 says; format 2 round trip; a version-2 value is refused before the gate; bounds | sonnet |
+| T6.17b | Forward cleanup change: no tombstone in `STEADY`; `ReleaseKey` with `RESIDUE` and `frozenSince`; `reclaim` mode (adopt, ack, `deleteBase`, release with `TOMBSTONED(Tt)`) proposed by the preferred proposer when due; status and orphan reporting updated | `autonomic/execute/actuators/PartitionSplitActuator.java`, the proposer of orphan adoptions, `docs/` | T6.17a | unit: `STEADY` releases without `deleteBase`; reclaim proposed exactly when due, not while owned or in a reverse phase; reclaim after a kill is resumed; dtest: split, base residue still present and unreachable (reads, range scans), reclaim writes the tombstone after a configured short window | sonnet |
+| T6.17c | Reverse backfill: `BackfillTask` direction (bucket partitions to base, `RowMapper.toLogical`, router bypassed, `ALL`), one pass per bucket the node replicates with per-bucket resume records, report after all buckets, replica limits of 11.5 | `layout/BackfillTask.java`, `RowMapper.java`, `NaturalReplicas.java` | T6.17a | dtest 3 nodes RF 2: buckets with live rows, TTL rows, row and range tombstones, a partition delete, collection overwrites, one replica missing a delete; base is cell-identical after the pass (`writetime`, `ttl`); restart resumes; past the limit nothing is written and nothing reported; a bucket partition deletion maps to a base partition deletion (asserted by unit test, guarded by I20 ordering) | opus |
+| T6.17d | Slow-mode purge and residue probe: replica work in `REVERSE_ANNOUNCED` (wait by the local partition deletion's ldt, flush, `forceCompactionForKey`, probe, report or retry with reason). First confirm `forceCompaction` behaviour across repaired, unrepaired and pending sstables and with `only_purge_repaired_tombstones` | `layout/LayoutService.java`, new `layout/BasePurge.java` | T6.17a | dtest: after the tombstone's gc_grace (shortened) the probe is clean and reported; with a future-timestamped residue cell it is not, and the reason names it; with `only_purge_repaired_tombstones` and no repair it is not | sonnet |
+| T6.17e | Verifier with roles: authoritative and target readers, a base reader that bypasses H17 in C2, tolerance set per direction, optional `NEWER_IN_TARGET` (owner question 8) | `layout/LayoutVerifier.java` | T6.8 | unit: every kind in both directions; tolerated kinds counted, not failed. dtest: a corrupted base row fails reverse verification with its clustering | sonnet |
+| T6.17f | `PartitionUnsplitActuator`: `validate` with mode selection and earliest-time messages, `step` for every phase of 11.4, abort and rollback to `STEADY`, `recover`, kill, deadlines and commit window, topology hold and generation restarts over bucket tokens, bucket deletion or `DROP TABLE` after the acknowledged `RemoveKey`; configuration `layout.purge_timeout` (default 6 h) and actuator entry `partition_unsplit: { enabled: false }`. Extract the owner helpers shared with `PartitionSplitActuator` (ack waits, deadline arithmetic, verification driving) without changing forward behaviour | new `autonomic/execute/actuators/PartitionUnsplitActuator.java`, new `layout/LayoutOwnerSteps.java`, `PartitionSplitActuator.java` | T6.17a to e | unit with fake watermark and reports: every transition; no advance without full ack; abort from each pre-commit phase; no abort after `BASE_ONLY`; takeover in each phase; fast refused past the window; bucket deletion never before the acked removal. The forward unit suite passes unchanged | opus |
+| T6.17g | Triggers: `nodetool autonomic layout unsplit [--when-ready]`, MBean, help fixtures; `PartitionUnsplitPolicy` on `layout.split_not_effective` (manual approval forced); diagnoses `layout.unsplit_pending` and `layout.unsplit_residue`; lane priority of pending unsplits | `tools/nodetool/Autonomic.java`, `AutonomicServiceMBean.java`, `test/resources/nodetool/help/`, new `autonomic/plan/policies/PartitionUnsplitPolicy.java`, `analyze/detectors/SplitOutcomeDetectors.java` | T6.17f | unit: proposal on the diagnosis, never automatic approval; rejection messages carry the earliest time; dtest 1 node: command creates a proposed action | sonnet |
+| T6.17h | DDL and routing coupling: H20/H21 treat reverse phases as not `STEADY`; mirroring during a reverse; removal of the last key frees H21's restrictions; `SERIAL` and LWT rejected until absent | `layout/LayoutSchemaCoupling.java`, `LayoutWrites.java` | T6.17a | unit: each row of 4.8 in each reverse phase. dtest: `ADD` during `REVERSE_BACKFILL` works on both tables; `RENAME` accepted after the unsplit of the last key | sonnet |
+| T6.17i | TLA+ model of 11.7: `layout-core.tla`, `layout-reverse.tla`, configs, README results | `docs/specs/` | T6.15 | positive run passes; every negative variant of 11.7 fails with the stated invariant; forward results unchanged | opus |
+| T6.17j | Compatibility over the reverse: the T6.12 catalogue with the key held in each reverse phase and across each transition, fast and slow modes | dtests | T6.17f | every statement returns the model's result or the documented rejection in every reverse phase | sonnet |
+| T6.17k | End-to-end and failure suite: split, write, delete, unsplit in fast mode and in slow mode (shortened gc_grace), including a legacy-tombstoned key; R1 to R4 checked against a model with `writetime`/`ttl`; owner killed in `REVERSE_BACKFILL` and in `REVERSE_CLEANUP`; a coordinator held one class behind; a late overflow hint reconciled; decommission of a bucket replica; a residue cell above `Tt` stops slow mode | dtests | T6.17f, T6.17d | the T6.17 acceptance of section 9; I21 and I22 asserted through the model in each test | opus |
+| T6.17l | Operator documentation: unsplit, modes and windows, residue, D6 note, bulk-load note | `docs/` | T6.17g | each command executed against a running node | haiku |
+
+Order: T6.17a and T6.17i first, in parallel; then b, c, d, e, h; then f; then g, j, k; l last. T6.17b changes forward behaviour and needs the owner's acceptance of ADR-036 before it starts.
+
+### 11.11 Questions for the owner
+
+1. Accept option (d) and the change to forward cleanup? It reverses ADR-033's timing: the base residue (one partition times RF) is kept for up to about `gc_grace_seconds / 2` after the commit (5 days by default), unless an unsplit comes first.
+2. May a reverse start straight from `NEW_ONLY` or `CLEANUP` (skipping the forward reconcile and the 3 h straggler wait) when stage B says not effective? It is correct, since stragglers in base end up authoritative again, and it is the only fast path for tables with small `gc_grace_seconds`.
+3. Residue that survives the slow-mode purge (timestamps above `Tt`): hold for the operator (proposed), or automatically write a new tombstone above the largest residue timestamp and wait `gc_grace_seconds` again?
+4. Bound the reverse report set by `MAX_HINT_REPORTS` (1024) instead of 32, at no growth of the worst-case registry size?
+5. Keep a second manual approval before the reverse commit point (`BASE_ONLY`), as for `NEW_ONLY`?
+6. For keys stuck at `RECONCILE_PAST_DEADLINE`: may the unsplit action write the base tombstone itself once the replicas' limit plus `straggler_window` has passed, which then allows a slow unsplit?
+7. Accept the cost of `forceCompactionForKey`: it rewrites every sstable that may contain K, which under size-tiered compaction can be most of a node's data for the table. The alternative is to wait for natural compaction, with only the probe.
+8. Tolerate `NEWER_IN_TARGET` cell differences in verification, in both directions (hazard 4 of 11.9)?
+9. Amend contract D6 as in 11.8 (an unacknowledged straggler may become visible after an unsplit)?
 
 ## Appendix A. Answers to the open questions of overview 9.3
 
