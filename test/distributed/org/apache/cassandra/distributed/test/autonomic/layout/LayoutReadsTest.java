@@ -175,7 +175,7 @@ public class LayoutReadsTest extends TestBaseImpl
             {
                 String text = t.getClass().getName() + ' ' + t.getMessage();
                 assertTrue(text, text.contains("InvalidRequestException")
-                                 && text.contains(cl + " reads are not supported on partition 0x00000001 of " + KEYSPACE + ".t while it is adapted"));
+                                 && text.contains("Lightweight transactions are not supported on partition 0x00000001 of " + KEYSPACE + ".t while it is adapted"));
             }
         }
         // a partition that is not split can be read serially
@@ -231,6 +231,9 @@ public class LayoutReadsTest extends TestBaseImpl
             }
 
             advance(cluster, id, Phase.DUAL_WRITE, Phase.BACKFILL);
+            // ADR-032: also in C1, where the base table is still read
+            for (int node = 1; node <= 2; node++)
+                assertSerialRejected(cluster, node);
             advance(cluster, id, Phase.BACKFILL, Phase.VERIFY);
             advance(cluster, id, Phase.VERIFY, Phase.CUTOVER);
             assertSameAsTwin(cluster, "CUTOVER");

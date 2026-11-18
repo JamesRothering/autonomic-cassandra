@@ -83,7 +83,9 @@ public class SplitCmsUnavailableTest extends SplitFailureSupport
             {
                 backfillRate(cluster, "3KiB/s", 20, 1, 2, 3);
                 String id = split(n1, table, K, 4);
-                awaitPhase(n1, table, K, "BACKFILL");
+                // every node, not only the owner: the checks below look at all three
+                for (int node = 1; node <= 3; node++)
+                    awaitPhase(cluster.get(node), table, K, "BACKFILL");
                 workload.awaitAcked(20);
                 model.check("cms, BACKFILL");
 
@@ -100,7 +102,9 @@ public class SplitCmsUnavailableTest extends SplitFailureSupport
                 backfillRate(cluster, "0MiB/s", 1000, 1, 2, 3);
 
                 // ---- 2. in CUTOVER, during the soak ----
-                awaitPhase(n1, table, K, "CUTOVER");
+                // every node, not only the owner: the checks below look at all three
+                for (int node = 1; node <= 3; node++)
+                    awaitPhase(cluster.get(node), table, K, "CUTOVER");
                 cmsUnavailable(cluster);
                 acked = model.acked.get();
                 assertStays("CMS unavailable in CUTOVER: the key stays there past the soak", 30, () -> allIn(cluster, table, "CUTOVER"));
