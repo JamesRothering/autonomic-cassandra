@@ -39,6 +39,8 @@ Change the physical layout of a table in response to a hot spot while clients th
 
 Refined in D1. The authoritative task list, with files, dependencies, acceptance criteria and model tier per task, is section 9 of [adaptive-schema.md](../architecture/adaptive-schema.md) (T6.1 to T6.16; T6.17, reverse migration, is the first follow-up after D6 per ADR-025). D6 depends on T2.8 (cluster ledger) specifically. The scope above is the original outline.
 
+Operator guide for partition split (T6.16): [operations/adaptive-schema.md](../operations/adaptive-schema.md).
+
 ## Status
 
 Not started.
