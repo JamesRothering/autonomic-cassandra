@@ -552,3 +552,18 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Decision.** The owner writes the base partition tombstone at `ALL` only after `FinishKey` has been acknowledged by every node, when no replica runs a pass for the key any more. Before committing `FinishKey` the owner re-checks that the reconcile generation is complete and that placement has not changed, and starts a new reconcile generation otherwise. `FinishKey` itself is rejected unless every natural replica of the key's token has reported the current generation. A kill between `FinishKey` and the tombstone is recovered by takeover or restart of the claim, which writes the tombstone again.
 
 **Consequences.** Base rows of a split key remain live until the tombstone is written; they are unreachable, because every read of the key in `STEADY` goes to the overflow copy and range scans exclude the key from base. Reverse migration (T6.17) must not assume the base partition is empty, and must wait `gc_grace_seconds` after the tombstone and force a purge before copying back (open issue O3).
+
+## ADR-034: Column mirroring maps cells of dropped columns away and refuses cells of columns the target has not seen
+
+- **Date:** 2026-11-18
+- **Status:** Accepted (orchestrator decision on T6.14; the design leaves router tolerance open; open to owner review at the D6 gate)
+- **Deliverable:** D6
+
+**Context.** Section 4.8 says T6.14 mirrors `ADD` and `DROP` of regular columns onto the overflow table in the same epoch, and the T6.14 row asks for "router tolerance for the epoch in which columns change". Both tables change in one `AlterSchema`, so a single `ClusterMetadata` always has the same regular columns on both. Mismatches can only arise between data or metadata taken at different epochs on one node: a row read under the older epoch that is mapped with the newer epoch's table, or the reverse.
+
+**Decision.** `RowMapper` re-labels a cell to the target table's column of the same name. If the target has no such column but records it as dropped, the cell is skipped (and the column omitted from the update's column set): the cells of a dropped column are invisible to every read of the target. If the target has neither the column nor a dropped record (an addition the target's metadata has not seen), the mapper still throws `IllegalArgumentException`, and the caller (write path, backfill pass) treats it as a failure of that attempt and retries under newer metadata; it never drops the cell. A column present in the target and absent in the source needs nothing. Mirroring itself is in `LayoutSchemaCoupling`: the overflow table gains and loses exactly the regular columns of the logical table, and records a dropped column with the logical table's drop time. Renames and type alterations of regular columns, and any other column change, stay rejected.
+
+**Alternatives considered.** Skipping every unknown cell: rejected, a write of a new column could be lost without an error. Failing on dropped columns too: rejected, a backfill chunk read just before a `DROP` would fail until the pass restarted, for data that is gone anyway.
+
+**Consequences.** A write that races an `ADD` on a coordinator with older metadata fails or is retried like any write to an unknown column in stock Cassandra. During a backfill pass, a chunk read before a `DROP` is mapped without the dropped column.
+

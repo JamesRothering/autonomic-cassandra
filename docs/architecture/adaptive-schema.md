@@ -474,7 +474,7 @@ What verification cannot see: tombstones (reads are filtered). Tombstone equival
 |-------------------------------------------|--------|
 | Logical table dropped (or its keyspace) | Remove the overflow table from `newKeyspaces` too. The registry entry becomes an orphan that routers ignore (its `TableId` is not in the schema); any enabled node commits `RemoveOrphanLayout`; an in-flight migration sees its table gone and releases its claim as `FAILED(TABLE_DROPPED)` |
 | Overflow table created, altered or dropped by anything | `InvalidRequestException` (it is managed) |
-| Logical table: column added, dropped, renamed, or type altered | MVP: `InvalidRequestException("ks.t has an adapted layout; ...")`. T6.14 replaces this by mirroring `ADD` and `DROP` of regular columns onto the overflow table in the same epoch |
+| Logical table: column added, dropped, renamed, or type altered | `ADD` and `DROP` of regular columns are mirrored onto the overflow table in the same epoch (T6.14; mapping tolerance in ADR-034). Renames and type alterations: `InvalidRequestException("ks.t has an adapted layout; ...")` |
 | Logical table: static column, index, trigger, `cdc = true`, masking, `transactional_mode`, or a materialized view on it | `InvalidRequestException` (would make the table ineligible) |
 | Logical table: `gc_grace_seconds` | mirrored to the overflow table |
 | Logical table: other params (compaction, compression, caching, comment, TTL default) | allowed, base only |
