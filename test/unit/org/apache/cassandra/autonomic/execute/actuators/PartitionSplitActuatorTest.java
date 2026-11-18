@@ -1823,7 +1823,31 @@ public class PartitionSplitActuatorTest
         config.layout.excluded_tables.clear();
         // a gc_grace_seconds the straggler window does not fit in
         config.layout.straggler_window = new DurationSpec.LongMillisecondsBound("10d");
-        assertRejected(actuator, "leaves no time", action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(8, "split")));
+        assertRejected(actuator, "too small for straggler_window", action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(8, "split")));
+    }
+
+    @Test
+    public void anOperatorsSplitChecksStragglerWindowAgainstGcGraceAsThePolicyDoes()
+    {
+        // ADR-029: the policy's window, min(max_migration_duration, gc_grace / 2 - straggler_window), shared
+        AutonomicConfig.LayoutConfig lc = config.layout;
+        lc.straggler_window = new DurationSpec.LongMillisecondsBound("3h");
+        assertEquals(4 * 3600_000L - 3 * 3600_000L, PartitionSplitActuator.backfillWindowMillis(lc, 28800));
+        assertEquals(lc.max_migration_duration.toMilliseconds(), PartitionSplitActuator.backfillWindowMillis(lc, 864000));
+        assertNull(PartitionSplitActuator.stragglerWindowDoesNotFit(lc, logicalTable(28800)));
+        lc.straggler_window = new DurationSpec.LongMillisecondsBound("4h");
+        assertEquals(0, PartitionSplitActuator.backfillWindowMillis(lc, 28800));
+        assertEquals("gc_grace_seconds 28800 of ks.t is too small for straggler_window 4h: half of gc_grace_seconds less straggler_window leaves 0 ms "
+                     + "for the migration (ADR-029); raise gc_grace_seconds or lower layout.straggler_window",
+                     PartitionSplitActuator.stragglerWindowDoesNotFit(lc, logicalTable(28800)));
+
+        // the manual path (nodetool autonomic layout split goes through validate) refuses it with that error
+        setSchema(Keyspaces.of(KeyspaceMetadata.create(KS, KeyspaceParams.simple(2), Tables.of(logicalTable(28800)))));
+        PartitionSplitActuator actuator = new PartitionSplitActuator(env, () -> config);
+        Optional<String> refused = actuator.validate(action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(4, "split")), null);
+        assertEquals(Optional.of(PartitionSplitActuator.stragglerWindowDoesNotFit(lc, logicalTable(28800))), refused);
+        lc.straggler_window = new DurationSpec.LongMillisecondsBound("1h");
+        assertEquals(Optional.empty(), actuator.validate(action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(4, "split")), null));
     }
 
     @Test

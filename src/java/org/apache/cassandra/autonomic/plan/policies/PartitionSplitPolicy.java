@@ -355,8 +355,7 @@ public class PartitionSplitPolicy implements Policy
         long bytes = probed.estimatedBytes();
         int rf = ksm.replicationStrategy.getReplicationFactor().allReplicas;
         double throughput = lc.backfill_throughput.toBytesPerSecond();
-        long deadline = Math.min(lc.max_migration_duration.toMilliseconds(),
-                                 table.params.gcGraceSeconds * 1000L / 2 - lc.straggler_window.toMilliseconds());
+        long deadline = PartitionSplitActuator.backfillWindowMillis(lc, table.params.gcGraceSeconds);
         if (throughput > 0 && bytes * rf * 1000.0 / throughput > deadline)
             return no(subject, "backfill_too_long");
         OptionalDouble free = knowledge.latest(Signals.DISK_FREE_BYTES, Subject.node());

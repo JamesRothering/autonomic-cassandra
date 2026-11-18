@@ -447,7 +447,10 @@ public class PartitionSplitActuator implements ClusterActuator
         {
             return Optional.of("the key is not a valid partition key of " + logical.keyspace + '.' + logical.name + ": " + text(e.getMessage()));
         }
-        String noTime = migrationDoesNotFit(logical);
+        // the policy's check of the backfill window (ADR-029), then the whole migration's
+        String noTime = stragglerWindowDoesNotFit(lc, logical);
+        if (noTime == null)
+            noTime = migrationDoesNotFit(logical);
         if (noTime != null)
             return Optional.of(noTime);
         if (state != null)
@@ -1237,8 +1240,29 @@ public class PartitionSplitActuator implements ClusterActuator
         long max = lc.max_migration_duration.toMilliseconds();
         if (key.dualWriteSinceMillis <= 0)
             return key.phaseSinceMillis + max;
-        long byDesign = key.dualWriteSinceMillis + Math.min(max, logical.params.gcGraceSeconds * 1000L / 2 - lc.straggler_window.toMilliseconds());
+        long byDesign = key.dualWriteSinceMillis + backfillWindowMillis(lc, logical.params.gcGraceSeconds);
         return Math.min(byDesign, replicaLimit(key, logical) - 1);
+    }
+
+    /**
+     * Design 4.5: how long a migration may run from DUAL_WRITE before the commit point, {@code min(max_migration_duration,
+     * gc_grace_seconds / 2 - straggler_window)}. The policy compares its backfill estimate with it; the owner's deadline
+     * is counted with it; an operator's split is refused if it leaves no room (ADR-029).
+     */
+    public static long backfillWindowMillis(AutonomicConfig.LayoutConfig lc, int gcGraceSeconds)
+    {
+        return Math.min(lc.max_migration_duration.toMilliseconds(), gcGraceSeconds * 1000L / 2 - lc.straggler_window.toMilliseconds());
+    }
+
+    /** ADR-029: null if {@link #backfillWindowMillis} leaves room for a migration; otherwise why not, with the numbers. */
+    public static String stragglerWindowDoesNotFit(AutonomicConfig.LayoutConfig lc, TableMetadata logical)
+    {
+        long window = backfillWindowMillis(lc, logical.params.gcGraceSeconds);
+        if (window > 0)
+            return null;
+        return "gc_grace_seconds " + logical.params.gcGraceSeconds + " of " + logical.keyspace + '.' + logical.name + " is too small for straggler_window "
+               + lc.straggler_window + ": half of gc_grace_seconds less straggler_window leaves " + window + " ms for the migration (ADR-029); "
+               + "raise gc_grace_seconds or lower layout.straggler_window";
     }
 
     /** Two all-node acknowledgements (NEW_ONLY, CLEANUP) come between the commit and the straggler wait. */

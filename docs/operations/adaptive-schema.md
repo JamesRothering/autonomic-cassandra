@@ -295,6 +295,7 @@ Other outcomes:
   at=1795025005442 from_state=PROPOSED to_state=REJECTED detail=the key is already in the layout of ks1.t in phase CUTOVER
   ```
 - A proposal on a table that does not exist is rejected with `VALIDATION` in the same way (the reason is in the events).
+- A table whose `gc_grace_seconds` is too small for `layout.straggler_window` is rejected with `VALIDATION`, with the same check a policy's proposal gets (ADR-029): half of `gc_grace_seconds` less `straggler_window` must leave time for the migration. The events say `gc_grace_seconds <n> of <ks.table> is too small for straggler_window <w>: ...`. Raise `gc_grace_seconds` or lower `straggler_window`.
 - An identical rejection repeated within a short interval is not written again. The command prints an error instead:
   ```
   nodetool: The proposal was rejected for the same reason as an identical one just before; see `autonomic history`
