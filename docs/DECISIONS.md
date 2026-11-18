@@ -460,7 +460,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-027: A routed operation is validated against the routing state of its keys, not the layout version
 
 - **Date:** 2026-11-16
-- **Status:** Accepted (orchestrator decision during T6.3; open to owner review at the D6 gate)
+- **Status:** Accepted (orchestrator decision during T6.3; confirmed by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** Rule C1 (adaptive-schema 4.3) has a coordinator compare `TableLayout.version` before and after a routed operation and re-execute on a change, failing with a timeout after three attempts. As built in T6.1, every registry change bumps that version, including `ReportBackfill` and a backfill generation restart. With replication factor 3 a key in `BACKFILL` receives three reports, so a write in flight could be re-executed three times and time out although its phase never changed.
@@ -474,7 +474,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-028: The owner holds `ANNOUNCED` until operations that started before registration have ended
 
 - **Date:** 2026-11-16
-- **Status:** Accepted (orchestrator decision during T6.3; open to owner review at the D6 gate)
+- **Status:** Accepted, amended by ADR-035 (orchestrator decision during T6.3; amended by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** An operation on a key that is not yet in the registry takes the stock path and is never validated (adaptive-schema 3.3, `nothingRouted`). Rules O1 and C1 therefore say nothing about it. Such an operation that is still in flight when the key passes `DUAL_WRITE` and `BACKFILL` can reach the base table after the backfill pass and still be acknowledged, and readers of the overflow copy then miss an acknowledged write. The design's only wait in `ANNOUNCED` is `cas_drain` (15 s), documented as being for Paxos rounds. Three cases were identified during T6.3: an ordinary write delayed inside its coordinator; a `TRUNCATE`, whose timeout (`truncate_request_timeout`, 60 s) exceeds `cas_drain`; and a write at `ANY` acknowledged on a hint alone, which is on no base replica when backfill runs.
@@ -488,7 +488,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-029: The `gc_grace_seconds` eligibility threshold is a constant
 
 - **Date:** 2026-11-16
-- **Status:** Proposed (owner to confirm at the D6 gate)
+- **Status:** Accepted (owner, D6 review, 2026-11-18; the manual split path also checks the configured `straggler_window`, as the policy does)
 - **Deliverable:** D6
 
 **Context.** A table is ineligible for a split when its `gc_grace_seconds` is too small for invariant I9 (no backfill or reconcile write after `DUAL_WRITE` start plus half of `gc_grace`). The design derives the threshold from the configured straggler window. `Eligibility.structural` runs inside `RegisterKey`, a cluster metadata transformation, which must give the same result on every node and on replay.
@@ -502,7 +502,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-030: Verification reports overflow-only rows separately and they do not fail a migration
 
 - **Date:** 2026-11-16
-- **Status:** Accepted (orchestrator decision during T6.8; open to owner review at the D6 gate)
+- **Status:** Accepted (orchestrator decision during T6.8; confirmed by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** In class C1 a routed write goes to the overflow table first and to the base table second (adaptive-schema 3.3). If the coordinator fails or the base write times out in between, the overflow copy holds a row the base copy lacks. The write was never acknowledged, so this is legal (4.11). Section 4.6 verifies by comparing the two copies for equality and treats any difference as a mismatch; a backfill generation cannot repair this difference because backfill copies base to overflow only. As specified, one timed-out client write during `DUAL_WRITE`, `BACKFILL` or `VERIFY` would fail verification twice and abort the migration.
@@ -530,7 +530,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-032: SERIAL reads of an adapted key are rejected from ANNOUNCED on
 
 - **Date:** 2026-11-17
-- **Status:** Accepted (orchestrator decision during T6.12; open to owner review at the D6 gate)
+- **Status:** Accepted (orchestrator decision during T6.12; confirmed by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** The design contradicted itself. Section 3.6 and limitation N1 (the operator-facing contract) reject lightweight transactions and `SERIAL` reads on an adapted key from `ANNOUNCED` on; section 3.4 rejected `SERIAL` only on a command replaced by a fan-out, which happens in classes C2 and C3. The code followed 3.4, and the T6.12 compatibility suite confirmed that `SERIAL` reads were accepted in C0 and C1.
@@ -544,7 +544,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-033: The base partition tombstone is written after FinishKey, and FinishKey requires a complete reconcile
 
 - **Date:** 2026-11-17
-- **Status:** Accepted (orchestrator decision on the T6.9 build and its review; open to owner review at the D6 gate)
+- **Status:** Accepted (orchestrator decision on the T6.9 build and its review; confirmed by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** Section 4.1 lists the base partition tombstone before `FinishKey` in `CLEANUP`. With that order, a natural replica that has not reported (a node that became a replica during `CLEANUP`) runs a reconcile pass after the tombstone, reads it from base and copies a partition deletion into every bucket, deleting acknowledged overflow data. The T6.9 review found a second path to the same loss even with the reordering: a replica that joins between the reconcile report and `FinishKey` and whose pass stalls.
@@ -556,7 +556,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-034: Column mirroring maps cells of dropped columns away and refuses cells of columns the target has not seen
 
 - **Date:** 2026-11-18
-- **Status:** Accepted (orchestrator decision on T6.14; the design leaves router tolerance open; open to owner review at the D6 gate)
+- **Status:** Accepted (orchestrator decision on T6.14; the design leaves router tolerance open; confirmed by the owner at the D6 review, 2026-11-18)
 - **Deliverable:** D6
 
 **Context.** Section 4.8 says T6.14 mirrors `ADD` and `DROP` of regular columns onto the overflow table in the same epoch, and the T6.14 row asks for "router tolerance for the epoch in which columns change". Both tables change in one `AlterSchema`, so a single `ClusterMetadata` always has the same regular columns on both. Mismatches can only arise between data or metadata taken at different epochs on one node: a row read under the older epoch that is mapped with the newer epoch's table, or the reverse.
@@ -567,3 +567,16 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 
 **Consequences.** A write that races an `ADD` on a coordinator with older metadata fails or is retried like any write to an unknown column in stock Cassandra. During a backfill pass, a chunk read before a `DROP` is mapped without the dropped column.
 
+## ADR-035: Before `DUAL_WRITE`, the owner waits until no node holds hints written before the split for the key's replicas
+
+- **Date:** 2026-11-18
+- **Status:** Accepted (owner decision at the D6 review, 2026-11-18; amends ADR-028)
+- **Deliverable:** D6
+
+**Context.** ADR-028 left one way to lose an acknowledged write. A write at `ANY` to a key that is not yet registered can be acknowledged on a hint alone, when the coordinator reaches no replica. That hint is then the only copy, and hint replay (`HintVerbHandler`) applies it straight to the base table, bypassing the layout router. If it is still undelivered after the reconcile pass of `CLEANUP`, it lands in base only and is never read again: reads of the key go to the overflow copy, and the base partition tombstone (ADR-033) shadows it. The drain wait of ADR-028 covers requests in flight, not hints already stored. Writes at `ANY` to a key that is already routed are not at risk, since they are acknowledged as `ONE` (`LayoutWrites`).
+
+**Decision.** Between the all-node acknowledgement of `ANNOUNCED` and `DUAL_WRITE`, the owner also waits until no node holds a hint, created before that acknowledgement, for any natural replica of the key's token. All nodes are up at that point (O1), so such hints can be delivered. The wait is bounded. If it expires, the migration aborts, which is still before the commit point, with a diagnosis naming the nodes that still hold hints. The check is per host and by hint age, not per key, because reading hint files to find one key costs too much.
+
+**Alternatives considered.** Documenting the gap as a limitation for tables written at `ANY` (the ADR-028 position): rejected by the owner, since the fix is cheap and removes a limitation from the contract. Rejecting `ANY` on adapted keys: rejected, because it does not close the gap: the dangerous hint predates registration.
+
+**Consequences.** A cluster with a stuck hint backlog toward one of the key's replicas cannot split that key until the backlog drains, or until the operator truncates the hints. The limitation on `ANY` writes is removed from the operator guide. A coordinator thread stalled for longer than the ADR-028 wait is still not covered.

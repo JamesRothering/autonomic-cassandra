@@ -43,7 +43,7 @@ Operator guide for partition split (T6.16): [operations/adaptive-schema.md](../o
 
 ## Status
 
-Done. Merged to `main` and tagged `D6` on 2026-11-18. The owner waived the review gate for D6 ("merge to main without review"), so ADR-034 and the D6 ADRs still await owner review.
+Done. Merged to `main` and tagged `D6` on 2026-11-18. The owner waived the review gate before the merge and reviewed the D6 decisions afterwards (2026-11-18): ADR-027 to ADR-034 accepted, ADR-028 amended by ADR-035 (wait for hints before `DUAL_WRITE`), and the follow-up changes for ADR-029 and ADR-035 landed on `main` after the `D6` tag.
 
 - Criterion 1: `LayoutRegistryTest` (dtest: the registry through restart replay and CMS snapshots, on nodes with and without the layer), `LayoutTransformationTest`, `LayoutServiceTest`, and the three-node compatibility suite below, where every node routes from the registry it has applied.
 - Criterion 2: `LayoutCompatibilitySuite` with `LayoutCompatibilityEarlyTest`, `LateTest`, `OneBehindTest`, `OwnerGateTest` and `RollbackTest` (T6.12: every statement of 3.3 to 3.6 against a never-split twin, with the key held in each phase and a node one epoch behind), and `PartitionSplitEndToEndTest` (T6.9: 3 nodes, a 5000-row partition split into 8 buckets under live load checked against a model).
