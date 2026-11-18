@@ -23,7 +23,7 @@
 Status: D1 / T1.1. Base: Apache Cassandra trunk at `2249e37b` (ADR-001, re-confirmed by ADR-004).
 Decisions referenced as ADR-NNN are in [`docs/DECISIONS.md`](../DECISIONS.md).
 
-**Amended by T1.2.** Section 9.1 of [`adaptive-schema.md`](adaptive-schema.md) lists framework changes FC1 to FC10 that the adaptive-schema design requires (service start, ledger helpers, claim preconditions, the verify contract for cluster actuators, kill and recovery past a commit point, hook budget, configuration, nodetool). Where they conflict with this document, FC1 to FC10 take precedence. The implementers of T2.1, T2.6, T2.7, T2.8, T2.10 and T3.2 must read them.
+**Amended by T1.2, folded in by D6.** The framework changes that the adaptive-schema design required (FC1 to FC10, listed in section 9.1 of [`adaptive-schema.md`](adaptive-schema.md)) are folded into the sections below as built in D6 (T6.1 to T6.16). Each place says what exists; `adaptive-schema.md` 9.1 records where each one went.
 
 Conventions used in this document:
 
@@ -129,7 +129,9 @@ src/java/org/apache/cassandra/autonomic/
   coord/      ClusterLedger, ClusterLedgerValue, Claim, AutonomicTransformations,
               ClusterCoordinator
   elastic/    ScaleOutProvider, ScaleRequest, ProvisionTicket, ProvisionStatus
-  layout/     (D6, defined by T1.2)
+  layout/     LayoutService, LayoutRegistry, TableLayout, KeyState, Phase, the layout transformations (RegisterKey, AdvanceLayout,
+              ReportBackfill, RemoveKey, FinishKey, ...), LayoutWrites, LayoutReads, BackfillTask, LayoutVerifier,
+              LayoutSchemaCoupling (D6; design in adaptive-schema.md)
 ```
 
 ### 3.3 Key types
@@ -167,7 +169,7 @@ public final class Diagnosis
     public final double confidence;    // 0..1
     public final long firstSeenMillis, lastSeenMillis;
     public final String summary;       // one sentence for operators
-    public final Map<String, String> evidence;  // signal name -> formatted value/threshold
+    public final Map<String, String> evidence;  // signal name -> formatted value/threshold; hot_partition also carries key_hex (raw key bytes, FC6) and, for a key of an adapted table, the layout annotation
     public final UUID rootCause;       // nullable; set by Correlator
 }
 
@@ -316,12 +318,12 @@ DISABLED --start()--> STARTING --armed--> RUNNING <--resume()/pause()--> PAUSED
     +---------------- shutdownBlocking() ----+------------------------------+
 ```
 
-- `AutonomicService.instance.start()` is called from daemon setup (section 4). If `autonomic.enabled` is false it registers the MBean and returns: no executors, no listeners, no sensors.
+- `AutonomicService.instance.start()` is called from daemon setup (section 4). It registers the MBean and starts `LayoutService` (D6, FC1), which registers one `ChangeListener` on the metadata log and creates no thread until the layout registry has work for it. If `autonomic.enabled` is false nothing else is started: no executors, no sensors, no other listeners. The layout data plane (routing hooks H16 to H21, the epoch watermark handler, the replica backfill worker) runs on every node of the fork whatever `enabled`, `dry_run`, pause or kill say; only proposing and owning a split needs an enabled, armed node.
 - STARTING: executors are created; recovery runs (section 7.6); the persisted pause flag is read. The loop is **armed** only when `ClusterMetadata.current().myNodeState() == NodeState.JOINED` and `startup_grace` (default 5m) has elapsed since start, so decaying histograms have warmed up. Until armed, sensors run but detectors do not.
 - PAUSED: sensors and detectors run, diagnoses are recorded, no new action is approved. In-flight actions finish verification and may roll back.
 - `kill()`: PAUSED plus immediate rollback of all in-flight node-scoped actions and release of any cluster claim owned by this node at its next safe step. The pause flag is persisted so a restart does not re-arm the layer.
 - `shutdownBlocking()` is called from `StorageService.drain` before `AutoRepair.instance.shutdownBlocking()`, for the same reason given in the comment there: later stages stop accepting writes to system tables.
-- `autonomic.enabled` can be flipped at runtime through the MBean; this calls `start()` or `shutdownBlocking()`.
+- `autonomic.enabled` can be flipped at runtime through the MBean; this starts or stops the loops. `shutdownBlocking()` also stops `LayoutService`; disabling the layer at runtime does not, so routing and backfill continue (FC1).
 
 ## 4. Hook points into core
 
@@ -346,11 +348,19 @@ Policy (ADR-011): each hook is one statement where possible, placed next to the 
 | H12 | `src/java/org/apache/cassandra/metrics/CassandraMetricsRegistry.java` | metric group list, after `.add(AutoRepairMetrics.TYPE_NAME)` | add `.add(AutonomicMetrics.TYPE_NAME)` | 1 line | T2.9 |
 | H13 | `conf/cassandra.yaml` | after the commented `auto_repair:` block | add a commented `autonomic:` block (section 10.1) | comments only | T2.1 |
 | H14 | `test/unit/org/apache/cassandra/config/DatabaseDescriptorRefTest.java` | allowed class list | add `AutonomicConfig` and its nested classes (the test fails when `DatabaseDescriptor` loads an unlisted class) | few lines | T2.1 |
-| H15 | `test/resources/nodetool/help/` | new fixture files | generated with `test/unit/org/apache/cassandra/tools/nodetool/NodetoolHelpGenerator.java`; the top-level `help` fixture changes too | new files + 1 changed | T2.7 |
+| H15 | `test/resources/nodetool/help/` | new fixture files | generated with `test/unit/org/apache/cassandra/tools/nodetool/NodetoolHelpGenerator.java`; the top-level `help` fixture changes too. D6 adds `autonomic$layout` and its `status`, `split`, `abort` and `resume` fixtures (FC10) | new files + 1 changed | T2.7, T6.9 |
+| H16 | `src/java/org/apache/cassandra/service/StorageProxy.java` | `mutateWithTriggers`, after the denylist block, before `TriggerExecutor` | `if (LayoutWrites.route(mutations, consistencyLevel, mutateAtomically, requestTime, preserveTimestamps)) return;` | 1 line + import | T6.3 |
+| H17 | `StorageProxy.java` | `read(SinglePartitionReadCommand.Group, ...)`, after the denylist block | `{ PartitionIterator r = LayoutReads.read(group, consistencyLevel, requestTime); if (r != null) return r; }` | 1 line | T6.4 |
+| H18 | `StorageProxy.java` | `getRangeSlice(PartitionRangeReadCommand, ...)`, after the denylist block | same shape with `LayoutReads.range(command, consistencyLevel, readCoordinator, requestTime)` | 1 line | T6.5 |
+| H19 | `StorageProxy.java` | `cas(...)`, first statement | `LayoutWrites.checkCas(keyspaceName, cfName, key);` | 1 line | T6.3 |
+| H20 | `StorageProxy.java` | `truncateBlocking(keyspace, cfname)`, first statement | `LayoutWrites.beforeTruncate(keyspace, cfname);` | 1 line | T6.3 |
+| H21 | `src/java/org/apache/cassandra/tcm/transformations/AlterSchema.java` | `execute`, directly after `newKeyspaces = schemaTransformation.apply(prev);` | `newKeyspaces = LayoutSchemaCoupling.apply(prev, newKeyspaces);` | 1 line + import | T6.10 |
 
 Why H9 must be a static registration and unconditional: the metadata log is replayed in `Startup.initialize(...)`, which `CassandraDaemon.setup()` calls long before H3. `CustomTransformation.Serializer.deserialize` looks up the child serializer by name; a missing registration fails replay. It must also run on nodes where `autonomic.enabled` is false and in offline tools that read the log, because the log is shared by the whole cluster. `AutonomicTransformations.register()` must therefore depend only on serializer classes, not on `AutonomicService` or `DatabaseDescriptor`.
 
-Total: 12 upstream source files, one config file, three upstream test files, plus fixtures. H12 is **unverified** as strictly required (the list was read, the failure mode when a type is missing was not); follow the `AutoRepairMetrics` precedent.
+Hooks H16 to H21 (D6, ADR-022 extending ADR-011) add six statements in two further upstream files, `StorageProxy.java` and `AlterSchema.java`; they are request-path code and an exception to ADR-013 (FC8): one registry lookup per operation, with counters kept only while a key is being profiled. `tools/autonomic/check-hook-budget.sh` lists both files.
+
+Total before D6: 12 upstream source files, one config file, three upstream test files, plus fixtures; D6 raises the source files by the two above. H12 is **unverified** as strictly required (the list was read, the failure mode when a type is missing was not); follow the `AutoRepairMetrics` precedent.
 
 ### 4.2 Core APIs read (no modification)
 
@@ -458,6 +468,7 @@ All read-only, all local to the queried node, defined in `AutonomicVirtualTables
 | `system_views.autonomic_signals` | `ObservationStore` | `signal text`, `subject text` PK; `value double`, `at timestamp`, `samples int` |
 | `system_views.autonomic_diagnoses` | memory (open) and `system_autonomic.diagnoses` (last 24h) | as the table |
 | `system_views.autonomic_actions` | `system_autonomic.actions` (last 7 days) | as the table minus `undo` |
+| `system_views.autonomic_layouts` | `ClusterMetadata.current()` (D6) | `keyspace_name` PK, `table_name`, `partition_key` clustering; `layout_id`, `physical_table`, `transform`, `buckets`, `layout_version`, `phase`, `epoch`, `phase_since`, `dual_write_since`, `incarnation`, `generation`, `generation_epoch`, `backfill_done`, `action_id`, `orphan`: one row per logical table and split key |
 | `system_views.autonomic_cluster_ledger` | `ClusterMetadata.current()` | `lane text` PK; `action_id`, `actuator`, `target`, `owner` (host id), `phase`, `step`, `claimed_at`, `lease_expires_at`, plus one row per recent entry with `lane = 'recent/<n>'` |
 
 Cluster-wide viewing of node-local tables is not in the MVP. `src/java/org/apache/cassandra/db/virtual/RemoteToLocalVirtualKeyspace.java` wraps a virtual keyspace so that it can be queried on other nodes; it is used only for Accord debugging today and its suitability is **unverified**. `nodetool autonomic history` reads one node.
@@ -524,8 +535,13 @@ Transformations (each a `Transformation` with `kind()` returning `Kind.CUSTOM`, 
 | Transformation | Fields | Succeeds when | Effect |
 |----------------|--------|---------------|--------|
 | `SetClusterActionsEnabled` | `enabled` | always | sets the flag; creates the ledger if absent |
-| `ClaimAction` | `lane`, `claim`, `nowMillis`, `cooldownMillis` | flag set; lane free or held by the same `actionId` (idempotent) or held with `leaseExpiresAtMillis < nowMillis`; no `Recent` with the same actuator and target ended within `cooldownMillis`; `prev.inProgressSequences.isEmpty()` when lane is `TOPOLOGY` | writes the claim with `step = 0` |
+| `ClaimAction` | `lane`, `claim`, `nowMillis`, `cooldownMillis` | flag set; lane free or held by the same `actionId` (idempotent) or held with `leaseExpiresAtMillis < nowMillis`; no `Recent` with the same actuator and target ended within `cooldownMillis` (waived for a continuation, `Actuator.continuation`, FC5); `prev.inProgressSequences.isEmpty()` when the lane has `requiresNoInProgressSequences` (`TOPOLOGY` and `SCHEMA_LAYOUT`, FC3), except for a takeover of an expired claim of the same actuator and target; for `SCHEMA_LAYOUT` an expired claim whose action owns a key past its commit point can only be taken over, never replaced | writes the claim with `step = 0` |
 | `AdvanceAction` | `actionId`, `owner`, `expectedStep`, `phase`, `state`, `nowMillis`, `leaseMillis` | lane holds `actionId` with that `owner` and `step == expectedStep` | `step + 1`, new phase/state, lease renewed |
+
+`ClusterLedger.withAdvancedClaim(actionId, owner, expectedStep, phase, state, nowMillis, leaseMillis)` is the pure helper behind `AdvanceAction` and returns a result or a rejection reason. A transformation of another extension can call it, so that the claim and that extension's value change in one commit (FC2): every layout transformation that moves a phase (`AdvanceLayout`, `FinishKey`, `RemoveKey`, ...) does this, through `LayoutTransformation` and `ClaimStep`. The layout transformations are registered with `AutonomicTransformations.register()` like the ledger's.
+
+The `ClusterCoordinator.claim` overload with a `continuation` flag claims without the cooldown of the last action on the same target.
+
 | `ReleaseAction` | `actionId`, `owner` (null when forced by an operator), `finalState`, `nowMillis` | lane holds `actionId` (and owner matches unless forced) | removes the claim, prepends a `Recent` |
 
 Rules that follow from how TCM works:
@@ -545,7 +561,7 @@ The claim owner drives the action. Steps that must happen on a specific other no
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Owner crashes or is partitioned from the CMS | It cannot renew. After expiry any preferred proposer commits `ClaimAction` for the same lane with a **new** claim whose `actuator` is the original and `phase` is `RECOVERING`; the actuator's `recover(Claim)` decides to resume or to undo. Node-scoped and early cluster actuators undo, then release with `ROLLED_BACK`; `ScaleOutActuator` resumes, because a provisioned node or a started join cannot be undone by the layer (D5). |
+| Owner crashes or is partitioned from the CMS | It cannot renew. After expiry any preferred proposer commits `ClaimAction` for the same lane with a **new** claim whose `actuator` is the original and `phase` is `RECOVERING`; the actuator's `recover(Claim)` decides to resume or to undo. Node-scoped and early cluster actuators undo, then release with `ROLLED_BACK`; `PartitionSplitActuator` undoes before its commit point (`NEW_ONLY`) and resumes forward at or after it; `ScaleOutActuator` resumes, because a provisioned node or a started join cannot be undone by the layer (D5). |
 | Owner is alive but cannot commit | `AdvanceAction` fails at its deadline. The owner retries until `leaseExpiresAtMillis - lease_safety_margin`, then stops acting and treats the claim as lost. |
 | Owner returns after a takeover | Its next `AdvanceAction` is rejected (`step` or `owner` mismatch). It marks its local record `FAILED` with reason `CLAIM_LOST` and performs no further side effects. |
 | CMS unavailable | No cluster action can start or advance. Node-scoped actions are unaffected. In-flight cluster actions stall; side effects already issued (for example a provisioning request) are covered by the provider's idempotency key. |
@@ -557,7 +573,7 @@ Cluster-scoped actuators therefore extend the base contract:
 public interface ClusterActuator extends Actuator
 {
     Lane lane();
-    /** One bounded step. Returns the next phase, or a terminal result. Called on the actuator thread of the owner. */
+    /** One bounded step. Returns the next phase, a transformation to commit instead of `AdvanceAction` (FC2), or a terminal result. Called on the actuator thread of the owner. */
     StepResult step(Action action, Claim claim, ActionContext ctx) throws Exception;
     /** Called on a new owner after lease expiry. Must leave the cluster in the pre-action state or complete the action. */
     StepResult recover(Claim expired, ActionContext ctx) throws Exception;
@@ -566,9 +582,11 @@ public interface ClusterActuator extends Actuator
 }
 ```
 
+A cluster actuator owns its verification inside `step` and ends with a terminal result: `committed(verdict, detail)`, `COMMITTED_CLEANUP_PENDING`, rolled back, or failed (FC4, FC5). The dead-man deadline of 7.3 does not apply to it; lease expiry and `recover` take its role. `Actuator.continuation(Action)` (default false) marks an action that finishes work an earlier action committed and left unfinished, such as the cleanup of a split stopped past its commit point: it is exempt from the governor's `COOLDOWN` and from rule 10 of 7.3, and its claim from the ledger's cooldown; a new action on the same target is not. `PartitionSplitActuator` does not use `onPhase` for data-plane work, because that runs only on enabled nodes; `LayoutService` listens to the log itself (FC1).
+
 ### 6.5 Mixed versions and feature-disabled nodes
 
-- **Feature-disabled nodes of this fork** deserialize and apply ledger transformations (H9 is unconditional) but never propose and never run `onPhase` work. A cluster action that needs every node to participate (D6) must check participation explicitly; how is a T1.2 question (section 9.3). Scale-out does not need it.
+- **Feature-disabled nodes of this fork** deserialize and apply ledger transformations (H9 is unconditional) but never propose and never run `onPhase` work. The layout data plane is not `onPhase` work and runs on them (FC1, 3.6). A split needs every node to participate; the attestation of `nodetool autonomic cluster enable` is what guarantees that every node has this code, and the owner of a split additionally waits for an epoch acknowledgement from every non-`LEFT` node before each phase change (adaptive-schema 4.3). Scale-out does not need it.
 - **Stock Cassandra nodes** cannot deserialize our transformation names: `CustomTransformation.getSerializer` asserts on an unknown extension, and `ClusterMetadata` deserialization of the extension map loads our value class by name. A stock node receiving such a log entry or snapshot fails. `Kind.CUSTOM` has `introducedIn = V0`, so the built-in `Transformation.eligibleToCommit` check gives no protection, and `Directory` carries no capability flags we could test.
 - Consequence and rule: **nothing is written to the TCM log until an operator runs `nodetool autonomic cluster enable`**, which commits `SetClusterActionsEnabled(true)`. That command is the operator's attestation that every node runs this fork. Before it, a cluster may freely mix fork and stock nodes and use all node-scoped features. After it, adding a stock node is unsupported. The command refuses if `directory.clusterMinVersion != directory.clusterMaxVersion` (a best-effort check; it cannot tell the fork from stock at the same version).
 - Rolling upgrades between versions of this fork: the ledger carries `formatVersion`; a new format may only be written after all nodes are upgraded. For the MVP there is one format, and this rule is recorded as an obligation rather than implemented.
@@ -587,7 +605,7 @@ Evaluated in this order; the first failing check rejects the action with its nam
 | 2 | `DRY_RUN` | `dry_run: true` | Action is recorded as `REJECTED` with reason `DRY_RUN` and the full plan, so operators can see what would have happened. Dry-run is the default when the layer is first enabled. |
 | 3 | `ACTUATOR_DISABLED` | each actuator off by default | |
 | 4 | `VALIDATION` | | `Actuator.validate` |
-| 5 | `NODE_STATE` | | node must be `JOINED`, not draining (`StorageService.isDraining()`); for `TOPOLOGY` lane also no in-progress sequences and every directory member alive |
+| 5 | `NODE_STATE` | | node must be `JOINED`, not draining (`StorageService.isDraining()`); for the `TOPOLOGY` and `SCHEMA_LAYOUT` lanes also no in-progress sequences and every directory member alive (`ClusterGate.nodeState`, FC3) |
 | 6 | `STORE_UNAVAILABLE` | | the write-ahead record for the action must be writable (section 7.6) |
 | 7 | `QUARANTINED` | 6h | set when the same policy saw `quarantine_after_rollbacks` (default 3) rollbacks within `quarantine_window` (default 1h) |
 | 8 | `COOLDOWN` | 10m after commit, 30m after rollback, doubling per consecutive rollback up to 6h | keyed by `dedupeKey` |
@@ -643,8 +661,8 @@ Every actuator must satisfy all of the following; T2.6 provides an abstract test
 6. **Verdict.** After `observationWindowMillis`, `MetricVerifier` computes the same means. `REGRESSED` if any guard worsened beyond its tolerance or the goal worsened by more than `minImprovement`; `IMPROVED` if the goal improved by at least `minImprovement` and no guard regressed; `INCONCLUSIVE` if samples are missing; otherwise `NEUTRAL`.
 7. **A change must earn its place.** Only `IMPROVED` commits. `NEUTRAL` and `INCONCLUSIVE` roll back. This biases the system toward the operator's configured baseline.
 8. **Early abort.** During the window the control thread checks guards every tick; a guard beyond `abort_tolerance` (default twice its tolerance) triggers immediate rollback.
-9. **Dead-man deadline.** At `apply` time the actuator thread schedules its own rollback task at `observationWindowMillis + verify_grace`. Verification cancels it. If the control thread stalls, the action still rolls back.
-10. **Irreversible actuators** (`reversible() == false`, for example a garbage-collecting compaction) must be bounded in cost by construction, are rate-limited to one per target per day by default, and are verified for reporting only: the terminal state is `COMMITTED` with the verdict recorded. Policies may only select them at severity `CRITICAL`.
+9. **Dead-man deadline.** At `apply` time the actuator thread schedules its own rollback task at `observationWindowMillis + verify_grace`. Verification cancels it. If the control thread stalls, the action still rolls back. This applies to node-scoped actuators. A cluster actuator owns its verification inside `step`, which may end with `COMMITTED` and a recorded verdict or `ROLLED_BACK`, and has no dead-man deadline: its lease and `recover` take that role (FC4). A partition split verifies in two stages around its commit point and cannot be rolled back by a timer after it.
+10. **Irreversible actuators** (`reversible() == false`, for example a garbage-collecting compaction) must be bounded in cost by construction, are rate-limited to one per target per day by default, and are verified for reporting only: the terminal state is `COMMITTED` with the verdict recorded. Policies may only select them at severity `CRITICAL`; the governor waives that condition when the action's approval mode is `manual` (a human has decided; FC4), and for a continuation (FC5).
 11. **Committed is not permanent** for node knobs: a committed value is still an in-memory override of `cassandra.yaml`. The `baseline_drift` detector (T4.1) reports knobs that differ from configuration, and `nodetool autonomic revert` restores all of them.
 
 ### 7.4 Oscillation damping
@@ -683,7 +701,7 @@ All node-scoped knobs are in-memory overrides, so a restart has already restored
 
 1. read `local_state` keys `inflight/*`;
 2. for each node-scoped action in `APPLYING`, `VERIFYING` or `ROLLING_BACK`: mark `ROLLED_BACK` with reason `RESTART`, delete the key; do not call `rollback`;
-3. for each cluster-scoped action: read the ledger; if this node still owns an unexpired claim, call `recover`; otherwise mark `FAILED` with reason `CLAIM_LOST`;
+3. for each cluster-scoped action: read the ledger; if this node still owns an unexpired claim, call `recover`; otherwise mark `FAILED` with reason `CLAIM_LOST`. Kill and shutdown follow the same split as `recover`: before the actuator's commit point its abort path runs; past it the claim is released as `COMMITTED_CLEANUP_PENDING`, the key stays in its phase (safe indefinitely) and `nodetool autonomic layout resume` or the next armed owner finishes the cleanup under a new claim (FC5);
 4. apply a post-restart cooldown to each affected `dedupeKey`.
 
 ## 8. Elasticity
@@ -766,10 +784,8 @@ This section fixes only what T1.2 must build on. Decision: ADR-012 (Proposed; T1
 
 - A **layout** maps one logical table (the schema clients see) to one or more physical tables, with a routing rule. Layouts live in `ClusterMetadata.extensions` under their own `ExtensionKey` (not inside `ClusterLedger`, so their size and format evolve independently). Because schema and layouts are both part of `ClusterMetadata`, a coordinator at epoch E sees a consistent pair. This is the property that made TCM the base.
 - Physical tables are ordinary tables created through the normal `Schema.submit(...)` / `AlterSchema` path. Replicas, streaming, repair, compaction and backups see nothing new.
-- The **indirection sits on the coordinator, at the CQL statement layer**: after a statement is prepared against the logical table and before it reaches `StorageProxy`. Two candidate sites exist and T1.2 chooses:
-  - a wrapping `QueryHandler` installed with the existing `cassandra.custom_query_handler_class` property (`CassandraRelevantProperties.CUSTOM_QUERY_HANDLER_CLASS`, read in the static initializer of `src/java/org/apache/cassandra/service/ClientState.java`). Zero core edits, but it is a startup-time system property, it sees whole statements rather than bound partitions, and internal callers of `QueryProcessor.executeInternal` bypass it;
-  - a narrow hook inside `src/java/org/apache/cassandra/cql3/statements/SelectStatement.java` and `ModificationStatement.java` where the partition key is known. More precise, more invasive.
-- A migration is a cluster-scoped action in lane `SCHEMA_LAYOUT`, implemented as a `ClusterActuator`. Its phases (for example dual-write, backfill, cutover, cleanup) are ledger phases; each phase change is a TCM commit; every coordinator switches behaviour in `onPhase` at a known epoch.
+- The **indirection sits on the coordinator, at the `StorageProxy` boundary** (ADR-015, hooks H16 to H21 of 4.1), on already-built mutations and read commands, not at the CQL statement layer.
+- A migration is a cluster-scoped action in lane `SCHEMA_LAYOUT`, implemented as a `ClusterActuator` (`PartitionSplitActuator`). Its phases (dual-write, backfill, verify, cutover, commit, cleanup) are per-key phases of the layout registry, advanced together with the claim in one commit (FC2); every coordinator switches behaviour from the phase in the metadata it captured, not in `onPhase`, and the owner waits for every node's epoch acknowledgement before each change.
 - The framework supplies: the claim and lease, the phase channel, the safety governor (manual approval by default), audit, the kill switch, and the hot-partition diagnosis that triggers a proposal.
 
 ### 9.2 What the framework does not supply
@@ -871,6 +887,7 @@ autonomic:
     read_pool: { enabled: false, min_factor: 0.5, max_factor: 2.0 }   # also mutation_pool, counter_mutation_pool, view_mutation_pool; never above 8x processors
     request_throttle: { enabled: false, min_requests_per_second: 1000, increase_step: 100 }   # max_requests_per_second defaults to the configured limit
     scale_out: { enabled: false }
+    partition_split: { enabled: false }               # D6, cluster action; manual approval by default, has a commit point (adaptive-schema 4)
   scale_out:
     provider: org.apache.cassandra.autonomic.elastic.NoopProvider
     parameters: {}
@@ -879,13 +896,44 @@ autonomic:
     verify_window: 1h
     provider_call_timeout: 10s
     poll_interval: 15s
+  layout:                             # D6, adaptive schema; read on every node, also while the layer is disabled
+    fanout_eager_rows: 10000          # reads asking each bucket for at most this many rows hold them in memory
+    fanout_chunk_rows: 1000           # larger reads fetch each bucket in chunks of this size and merge lazily
+    backfill_throughput: 1MiB/s       # per node, 0 is unlimited
+    backfill_chunk_rows: 1000
+    # read on the node that owns or proposes a split
+    default_buckets: 8
+    excluded_tables: []               # keyspace.table names never split (ADR-024)
+    ack_poll_interval: 5s
+    cas_drain: 15s                    # lower bound of the drain wait in ANNOUNCED (ADR-028)
+    verify_page_rows: 1000
+    verify_recheck_delay: 2s
+    verify_retries: 1
+    cutover_soak: 10m
+    commit_approval: manual
+    straggler_window: 3h
+    reconcile_budget: 30m             # kept free before the replicas' tombstone deadline (ADR-031)
+    max_migration_duration: 24h
+    for_evaluations: 20
+    min_rows_for_split: 10000
+    max_probe_rows: 5000000
+    min_point_op_fraction: 0.8
+    target_share: 0.05
+    profile_window: 5m
+    min_samples: 100
+    baseline_window: 3m
+    read_regression_tolerance: 1.0
+    min_improvement: 0.5
+    verify_window: 10m
 ```
+
+The registry limits (8 layouts, 8 keys per layout) are constants of `LayoutRegistry`, not settings, and there is no `straggler_reconcile` option: the reconcile pass of `CLEANUP` always runs. The meaning of each `layout:` setting is in the comments of `conf/cassandra.yaml` and in adaptive-schema 4 and 7. The `layout:` block is read on every node, including nodes where `enabled` is false, because routing and backfill are unconditional (FC1, FC9).
 
 Three independent gates must all be open before anything changes: `enabled`, `dry_run: false`, and the specific actuator's `enabled`. Cluster-scoped actions need a fourth: `nodetool autonomic cluster enable`.
 
 ### 10.2 Operator interface
 
-`AutonomicServiceMBean` (`org.apache.cassandra.db:type=AutonomicService`, registered through `MBeanWrapper.instance`) exposes: `getStatus()`, `setEnabled(boolean)`, `setDryRun(boolean)`, `pause(String reason)`, `resume()`, `kill(String reason)`, `revert()`, `approve(String actionId)`, `reject(String actionId)`, `setActuatorEnabled(String, boolean)`, `getHistory(int limit)`, `enableClusterActions(boolean)`, `releaseClaim(String lane)`.
+`AutonomicServiceMBean` (`org.apache.cassandra.db:type=AutonomicService`, registered through `MBeanWrapper.instance`) exposes: `getStatus()`, `setEnabled(boolean)`, `setDryRun(boolean)`, `pause(String reason)`, `resume()`, `kill(String reason)`, `revert()`, `approve(String actionId)`, `reject(String actionId)`, `setActuatorEnabled(String, boolean)`, `getHistory(int limit)`, `enableClusterActions(boolean)`, `releaseClaim(String lane)`, and for D6 `getLayoutStatus()`, `splitPartition(keyspace, table, keyHex, buckets)`, `resumeSplit(keyspace, table, keyHex)` and `abortSplit(keyspace, table, keyHex)`. An operator's split or resume is an ordinary proposal (policy name `operator`) that passes the governor and approval like a policy's; `approve(id)` also accepts the id of a split at its commit point (second manual approval).
 
 `nodetool autonomic` is one picocli command group modelled on `CMSAdmin.java`:
 
@@ -900,6 +948,10 @@ Three independent gates must all be open before anything changes: `enabled`, `dr
 | `approve <id>` / `reject <id>` | manual approval |
 | `actuator enable\|disable <name>` | per-actuator gate |
 | `cluster enable\|disable\|status\|release <lane>` | ledger flag and forced release (commits to TCM) |
+| `layout status` | every adapted partition: phase, generation, owning action, what it waits for |
+| `layout split [--buckets N] <keyspace> <table> <key-hex>` | propose a partition split (FC10) |
+| `layout abort <keyspace> <table> <key-hex>` | abort a split; refused past its commit point |
+| `layout resume <keyspace> <table> <key-hex>` | take over a split with no live action: abort it before its commit point, finish it after |
 
 ### 10.3 Observability of the layer itself
 
@@ -919,7 +971,7 @@ Hardware limit: 4 cores, 5 GB RAM; the junit fork default heap is 1024m (`build.
 | D3 | each detector with a synthetic `KnowledgeView`: one series that triggers, one that does not, one that flaps and must not trigger | 1 node: write-heavy single partition yields `hot_partition` naming the key; tombstone-heavy reads yield `tombstone_overload` | Use low thresholds and short windows via config rather than real load |
 | D4 | abstract actuator contract test (7.3 rules 1 to 4) extended by every actuator; `MetricVerifier` verdict table | 1 node: forced `REGRESSED` verdict rolls back and is audited. 2 nodes: auto-repair prioritization is rate-limited and visible in `system_distributed.auto_repair_priority` | Model auto-repair setup on `test/distributed/org/apache/cassandra/distributed/test/repair/AutoRepairSchedulerTest.java` |
 | D5 | AIMD controller; envelope clamping; `ScaleOutActuator` phases with a fake provider and fake metadata | 1 node: pool resize stays in envelope under synthetic `pendingTasks`. 3 nodes: simulated provider adds a fourth node | A 4-instance cluster in a 1024m fork is **unverified**; fallback is 2 nodes growing to 3 |
-| D6 | to be defined by T1.2 | 3 nodes | |
+| D6 | unit tests per component and a compatibility suite across phases (`LayoutCompatibilitySuite`, T6.12); see section 9 of `adaptive-schema.md` | 3 nodes: end-to-end split, failure suite (T6.13) | |
 | D7 | none | scenario tests (hot spot, load spike, degraded node), fault injection of the layer itself | Each scenario under 5 minutes wall clock |
 
 Test-specific design points:
@@ -962,7 +1014,7 @@ Tiers: **haiku** = mechanical or boilerplate; **sonnet** = standard implementati
 
 | ID | Description | Files | Depends | Acceptance | Tier |
 |----|-------------|-------|---------|-----------|------|
-| T2.1 | Config section and lifecycle skeleton: `AutonomicConfig`, `AutonomicService` (states of 3.6, no components yet), `AutonomicServiceMBean`, daemon hooks | `autonomic/AutonomicConfig.java`, `AutonomicService.java`, `AutonomicServiceMBean.java`; H1 to H5, H13, H14 | none | default config: MBean registered, zero `Autonomic*` threads (asserted in a unit test and a 1-node dtest); `enabled: true` creates exactly three; `DatabaseDescriptorRefTest` passes; yaml with the section in 10.1 parses | sonnet |
+| T2.1 | Config section and lifecycle skeleton: `AutonomicConfig`, `AutonomicService` (states of 3.6, no components yet), `AutonomicServiceMBean`, daemon hooks | `autonomic/AutonomicConfig.java`, `AutonomicService.java`, `AutonomicServiceMBean.java`; H1 to H5, H13, H14 | none | default config: MBean registered, zero `Autonomic*` threads (asserted in a unit test and a 1-node dtest; the `LayoutService` listener of FC1 is the one registration, and it creates a thread only when the layout registry has work); `enabled: true` creates exactly three; `DatabaseDescriptorRefTest` passes; yaml with the section in 10.1 parses | sonnet |
 | T2.2 | Core types and interfaces of 3.3 and 3.4; `ObservationStore` ring buffers with caps; `KnowledgeView` implementation; control loop scheduling with per-component failure isolation and circuit breaker (7.5 rows 1 to 3) | `autonomic/monitor/*`, `knowledge/ObservationStore.java`, `KnowledgeView.java`, `analyze/*`, `plan/*`, `execute/` types | T2.1 | fake-clock unit tests: sensor cadence respects `minIntervalMillis`; throwing sensor is disabled after threshold and others keep running; `max_series` eviction; detectors do not run before armed | sonnet |
 | T2.3 | Local knowledge store: `AutonomicKeyspace` with the tables of 5.1, `KnowledgeStore` DAO | `autonomic/knowledge/AutonomicKeyspace.java`, `KnowledgeStore.java`; H6, H7 | T2.1 | keyspace exists on a fresh node and after restart; round-trip of diagnosis, action, event, local_state rows; rows carry the TTL; write failure is counted and does not throw into the loop | sonnet |
 | T2.4 | Virtual tables of 5.3 | `autonomic/knowledge/AutonomicVirtualTables.java`; H8 | T2.2, T2.3 (ledger table stubbed until T2.8) | each table selectable with the layer disabled (empty or status only) and enabled; unit test per table following existing virtual table tests | haiku |
@@ -1006,7 +1058,7 @@ Tiers: **haiku** = mechanical or boilerplate; **sonnet** = standard implementati
 
 ### D6 Adaptive schema
 
-The refined D6 task list (T6.1 to T6.16), with files, dependencies, acceptance criteria and tiers, is in section 9 of [`adaptive-schema.md`](adaptive-schema.md). It replaces the outline that stood here. Changes that design requires to this framework (FC1 to FC10) are listed in its section 9.1 and are not yet folded into the sections above.
+The refined D6 task list (T6.1 to T6.16), with files, dependencies, acceptance criteria and tiers, is in section 9 of [`adaptive-schema.md`](adaptive-schema.md). It replaces the outline that stood here. T6.1 to T6.16 are implemented on branch `deliverable/D6-adaptive-schema`, and the changes the design required to this framework (FC1 to FC10, listed in its section 9.1) are folded into the sections above. T6.17 (reverse migration) is a follow-up (ADR-025). The task tables of this section carry no status column, so nothing else is marked.
 
 ### D7 Verification
 
