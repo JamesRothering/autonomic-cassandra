@@ -20,7 +20,6 @@ package org.apache.cassandra.distributed.test.autonomic.layout;
 
 import java.util.Map;
 
-import org.junit.Ignore;
 import org.junit.Test;
 
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
@@ -49,13 +48,15 @@ import static org.junit.Assert.assertTrue;
  * (it commits ABORTING); the abort cannot finish while the owner is down, because every abort step obeys O1; node 2
  * takes the expired claim over and finishes the abort once the owner is back;</li>
  * <li>in CLEANUP (during the straggler window): past the commit point the stop releases the claim as
- * COMMITTED_CLEANUP_PENDING, the key stays in CLEANUP, routed to the overflow copy, and no node adopts it on its own
- * (T6.9). {@code nodetool autonomic layout resume} on node 2 is refused while the owner is down (a SCHEMA_LAYOUT claim
- * needs every member alive); once it is back, resume on the lowest live member should finish the migration, but is
- * refused with COOLDOWN: see the finding on {@link #ownerLostInCleanup}, which is ignored.</li>
+ * COMMITTED_CLEANUP_PENDING, the key stays in CLEANUP, routed to the overflow copy, and is orphaned
+ * ({@code layout.orphaned}). {@code nodetool autonomic layout resume} on node 2 is refused while the owner is down (a
+ * SCHEMA_LAYOUT claim needs every member alive); the adoption the preferred proposer proposes waits for approval
+ * (manual by default), so nothing moves on its own. Once the owner is back, resume on the lowest live member (which
+ * returns that pending adoption if there is one) finishes the migration: it continues committed work and is exempt
+ * from the cooldown the stopped action left.</li>
  * </ul>
  * Throughout, a workload through the live coordinators is checked against the model, and every acknowledged write and
- * delete is checked again at each step (I5, I7, I10, I14). Lease 15 s; every wait is on a condition. One cluster per test method (the second is ignored).
+ * delete is checked again at each step (I5, I7, I10, I14). Lease 15 s; every wait is on a condition. One cluster per test method.
  */
 public class SplitOwnerCrashTest extends SplitFailureSupport
 {
@@ -103,17 +104,11 @@ public class SplitOwnerCrashTest extends SplitFailureSupport
     }
 
     /**
-     * FINDING (T6.13): after the owner is stopped past the commit point, no node can start {@code nodetool autonomic
-     * layout resume} for a day. While the owner is down every node refuses it with NODE_STATE (a SCHEMA_LAYOUT claim
-     * needs every member alive); once the owner is back it is the lowest live member, the only node that may start a
-     * cluster action, and it refuses with COOLDOWN: the stop ended its action COMMITTED (COMMITTED_CLEANUP_PENDING),
-     * which puts the irreversible-actuator cooldown of one day ({@code DefaultSafetyGovernor.IRREVERSIBLE_COOLDOWN_MILLIS})
-     * on the same dedupe key {@code partition_split:PARTITION:<ks>.<table>:<key>} that the resume has, and the
-     * cooldown survives the restart. The key stays in CLEANUP, routed to the overflow copy (safe; no acknowledged
-     * write was lost in the run), with its base copy and reconcile pass pending. Ignored until the resume of a key past
-     * its commit point is exempt from that cooldown (or another fix); remove the {@code @Ignore} then.
+     * T6.13 found that resume was refused here with COOLDOWN for a day: the stop ended the action COMMITTED
+     * (COMMITTED_CLEANUP_PENDING), which put the irreversible-actuator cooldown on the dedupe key the resume has. Since
+     * the T6.9 review a resume of a key past its commit point is a continuation ({@code Actuator.continuation}),
+     * exempt from it; a new split of the key is not.
      */
-    @Ignore("T6.13 finding: layout resume after an owner stop past the commit point is refused with COOLDOWN for a day")
     @Test
     public void ownerLostInCleanup() throws Throwable
     {
@@ -206,7 +201,7 @@ public class SplitOwnerCrashTest extends SplitFailureSupport
             assertEquals("cl: the reconcile pass had not started", generation, progress(standby, table, K));
             await("cl: the key has no owner", () -> layoutStatus(standby).contains("no owner, past the commit point"));
             System.out.println("T6.13 cl: after the owner stopped, status on node 2:\n" + layoutStatus(standby) + "\nhistory on node 2:\n" + history(standby));
-            // the key stays in CLEANUP, routed to the overflow copy; nobody adopts it by itself
+            // the key stays in CLEANUP, routed to the overflow copy; its adoption waits for an approval
             assertStays("cl: the key stays in CLEANUP without an owner", 25, () -> "CLEANUP".equals(phaseOf(standby, table, K))
                                                                                 && layoutStatus(standby).contains("no owner, past the commit point"));
             workload.awaitAcked(20);

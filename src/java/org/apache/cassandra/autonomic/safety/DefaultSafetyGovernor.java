@@ -245,7 +245,8 @@ public class DefaultSafetyGovernor implements SafetyGovernor
         if (action.verify == null)
             return Decision.reject(Reasons.VALIDATION, "no verify spec");
         // rule 10 of overview 7.3, waived under manual approval (FC4)
-        if (!actuator.reversible() && SafetyConfig.APPROVAL_AUTO.equals(approvalMode(action.scope))
+        boolean continuation = actuator.continuation(action);
+        if (!actuator.reversible() && !continuation && SafetyConfig.APPROVAL_AUTO.equals(approvalMode(action.scope))
             && severityOf(proposal.diagnosisId, knowledge) != Severity.CRITICAL)
             return Decision.reject(Reasons.VALIDATION, "an irreversible actuator may only be selected at severity CRITICAL");
         Optional<String> invalid = actuator.validate(action, knowledge);
@@ -271,9 +272,9 @@ public class DefaultSafetyGovernor implements SafetyGovernor
         if (quarantinedUntil != null && now < quarantinedUntil)
             return Decision.reject(Reasons.QUARANTINED, "policy " + proposal.policy + " until " + quarantinedUntil);
 
-        // 8 COOLDOWN
+        // 8 COOLDOWN; a continuation of committed work makes no new change (Actuator#continuation)
         Cooldown cooldown = cooldowns.get(action.dedupeKey);
-        if (cooldown != null && now < cooldown.untilMillis)
+        if (cooldown != null && now < cooldown.untilMillis && !continuation)
             return Decision.reject(Reasons.COOLDOWN, "until " + cooldown.untilMillis);
 
         // 9 CONFLICT

@@ -328,8 +328,46 @@ public class PartitionSplitPolicyTest
     @Test
     public void handlesHotPartition()
     {
-        assertEquals(java.util.Set.of("hot_partition"), policy.handles());
+        assertEquals(java.util.Set.of("hot_partition", "layout.orphaned"), policy.handles());
         assertEquals("partition_split", policy.name());
+    }
+
+    private static Diagnosis orphaned(String phase, boolean pastLimit)
+    {
+        return new Diagnosis(UUID.randomUUID(), "layout.orphaned", Subject.partition(KS, TABLE, KEY_HEX), Severity.CRITICAL, 1, 0, 0, "orphaned",
+                             Map.of("key_hex", KEY_HEX, "table", KS + '.' + TABLE, "phase", phase, "past_tombstone_deadline", Boolean.toString(pastLimit)),
+                             null);
+    }
+
+    /** T6.9 review: an orphaned key past its commit point is adopted at once by the preferred proposer, through the governor. */
+    @Test
+    public void anOrphanedKeyIsAdoptedByThePreferredProposer()
+    {
+        Diagnosis d = orphaned("CLEANUP", false);
+        Optional<Plan> plan = policy.plan(d, view);
+        assertTrue(plan.isPresent());
+        Action a = plan.get().actions.get(0);
+        assertEquals(PartitionSplitActuator.NAME, a.actuator);
+        assertEquals(ActionScope.CLUSTER, a.scope);
+        assertEquals(PartitionSplitActuator.target(KS, TABLE, KEY_HEX), a.target);
+        assertEquals(PartitionSplitActuator.MODE_RESUME, a.params.get(PartitionSplitActuator.PARAM_MODE));
+        assertEquals(d.id, plan.get().diagnosisId);
+        assertTrue(plan.get().rationale, plan.get().rationale.contains("past its commit point in CLEANUP"));
+
+        // not off the preferred proposer, not with a member down, not while the lane is claimed, not past the limit
+        env.preferred = false;
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        env.preferred = true;
+        env.notAlive.add(new NodeId(3));
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        env.notAlive.clear();
+        assertEquals(Optional.empty(), policy.plan(orphaned("CLEANUP", true), view));
+        ledger = new ClusterLedger(ClusterLedger.FORMAT_VERSION, true,
+                                   Map.of(Lane.SCHEMA_LAYOUT, new Claim(UUID.randomUUID(), "partition_split", "x", new NodeId(1), "CLAIMED", 0, 0, 1, Map.of())),
+                                   List.of());
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        ledger = ClusterLedger.EMPTY;
+        assertTrue(policy.plan(orphaned("STEADY", false), view).isPresent());
     }
 
     @Test

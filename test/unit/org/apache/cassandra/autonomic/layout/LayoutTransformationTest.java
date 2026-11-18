@@ -39,14 +39,18 @@ import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClaimAction;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
 import org.apache.cassandra.autonomic.coord.ClusterLedgerValue;
+import org.apache.cassandra.autonomic.coord.FakeCluster;
 import org.apache.cassandra.autonomic.coord.Lane;
 import org.apache.cassandra.autonomic.coord.SetClusterActionsEnabled;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.dht.Murmur3Partitioner;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.schema.DistributedSchema;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -60,8 +64,11 @@ import org.apache.cassandra.tcm.MultiStepOperation;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.extensions.ExtensionValue;
 import org.apache.cassandra.tcm.membership.Directory;
+import org.apache.cassandra.tcm.membership.MembershipUtils;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.membership.NodeVersion;
+import org.apache.cassandra.tcm.ownership.DataPlacement;
+import org.apache.cassandra.tcm.ownership.DataPlacements;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 
@@ -128,7 +135,27 @@ public class LayoutTransformationTest
 
     static ClusterMetadata empty()
     {
-        return withTables(logicalTable(), physicalBuilder().addRegularColumn("v", UTF8Type.instance).build());
+        return withPlacement(withTables(logicalTable(), physicalBuilder().addRegularColumn("v", UTF8Type.instance).build()), 1);
+    }
+
+    /**
+     * Nodes 1 and 2 in the directory (ids {@link #N1} and {@link #N2}) and the placement of the keyspace: the whole
+     * ring on {@code replicas}, the natural replicas FinishKey requires reports from (ADR-033).
+     */
+    static ClusterMetadata withPlacement(ClusterMetadata md, int... replicas)
+    {
+        for (int i = 1; i <= 2; i++)
+            if (md.directory.peerId(MembershipUtils.endpoint(i)) == null)
+                md = FakeCluster.register(md, i, NodeVersion.CURRENT);
+        Range<Token> ring = new Range<>(md.partitioner.getMinimumToken(), new Murmur3Partitioner.LongToken(Long.MAX_VALUE));
+        DataPlacement.Builder placement = DataPlacement.builder();
+        for (int i : replicas)
+        {
+            Replica replica = Replica.fullReplica(MembershipUtils.endpoint(i), ring);
+            placement.withReadReplica(Epoch.FIRST, replica).withWriteReplica(Epoch.FIRST, replica);
+        }
+        DataPlacements placements = DataPlacements.builder(1).with(KeyspaceParams.simple(1).replication, placement.build()).build();
+        return md.transformer().with(placements).build().metadata;
     }
 
     static ClusterMetadata execute(ClusterMetadata prev, Transformation t)
@@ -508,10 +535,14 @@ public class LayoutTransformationTest
             md = execute(md, advance(step++, from, to, 1));
             from = to;
         }
+        // the reconcile generation, reported by the natural replica (ADR-033)
+        md = execute(md, advance(step++, Phase.CLEANUP, Phase.CLEANUP, 2));
+        assertRejected("natural replicas [1] have not reported reconcile generation 2", md, new FinishKey(A, N1, step, LOGICAL, K1, NOW + 3, LEASE));
+        md = execute(md, report(md, LOGICAL, K1, 2, N1));
         md = execute(md, new FinishKey(A, N1, step++, LOGICAL, K1, NOW + 3, LEASE));
         KeyState k = key(md, K1);
         assertEquals(Phase.STEADY, k.phase);
-        assertNull(k.actionId);
+        assertEquals("owned until its base tombstone is written", A, k.actionId);
         assertEquals(md.epoch, k.phaseEpoch);
         assertEquals(NOW + 3, k.phaseSinceMillis);
         assertEquals(step, ledger(md).claim(A).step);
@@ -684,6 +715,7 @@ public class LayoutTransformationTest
             assertEquals(move[0] + " -> " + move[1], started, key(md, K1).dualWriteSinceMillis);
         }
         md = execute(md, report(md, LOGICAL, K1, 4, N2));
+        md = execute(md, report(md, LOGICAL, K1, 4, N1));
         assertEquals(started, key(md, K1).dualWriteSinceMillis);
         assertEquals(started, key(roundTrip(md), K1).dualWriteSinceMillis);
         assertEquals(registry(md), registry(roundTrip(md)));
@@ -705,6 +737,7 @@ public class LayoutTransformationTest
         ClusterMetadata md = keyIn(Phase.NEW_ONLY, 2, ImmutableSet.of(N1, N2));
         md = execute(md, advance(0, Phase.NEW_ONLY, Phase.CLEANUP, 2));
         assertFalse(key(md, K1).backfillDue());
+        assertRejected("the reconcile generation of the key has not started", md, new FinishKey(A, N1, 1, LOGICAL, K1, NOW, LEASE));
         assertEquals("the reports of the backfill are still there", ImmutableSet.of(N1, N2), key(md, K1).backfillDone);
         assertRejected("the reconcile generation has not started", md, new ReportBackfill(LOGICAL, K1, 2, key(md, K1).generationEpoch, new NodeId(3)));
         md = execute(md, advance(1, Phase.CLEANUP, Phase.CLEANUP, 3));
@@ -783,14 +816,46 @@ public class LayoutTransformationTest
         for (Phase phase : Phase.values())
             if (phase != Phase.CLEANUP)
                 assertRejected("not CLEANUP", keyIn(phase), new FinishKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
-        ClusterMetadata cleanup = keyIn(Phase.CLEANUP);
+        ClusterMetadata cleanup = keyIn(Phase.CLEANUP, 1, ImmutableSet.of(N1));
         assertRejected("owned by node 1", cleanup, new FinishKey(A, N2, 0, LOGICAL, K1, NOW, LEASE));
         assertRejected("step 0, not 2", cleanup, new FinishKey(A, N1, 2, LOGICAL, K1, NOW, LEASE));
         assertRejected("key is not registered", cleanup, new FinishKey(A, N1, 0, LOGICAL, K2, NOW, LEASE));
+        // ADR-033: a natural replica of the key at this epoch that has not reported the reconcile generation
+        assertRejected("natural replicas [1] have not reported", keyIn(Phase.CLEANUP), new FinishKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
+        assertRejected("natural replicas [2] have not reported", withPlacement(cleanup, 1, 2), new FinishKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
+        assertRejected("no natural replica", withPlacement(cleanup), new FinishKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
         ClusterMetadata done = execute(cleanup, new FinishKey(A, N1, 0, LOGICAL, K1, NOW + 9, LEASE));
         assertEquals(Phase.STEADY, key(done, K1).phase);
-        assertNull(key(done, K1).actionId);
+        assertEquals(A, key(done, K1).actionId);
         assertEquals(6, registry(done).layout(LOGICAL).version);
+    }
+
+    @Test
+    public void releaseKeyEndsTheOwnershipOfASteadyKey()
+    {
+        ClusterMetadata cleanup = keyIn(Phase.CLEANUP, 1, ImmutableSet.of(N1));
+        ClusterMetadata steady = execute(cleanup, new FinishKey(A, N1, 0, LOGICAL, K1, NOW + 9, LEASE));
+        for (Phase phase : Phase.values())
+            if (phase != Phase.STEADY)
+                assertRejected("not STEADY", keyIn(phase), new ReleaseKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
+        assertRejected("owned by node 1", steady, new ReleaseKey(A, N2, 1, LOGICAL, K1, NOW, LEASE));
+        assertRejected("key is not registered", steady, new ReleaseKey(A, N1, 1, LOGICAL, K2, NOW, LEASE));
+        ClusterMetadata released = execute(steady, new ReleaseKey(A, N1, 1, LOGICAL, K1, NOW + 10, LEASE));
+        KeyState before = key(steady, K1);
+        KeyState after = key(released, K1);
+        assertNull(after.actionId);
+        assertEquals(new KeyState(before.phase, before.phaseEpoch, before.phaseSinceMillis, before.incarnation, before.generation, before.generationEpoch,
+                                  before.backfillDone, null, before.dualWriteSinceMillis), after);
+        assertEquals(ReleaseKey.CLAIM_PHASE, ledger(released).claim(A).phase);
+        assertEquals(2, ledger(released).claim(A).step);
+        // a STEADY key that is owned by an action can be adopted; one owned by nobody cannot
+        ClusterMetadata lost = takenOver(steady);
+        ClusterMetadata adopted = execute(lost, new AdoptKey(B, N2, 0, LOGICAL, K1, Phase.STEADY, A, NOW + 11, LEASE));
+        assertEquals(B, key(adopted, K1).actionId);
+        assertNull(registry(released).postCommitKeyOwnedBy(A));
+        assertEquals("ks.t key 0x010203 in STEADY", registry(steady).postCommitKeyOwnedBy(A));
+        assertNull(registry(keyIn(Phase.CUTOVER)).postCommitKeyOwnedBy(A));
+        assertEquals("ks.t key 0x010203 in CLEANUP", registry(cleanup).postCommitKeyOwnedBy(A));
     }
 
     /** The expired claim of A replaced by a RECOVERING claim of action B of node 2 (a takeover); the key stays owned by A. */
@@ -949,7 +1014,7 @@ public class LayoutTransformationTest
     public void replayedCodeDoesNotReadClocksOrConfiguration() throws IOException
     {
         String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase", "Eligibility", "PhysicalTables",
-                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey" };
+                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey", "ReleaseKey", "NaturalReplicas" };
         String[] forbidden = { "Clock", "currentTimeMillis", "nanoTime", "DatabaseDescriptor", "AutonomicService", "AutonomicConfig",
                                "FBUtilities", "Random", "randomUUID", "TimeUUID", "System.", "ClusterMetadata.current", "ClusterMetadataService",
                                "StorageService", "Schema.instance", "Instant", "new Date" };
@@ -963,7 +1028,7 @@ public class LayoutTransformationTest
                 if (line.startsWith("import org.apache.cassandra."))
                     assertTrue(source + ".java: unexpected dependency " + line,
                                line.matches("import org\\.apache\\.cassandra\\.(tcm|io\\.util|db\\.TypeSizes|db\\.marshal\\.Int32Type|exceptions\\.ExceptionCode"
-                                            + "|schema\\.(TableId|TableMetadata|ColumnMetadata|KeyspaceMetadata|SchemaConstants)|cql3\\.ColumnIdentifier"
+                                            + "|schema\\.(TableId|TableMetadata|ColumnMetadata|KeyspaceMetadata|SchemaConstants)|cql3\\.ColumnIdentifier|locator\\.InetAddressAndPort"
                                             + "|service\\.consensus\\.(TransactionalMode|migration\\.TransactionalMigrationFromMode)|utils\\.ByteBufferUtil|autonomic\\.(coord|layout))[.;].*"));
         }
     }
@@ -1040,6 +1105,7 @@ public class LayoutTransformationTest
                                        new ReportBackfill(LOGICAL, K1, 3, Epoch.create(41), N2),
                                        new RemoveKey(A, N1, 7, LOGICAL, K2, NOW, LEASE),
                                        new FinishKey(A, N1, 8, LOGICAL, K2, NOW, LEASE),
+                                       new ReleaseKey(B, N2, 9, LOGICAL, K1, NOW, LEASE),
                                        new RemoveOrphanLayout(LOGICAL) };
         for (LayoutTransformation t : all)
         {
@@ -1099,6 +1165,8 @@ public class LayoutTransformationTest
         assertSame(RemoveKey.serializer, CustomTransformation.getSerializer(RemoveKey.NAME));
         assertSame(FinishKey.serializer, CustomTransformation.getSerializer(FinishKey.NAME));
         assertSame(RemoveOrphanLayout.serializer, CustomTransformation.getSerializer(RemoveOrphanLayout.NAME));
+        assertEquals("org.apache.cassandra.autonomic.layout.ReleaseKey", ReleaseKey.NAME);
+        assertSame(ReleaseKey.serializer, CustomTransformation.getSerializer(ReleaseKey.NAME));
         // phase ids are the serialized form
         int[] ids = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
         Phase[] expected = { Phase.ANNOUNCED, Phase.DUAL_WRITE, Phase.BACKFILL, Phase.VERIFY, Phase.CUTOVER, Phase.NEW_ONLY, Phase.CLEANUP,

@@ -19,12 +19,15 @@ package org.apache.cassandra.autonomic.layout;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.membership.NodeId;
@@ -32,7 +35,12 @@ import org.apache.cassandra.tcm.serialization.AsymmetricMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-/** Ends the migration of a key in {@link Phase#CLEANUP}: {@link Phase#STEADY}, owned by no action (design 2.4); advances the claim in the same commit. */
+/**
+ * Ends the migration of a key in {@link Phase#CLEANUP}: {@link Phase#STEADY}, still owned by the action until it has
+ * written the base partition tombstone ({@link ReleaseKey}); advances the claim in the same commit (design 2.4).
+ * Rejected unless the reconcile generation was started and every natural replica of the key's token in the placement
+ * of this epoch has reported it (ADR-033): a replica that joined after the owner's last check has not.
+ */
 public final class FinishKey extends LayoutTransformation
 {
     public static final String NAME = "org.apache.cassandra.autonomic.layout.FinishKey";
@@ -80,7 +88,10 @@ public final class FinishKey extends LayoutTransformation
     @Override
     LayoutRegistry.Result apply(LayoutRegistry registry, ClusterMetadata prev)
     {
-        return registry.withFinishedKey(logical, keyBytes, claim.actionId, prev.nextEpoch(), claim.nowMillis);
+        TableLayout layout = registry.layout(logical);
+        TableMetadata table = prev.schema.getTableMetadata(logical);
+        Set<NodeId> replicas = layout == null || table == null ? Collections.emptySet() : NaturalReplicas.of(prev, table, keyBytes);
+        return registry.withFinishedKey(logical, keyBytes, claim.actionId, replicas, prev.nextEpoch(), claim.nowMillis);
     }
 
     @Override

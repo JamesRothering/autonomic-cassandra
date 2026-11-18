@@ -35,12 +35,15 @@ import org.apache.cassandra.autonomic.coord.TcmEnvironment;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.BucketFunction;
 import org.apache.cassandra.autonomic.layout.FinishKey;
+import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.LayoutService;
+import org.apache.cassandra.autonomic.layout.NaturalReplicas;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
+import org.apache.cassandra.autonomic.layout.ReportBackfill;
 import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Clustering;
@@ -53,6 +56,8 @@ import org.apache.cassandra.distributed.test.TestBaseImpl;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.ClusterMetadataService;
+import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -128,6 +133,20 @@ public class LayoutWritesTest extends TestBaseImpl
             TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
             if (to == Phase.STEADY)
             {
+                // FinishKey needs a reconcile generation reported by every natural replica (ADR-033); the tests that
+                // drive the registry by hand report it by hand too
+                KeyState state = LayoutRegistry.of(ClusterMetadata.current()).layout(logical).keyState(key());
+                if (!state.backfillDue())
+                {
+                    AdvanceLayout a = new AdvanceLayout(now.actionId, now.owner, now.step, logical, key(), Phase.CLEANUP, Phase.CLEANUP, state.generation + 1,
+                                                        Clock.Global.currentTimeMillis(), 600_000);
+                    assertTrue(c.commitInstead(now, a.wrap(), Phase.CLEANUP.name(), now.state).ok());
+                    state = LayoutRegistry.of(ClusterMetadata.current()).layout(logical).keyState(key());
+                }
+                for (NodeId replica : NaturalReplicas.of(ClusterMetadata.current(), Schema.instance.getTableMetadata(logical), key()))
+                    if (!state.backfillDone.contains(replica))
+                        ClusterMetadataService.instance().commit(new ReportBackfill(logical, key(), state.generation, state.generationEpoch, replica).wrap());
+                now = c.ownClaim(UUID.fromString(id));
                 FinishKey f = new FinishKey(now.actionId, now.owner, now.step, logical, key(), Clock.Global.currentTimeMillis(), 600_000);
                 assertTrue(c.commitInstead(now, f.wrap(), to.name(), now.state).ok());
             }

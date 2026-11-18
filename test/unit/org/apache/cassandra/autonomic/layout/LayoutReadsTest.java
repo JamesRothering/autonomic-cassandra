@@ -652,25 +652,28 @@ public class LayoutReadsTest extends CQLTester
     // ---- serial reads ----
 
     @Test
-    public void serialReadsAreRejectedOnceTheOverflowTableIsRead()
+    public void serialReadsAreRejectedInEveryPhase()
     {
+        // ADR-032: from ANNOUNCED on, like a lightweight transaction, whichever copy the key is read from
         for (Phase phase : Phase.values())
         {
             for (ConsistencyLevel cl : new ConsistencyLevel[]{ ConsistencyLevel.SERIAL, ConsistencyLevel.LOCAL_SERIAL })
             {
-                metadata.set(keyIn(phase));
-                reads.clear();
-                try
+                for (String where : new String[]{ " WHERE p = 1 AND c1 = 2 AND c2 = 3", " WHERE p = 1" })
                 {
-                    execute("SELECT * FROM " + keyspace() + '.' + t + " WHERE p = 1 AND c1 = 2 AND c2 = 3", cl, 0, null);
-                    assertTrue(phase + " reads the overflow table", phase.coordinatorClass < 2);
-                    assertEquals(List.of("base"), reads);
-                }
-                catch (InvalidRequestException e)
-                {
-                    assertTrue(phase + " reads the base table: " + e.getMessage(), phase.coordinatorClass >= 2);
-                    assertEquals(cl + " reads are not supported on partition 0x00000001 of " + keyspace() + '.' + t + " while it is adapted", e.getMessage());
-                    assertEquals(List.of(), reads);
+                    metadata.set(keyIn(phase));
+                    reads.clear();
+                    try
+                    {
+                        execute("SELECT * FROM " + keyspace() + '.' + t + where, cl, 0, null);
+                        fail(phase + " " + cl + where + ": a serial read of an adapted key must be rejected");
+                    }
+                    catch (InvalidRequestException e)
+                    {
+                        assertEquals("Lightweight transactions are not supported on partition 0x00000001 of " + keyspace() + '.' + t + " while it is adapted",
+                                     e.getMessage());
+                        assertEquals(phase + ": nothing was read", List.of(), reads);
+                    }
                 }
             }
         }

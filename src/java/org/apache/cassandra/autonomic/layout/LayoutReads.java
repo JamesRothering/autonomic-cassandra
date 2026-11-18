@@ -176,7 +176,7 @@ public final class LayoutReads
     /**
      * Hook H17. Returns null if the caller must continue on the stock path, else the result of the group.
      *
-     * @throws InvalidRequestException for a serial read of a key in class C2 or C3
+     * @throws InvalidRequestException for a serial read of a key in the registry, in any phase (ADR-032)
      * @throws ReadTimeoutException if the routing of a key changed during each of {@link #MAX_ATTEMPTS} executions
      */
     public static PartitionIterator read(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
@@ -646,16 +646,18 @@ public final class LayoutReads
         boolean replaced = false;
         for (int i = 0; i < routed.length; i++)
         {
-            if (routed[i] == null || routed[i].coordinatorClass() < 2)
+            if (routed[i] == null)
                 continue;
+            // ADR-032: a serial read runs Paxos on the base partition, in every class, like the LWT of hook H19
             if (consistencyLevel.isSerialConsistency())
             {
                 SinglePartitionReadCommand command = group.queries.get(i);
-                throw new InvalidRequestException(consistencyLevel + " reads are not supported on partition 0x"
-                                                  + ByteBufferUtil.bytesToHex(command.partitionKey().getKey()) + " of " + command.metadata()
-                                                  + " while it is adapted");
+                throw new InvalidRequestException("Lightweight transactions are not supported on partition 0x"
+                                                  + ByteBufferUtil.bytesToHex(command.partitionKey().getKey()) + " of " + command.metadata().keyspace
+                                                  + '.' + command.metadata().name + " while it is adapted");
             }
-            replaced = true;
+            if (routed[i].coordinatorClass() >= 2)
+                replaced = true;
         }
         if (!replaced)
             return materialize(stock(group, consistencyLevel, requestTime));

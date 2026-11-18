@@ -48,7 +48,10 @@ public final class KeyState
     public final Epoch generationEpoch;
     /** Replicas that finished {@link #generation}; sorted, at most {@link LayoutRegistry#MAX_BACKFILL_NODES}. */
     public final ImmutableSortedSet<NodeId> backfillDone;
-    /** The action that owns the current migration; null in {@link Phase#STEADY}. */
+    /**
+     * The action that owns the current migration. In {@link Phase#STEADY} it stays until that action has written the
+     * base partition tombstone ({@code ReleaseKey}), then it is null (ADR-033).
+     */
     public final UUID actionId;
     /**
      * Proposer-supplied time at which this incarnation entered {@link Phase#DUAL_WRITE}; 0 before that. No later
@@ -113,9 +116,16 @@ public final class KeyState
                             Objects.requireNonNull(newActionId), dualWriteSinceMillis);
     }
 
+    /** {@link Phase#STEADY}, still owned by the action until its base partition tombstone is written. */
     KeyState finished(Epoch epoch, long nowMillis)
     {
-        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis);
+        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis);
+    }
+
+    /** The same state owned by no action ({@code ReleaseKey}). */
+    KeyState withoutAction()
+    {
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis);
     }
 
     /**

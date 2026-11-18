@@ -53,6 +53,11 @@ public final class SplitEvaluation
     public static final String P_OPS_SHARE = P_PREFIX + "ops_share";
     /** {@code partition_size_only}: the split bounds the partition's size and moves no load (design 7.2 step 5). */
     public static final String P_SIZE_ONLY = P_PREFIX + "size_only";
+    /**
+     * The claim state entry that holds the whole baseline ({@link Baseline#encode}): one entry instead of one per
+     * number, because a claim holds at most 16.
+     */
+    public static final String S_BASELINE = "baseline";
 
     private SplitEvaluation()
     {
@@ -87,9 +92,33 @@ public final class SplitEvaluation
                                 opsShare, sizeOnly);
         }
 
-        /** Null if the map carries no baseline. */
+        /** {@code name=value} pairs of {@link #toParams} without the prefix, separated by {@code ;}. */
+        public String encode()
+        {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : toParams().entrySet())
+                sb.append(sb.length() == 0 ? "" : ";").append(e.getKey().substring(P_PREFIX.length())).append('=').append(e.getValue());
+            return sb.toString();
+        }
+
+        /**
+         * Null if the map carries no baseline: the action parameters (one {@link #P_PREFIX} entry per number) or the
+         * claim state ({@link #S_BASELINE}).
+         */
         public static Baseline fromMap(Map<String, String> map)
         {
+            String encoded = map.get(S_BASELINE);
+            if (encoded != null)
+            {
+                Map<String, String> params = new LinkedHashMap<>();
+                for (String pair : encoded.split(";"))
+                {
+                    int eq = pair.indexOf('=');
+                    if (eq > 0)
+                        params.put(P_PREFIX + pair.substring(0, eq), pair.substring(eq + 1));
+                }
+                map = params;
+            }
             if (!map.containsKey(P_READS) && !map.containsKey(P_WRITES) && !map.containsKey(P_OPS_SHARE))
                 return null;
             return new Baseline(number(map, P_READ_MICROS), number(map, P_WRITE_MICROS), number(map, P_ERROR_RATE),

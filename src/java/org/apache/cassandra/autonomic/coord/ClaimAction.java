@@ -20,6 +20,7 @@ package org.apache.cassandra.autonomic.coord;
 import java.io.IOException;
 import java.util.Objects;
 
+import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -30,6 +31,10 @@ import org.apache.cassandra.tcm.serialization.Version;
 /**
  * Claims a lane for an action, or takes over a lane whose lease has expired; see
  * {@link ClusterLedger#withClaim}. {@code nowMillis} and {@code cooldownMillis} are the proposer's clock and limit.
+ *
+ * <p>One rule of its own (T6.9 review): an expired claim of {@link Lane#SCHEMA_LAYOUT} whose action owns a key past
+ * its commit point can only be taken over (phase {@link Claim#RECOVERING}, same actuator and target), never replaced
+ * by a new action, which would leave that key owned by an action that no longer exists.
  */
 public final class ClaimAction extends LedgerTransformation
 {
@@ -58,6 +63,15 @@ public final class ClaimAction extends LedgerTransformation
     @Override
     ClusterLedger.Result apply(ClusterLedger ledger, ClusterMetadata prev)
     {
+        Claim held = ledger.claims.get(lane);
+        if (lane == Lane.SCHEMA_LAYOUT && held != null && held.leaseExpiresAtMillis < nowMillis && !held.heldBy(claim.actionId, claim.owner)
+            && !(Claim.RECOVERING.equals(claim.phase) && held.actuator.equals(claim.actuator) && held.target.equals(claim.target)))
+        {
+            String owned = LayoutRegistry.of(prev).postCommitKeyOwnedBy(held.actionId);
+            if (owned != null)
+                return ClusterLedger.rejected("lane " + lane + " is held by action " + held.actionId + ", which owns " + owned
+                                              + " past its commit point; the claim can only be taken over");
+        }
         return ledger.withClaim(lane, claim, nowMillis, cooldownMillis, !prev.inProgressSequences.isEmpty());
     }
 

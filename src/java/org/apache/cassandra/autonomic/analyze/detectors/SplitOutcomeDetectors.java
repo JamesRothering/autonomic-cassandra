@@ -20,11 +20,14 @@ package org.apache.cassandra.autonomic.analyze.detectors;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -35,8 +38,10 @@ import org.apache.cassandra.autonomic.execute.Verdict;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.layout.LayoutEvents;
+import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.tcm.ClusterMetadata;
 
 /**
  * The outcomes of a partition split that an operator should look at (adaptive-schema design 7.3), as WARN diagnoses of
@@ -47,6 +52,7 @@ public final class SplitOutcomeDetectors
 {
     public static final String VERIFY_FAILED = "layout.verify_failed";
     public static final String SPLIT_NOT_EFFECTIVE = "layout.split_not_effective";
+    public static final String ORPHANED = PartitionSplitActuator.ORPHANED;
     public static final long OPEN_MILLIS = 24L * 3_600_000;
 
     private SplitOutcomeDetectors()
@@ -131,6 +137,72 @@ public final class SplitOutcomeDetectors
                                                             + " ended " + r.verdict + ": it stays split; a reverse migration is not available yet",
                                       evidence, null));
             }
+            return out;
+        }
+    }
+
+    /**
+     * A key past its commit point that no action owns (T6.9 review): open while it is orphaned. CRITICAL in NEW_ONLY
+     * and CLEANUP, where its reconcile pass must run before the replicas' tombstone deadline (ADR-031); WARN in STEADY,
+     * where only the base partition tombstone is missing. The policy {@code partition_split} proposes its adoption on
+     * the preferred proposer. Reads the metadata this node has, so every node raises it.
+     */
+    public static final class Orphaned implements Detector
+    {
+        private final Supplier<ClusterMetadata> metadata;
+        private final LongSupplier writeTimeoutMillis;
+        /** First time each orphan was seen here, by diagnosis id. */
+        private final Map<UUID, Long> firstSeen = new HashMap<>();
+
+        public Orphaned(Supplier<ClusterMetadata> metadata, LongSupplier writeTimeoutMillis)
+        {
+            this.metadata = metadata;
+            this.writeTimeoutMillis = writeTimeoutMillis;
+        }
+
+        @Override
+        public String name()
+        {
+            return ORPHANED;
+        }
+
+        @Override
+        public Set<SignalId> requires()
+        {
+            return Collections.emptySet();
+        }
+
+        @Override
+        public List<Diagnosis> analyze(KnowledgeView knowledge)
+        {
+            ClusterMetadata cm = metadata.get();
+            if (cm == null)
+                return Collections.emptyList();
+            long now = knowledge.nowMillis();
+            List<Diagnosis> out = new ArrayList<>();
+            Map<UUID, Long> seen = new HashMap<>();
+            for (PartitionSplitActuator.Orphan o : PartitionSplitActuator.orphans(cm, now, writeTimeoutMillis.getAsLong()))
+            {
+                UUID id = id(ORPHANED, UUID.nameUUIDFromBytes((o.layout.layoutId + ":" + o.keyHex() + ':' + o.state.incarnation + ':' + o.state.actionId)
+                                                              .getBytes(StandardCharsets.UTF_8)));
+                long first = firstSeen.getOrDefault(id, now);
+                seen.put(id, first);
+                boolean steady = o.state.phase == Phase.STEADY;
+                Map<String, String> evidence = new LinkedHashMap<>();
+                evidence.put("key_hex", o.keyHex());
+                evidence.put("table", o.layout.keyspace + '.' + o.layout.logicalName);
+                evidence.put("phase", o.state.phase.name());
+                evidence.put("previous_action", String.valueOf(o.state.actionId));
+                evidence.put("past_tombstone_deadline", Boolean.toString(o.pastLimit));
+                String summary = "Partition 0x" + o.keyHex() + " of " + o.layout.keyspace + '.' + o.layout.logicalName + " is past its split's commit point in "
+                                 + o.state.phase + " and no action owns it" + (steady ? ": its base partition tombstone was not written"
+                                                                                      : o.pastLimit ? ": its reconcile pass can no longer run; it needs an operator"
+                                                                                                    : ": its reconcile pass must run before the tombstone deadline");
+                out.add(new Diagnosis(id, ORPHANED, Subject.partition(o.layout.keyspace, o.layout.logicalName, o.keyHex()),
+                                      steady ? Severity.WARN : Severity.CRITICAL, 1.0, first, now, summary, evidence, null));
+            }
+            firstSeen.keySet().retainAll(seen.keySet());
+            firstSeen.putAll(seen);
             return out;
         }
     }

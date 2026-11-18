@@ -288,6 +288,15 @@ public class ClusterCoordinator implements ChangeListener
      */
     public Outcome claim(Lane lane, UUID actionId, String actuator, String target, String phase, Map<String, String> state)
     {
+        return claim(lane, actionId, actuator, target, phase, state, false);
+    }
+
+    /**
+     * As {@link #claim(Lane, UUID, String, String, String, Map)}; a {@code continuation} (see
+     * {@code Actuator.continuation}) is claimed without the cooldown of the last action on the same target.
+     */
+    public Outcome claim(Lane lane, UUID actionId, String actuator, String target, String phase, Map<String, String> state, boolean continuation)
+    {
         ClusterMetadata metadata = env.metadata();
         ClusterLedger ledger = ClusterLedger.of(metadata);
         NodeId self = self();
@@ -308,7 +317,7 @@ public class ClusterCoordinator implements ChangeListener
         if (claim.invalid() != null)
             return new Outcome(Status.LOST, null, "invalid claim: " + claim.invalid());
         Recent last = ledger.lastRecent(actuator, target);
-        long cooldown = last == null ? 0
+        long cooldown = last == null || continuation ? 0
                                      : last.finalState.startsWith("COMMITTED") ? env.cooldownAfterCommitMillis() : env.cooldownAfterRollbackMillis();
         Committed committed = commit(new ClaimAction(lane, claim, now, cooldown).wrap());
         Claim held = ClusterLedger.of(committed.metadata).claims.get(lane);

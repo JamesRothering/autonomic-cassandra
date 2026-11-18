@@ -60,6 +60,7 @@ import org.apache.cassandra.autonomic.coord.Recent;
 import org.apache.cassandra.autonomic.coord.TcmEnvironment;
 import org.apache.cassandra.autonomic.execute.ActionExecutor;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
+import org.apache.cassandra.autonomic.execute.ActionState;
 import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.ActuatorRegistry;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
@@ -310,6 +311,7 @@ public class AutonomicService implements AutonomicServiceMBean
                                                          this::inNodeExhausted));
         out.add(new SplitOutcomeDetectors.VerifyFailed());
         out.add(new SplitOutcomeDetectors.SplitNotEffective());
+        out.add(new SplitOutcomeDetectors.Orphaned(ClusterMetadata::currentNullable, () -> DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS)));
         return out;
     }
 
@@ -1749,6 +1751,12 @@ public class AutonomicService implements AutonomicServiceMBean
     @Override
     public Map<String, String> resumeSplit(String keyspace, String table, String keyHex)
     {
+        // the preferred proposer may already hold the adoption of an orphaned key for approval: that one is it
+        Subject target = PartitionSplitActuator.target(keyspace, table, keyHex);
+        for (ActionRecord r : requireExecutor().liveActions())
+            if (r.state == ActionState.PROPOSED && r.action.actuator.equals(PartitionSplitActuator.NAME) && r.action.target.equals(target)
+                && PartitionSplitActuator.MODE_RESUME.equals(r.action.params.get(PartitionSplitActuator.PARAM_MODE)))
+                return describe(r);
         return proposeSplit(keyspace, table, keyHex, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME));
     }
 

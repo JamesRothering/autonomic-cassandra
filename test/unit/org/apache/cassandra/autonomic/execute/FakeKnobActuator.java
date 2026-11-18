@@ -41,6 +41,8 @@ public class FakeKnobActuator implements Actuator
     public volatile long value = 64;
     public volatile ActionScope scope = ActionScope.NODE;
     public volatile boolean reversible = true;
+    /** Every action of this actuator is a continuation of committed work (Actuator#continuation). */
+    public volatile boolean continuation;
     public volatile Fail failApply = Fail.NONE;
     public volatile boolean failRollback;
     public volatile String invalid;
@@ -71,6 +73,12 @@ public class FakeKnobActuator implements Actuator
     public boolean reversible()
     {
         return reversible;
+    }
+
+    @Override
+    public boolean continuation(Action action)
+    {
+        return continuation;
     }
 
     @Override

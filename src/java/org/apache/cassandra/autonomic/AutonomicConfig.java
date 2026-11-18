@@ -139,6 +139,12 @@ public class AutonomicConfig
         public String commit_approval = "manual";
         /** How long CLEANUP waits for late base-only writes before the reconcile pass (design 4.6). */
         public DurationSpec.LongMillisecondsBound straggler_window = new DurationSpec.LongMillisecondsBound("3h");
+        /**
+         * What the commit point keeps free for the reconcile pass of CLEANUP, its acknowledgement and FinishKey: the
+         * commit is taken only if {@code straggler_window} plus this (and two acknowledgement polls) still ends before
+         * the replicas' tombstone deadline (ADR-031); otherwise the migration rolls back from CUTOVER.
+         */
+        public DurationSpec.LongMillisecondsBound reconcile_budget = new DurationSpec.LongMillisecondsBound("30m");
         /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
         public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
 

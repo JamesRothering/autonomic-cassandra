@@ -41,8 +41,8 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  * else of the key changes: not its phase, phase epoch, generation or reports, so routing (ADR-027) is unaffected.
  *
  * <p>Accepted when the key is in {@code phase}, is owned by {@code previousActionId}, and that action holds no lane of
- * the ledger; or, unchanged, when it is already owned by this action. A key in {@link Phase#STEADY} is owned by nobody
- * and is not adopted.
+ * the ledger; or, unchanged, when it is already owned by this action. A key in {@link Phase#STEADY} is owned only until
+ * its base partition tombstone is written, and only then can it be adopted.
  */
 public final class AdoptKey extends LayoutTransformation
 {

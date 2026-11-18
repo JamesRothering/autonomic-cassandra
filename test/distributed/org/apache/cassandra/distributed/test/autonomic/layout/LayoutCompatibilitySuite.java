@@ -305,6 +305,8 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
                 ClusterUtils.waitForCMSToQuiesce(cluster, cluster.get(1));
             if (current == Phase.BACKFILL)
                 BackfillTest.awaitBackfill(cluster, 1, replicas, 120);
+            if (current == Phase.CLEANUP)
+                reconcile();
             if (paging != null)
                 resumePagingState(paging, from + " -> " + current);
             if (s.hold)
@@ -351,6 +353,25 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
                 assertTrue(c.commitInstead(now, a.wrap(), toName, now.state).ok());
             }
         });
+    }
+
+    /**
+     * The reconcile generation of CLEANUP, reported by every replica: FinishKey requires it (ADR-033). Run once the key
+     * is in CLEANUP and every node has caught up, so that the STEADY step stays a single commit.
+     */
+    private void reconcile() throws InterruptedException
+    {
+        String id = actionId;
+        cluster.get(1).runOnInstance(() -> {
+            ClusterCoordinator c = coordinator();
+            Claim now = c.ownClaim(UUID.fromString(id));
+            TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
+            AdvanceLayout a = new AdvanceLayout(now.actionId, now.owner, now.step, logical, key(K), Phase.CLEANUP, Phase.CLEANUP, 2,
+                                                Clock.Global.currentTimeMillis(), 600_000);
+            assertTrue(c.commitInstead(now, a.wrap(), Phase.CLEANUP.name(), now.state).ok());
+        });
+        ClusterUtils.waitForCMSToQuiesce(cluster, cluster.get(1));
+        BackfillTest.awaitBackfill(cluster, 2, replicas, 120);
     }
 
     /** The phase of the key as the node sees it; null if the key is not registered. */
@@ -747,18 +768,17 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
             }
             c += 10;
 
-            // SERIAL and LOCAL_SERIAL reads (3.4, 3.6): rejected where the overflow table is read (C2, C3), the model's answer elsewhere
+            // SERIAL and LOCAL_SERIAL reads (3.6, ADR-032): rejected like an LWT once the key is registered, in every class; the model's answer otherwise
             for (ConsistencyLevel cl : new ConsistencyLevel[]{ ConsistencyLevel.SERIAL, ConsistencyLevel.LOCAL_SERIAL })
                 for (String read : new String[]{ "SELECT * FROM %s WHERE p = 1 AND c1 = 2 AND c2 = 3", "SELECT * FROM %s WHERE p = 1" })
                 {
-                    if (p != null && p.coordinatorClass >= 2)
-                        expectRejected(where + " " + cl + " read", node, p, read.replace("%s", t), cl,
-                                       cl + " reads are not supported on partition 0x00000001 of " + t + " while it is adapted");
+                    if (p != null)
+                        expectRejected(where + " " + cl + " read", node, p, read.replace("%s", t), cl, ADAPTED);
                     else
                     {
                         String text = attempt(node, read.replace("%s", t), cl);
                         if (text != null)
-                            failures.add(where + " (sees " + p + "): " + cl + " read of the partition is documented as accepted (3.4 replaces only C2 and C3 reads), got: " + text);
+                            failures.add(where + " (sees " + p + "): " + cl + " read of a partition that is not registered must be accepted, got: " + text);
                         else if (!Arrays.deepEquals(cluster.coordinator(node).execute(read.replace("%s", twin), cl), cluster.coordinator(node).execute(read.replace("%s", t), cl)))
                             failures.add(where + " (sees " + p + "): " + cl + " read differs from the model: " + read);
                     }

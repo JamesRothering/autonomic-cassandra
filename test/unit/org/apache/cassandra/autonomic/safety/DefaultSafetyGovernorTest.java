@@ -331,6 +331,32 @@ public class DefaultSafetyGovernorTest
         assertTrue(quarantined.isEmpty());
     }
 
+    /** T6.9 review (T6.13 finding): continuing committed work is not new work: no cooldown, no rule 10. */
+    @Test
+    public void check08_aContinuationOfCommittedWorkIsExemptFromTheCooldownAndRule10()
+    {
+        actuator.reversible = false;
+        UUID critical = UUID.randomUUID();
+        view.setActiveDiagnoses(List.of(new Diagnosis(critical, "y", Subject.node(), Severity.CRITICAL, 1, 0, 0, "", Map.of(), null)));
+        Action a = action("t");
+        assertEquals(Decision.approve(), governor.evaluate(new ActionRecord(a, ActionState.PROPOSED, now.get(), critical, "policy", false, null, Map.of(),
+                                                                            Map.of(), Map.of(), null, now.get()), view));
+        // the stopped split: COMMITTED (cleanup pending) puts the irreversible cooldown of a day on the target
+        outcome(a, ActionState.COMMITTED, Reasons.COMMITTED_CLEANUP_PENDING);
+        now.addAndGet(HOUR);
+        assertRejected(Reasons.COOLDOWN, governor.evaluate(new ActionRecord(action("t"), ActionState.PROPOSED, now.get(), critical, "policy", false, null,
+                                                                            Map.of(), Map.of(), Map.of(), null, now.get()), view));
+        // its continuation (a resume past the commit point) is exempt, without a CRITICAL diagnosis too
+        actuator.continuation = true;
+        Action resume = action("t");
+        assertEquals(Decision.approve(), evaluate(resume));
+        outcome(resume, ActionState.COMMITTED, null);
+        // a new action on the target is still cooling down
+        actuator.continuation = false;
+        assertRejected(Reasons.COOLDOWN, governor.evaluate(new ActionRecord(action("t"), ActionState.PROPOSED, now.get(), critical, "policy", false, null,
+                                                                            Map.of(), Map.of(), Map.of(), null, now.get()), view));
+    }
+
     @Test
     public void check08_cooldownAfterCommitAndAfterRollback()
     {

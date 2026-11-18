@@ -182,7 +182,7 @@ public class PartitionSplitPolicy implements Policy
     @Override
     public Set<String> handles()
     {
-        return Set.of(HotPartitionDetector.NAME);
+        return Set.of(HotPartitionDetector.NAME, PartitionSplitActuator.ORPHANED);
     }
 
     /** The number of buckets of design 7.2 step 4: {@code clamp(nextPowerOfTwo(ceil(share / target_share)), 4, 32)}. */
@@ -220,6 +220,8 @@ public class PartitionSplitPolicy implements Policy
     @Override
     public Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge)
     {
+        if (PartitionSplitActuator.ORPHANED.equals(diagnosis.type))
+            return adoption(diagnosis, knowledge);
         long now = knowledge.nowMillis();
         states.values().removeIf(s -> now - s.lastSeenMillis > STATE_TTL_MILLIS);
         AutonomicConfig.LayoutConfig lc = config.layout;
@@ -379,6 +381,36 @@ public class PartitionSplitPolicy implements Policy
                                          config.layout.profile_window, buckets, probed.rows, probed.estimatedBytes(),
                                          sizeOnly ? "; expected_benefit=partition_size_only" : "");
         return new Plan(UUID.randomUUID(), diagnosis.id, NAME, List.of(action), rationale);
+    }
+
+    /**
+     * {@code layout.orphaned} (T6.9 review): the preferred proposer proposes {@code layout resume} of the key, which
+     * adopts it through {@code AdoptKey} and finishes its cleanup. The governor judges it like any other proposal
+     * (approval manual by default); the actuator declares it a continuation, exempt from the cooldown its stopped
+     * predecessor left. Nothing while the lane is claimed, a split action is live here, a member is down (a claim of
+     * the lane needs them all) or the replicas' limit has passed (resume refuses that key).
+     */
+    private Optional<Plan> adoption(Diagnosis diagnosis, KnowledgeView knowledge)
+    {
+        if (!env.preferredProposer())
+            return Optional.empty();
+        Subject subject = diagnosis.subject;
+        String keyHex = diagnosis.evidence.get("key_hex");
+        if (keyHex == null || "true".equals(diagnosis.evidence.get("past_tombstone_deadline")))
+            return Optional.empty();
+        ClusterMetadata cm = env.metadata();
+        TableMetadata table = cm.schema.getTableMetadata(subject.keyspace, subject.table);
+        if (table == null || busy(cm, knowledge, null) || !env.membersNotAlive().isEmpty() || !cm.inProgressSequences.isEmpty())
+            return Optional.empty();
+        Subject target = PartitionSplitActuator.target(table.keyspace, table.name, keyHex);
+        VerifySpec verify = new VerifySpec(Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS, Subject.table(table.keyspace, table.name), true, 0.0,
+                                           List.of(), 0, 0);
+        Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), PartitionSplitActuator.NAME, ActionScope.CLUSTER, target,
+                                   PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME), verify);
+        LayoutAnnotations.set(subject, "proposed(adoption)");
+        return Optional.of(new Plan(UUID.randomUUID(), diagnosis.id, NAME, List.of(action),
+                                    "partition " + keyHex + " of " + table.keyspace + '.' + table.name + " is past its commit point in "
+                                    + diagnosis.evidence.get("phase") + " with no owner: adopt it and finish its cleanup"));
     }
 
     private Optional<Plan> no(Subject subject, String reason)

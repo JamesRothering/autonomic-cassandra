@@ -62,6 +62,18 @@ public interface Actuator
     }
 
     /**
+     * True if the action continues work that an earlier action committed and left unfinished (FC5), such as the
+     * cleanup of a partition split stopped past its commit point. It makes no new change, so it is exempt from the
+     * governor's {@code COOLDOWN} (which the earlier action's outcome set on the same dedupe key) and from rule 10 of
+     * overview 7.3, and its claim from the ledger's cooldown; a new action on the same target is not. Cheap, side-effect
+     * free and thread-safe, like {@link #validate}.
+     */
+    default boolean continuation(Action action)
+    {
+        return false;
+    }
+
+    /**
      * Makes the change. Must return what rollback needs. Must be idempotent for a given action id. If it can throw
      * after changing something it must have called {@link ActionContext#recordUndo} first.
      */

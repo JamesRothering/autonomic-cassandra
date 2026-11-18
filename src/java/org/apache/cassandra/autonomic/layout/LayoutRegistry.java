@@ -21,6 +21,8 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import com.google.common.collect.ImmutableMap;
@@ -35,6 +37,7 @@ import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.extensions.ExtensionValue;
 import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.serialization.Version;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * The layout registry of design 2.3: the {@link TableLayout} of every logical table that has one. Immutable.
@@ -249,8 +252,9 @@ public final class LayoutRegistry
     }
 
     /**
-     * {@code AdoptKey}: the key must be in {@code phase}, not {@link Phase#STEADY}, and owned by {@code previous}; it
-     * becomes owned by {@code actionId} and nothing else changes. Already owned by {@code actionId}: unchanged.
+     * {@code AdoptKey}: the key must be in {@code phase} and owned by {@code previous} (a {@link Phase#STEADY} key is
+     * owned only until its base partition tombstone is written); it becomes owned by {@code actionId} and nothing else
+     * changes. Already owned by {@code actionId}: unchanged.
      */
     public Result withAdoptedKey(TableId logical, ByteBuffer key, Phase phase, UUID previous, UUID actionId)
     {
@@ -263,7 +267,7 @@ public final class LayoutRegistry
         KeyState state = layout.keyState(key);
         if (state.phase != phase)
             return reject("key is in phase " + state.phase + ", not " + phase);
-        if (state.phase == Phase.STEADY || state.actionId == null)
+        if (state.actionId == null)
             return reject("key is in phase " + state.phase + " and owned by no action");
         if (actionId.equals(state.actionId))
             return new Result(this, null, true);
@@ -290,10 +294,15 @@ public final class LayoutRegistry
         return changed(logical, remaining.keys.isEmpty() ? null : remaining);
     }
 
-    /** {@code FinishKey}: the key must be {@link Phase#CLEANUP} and owned by {@code actionId}; it becomes {@link Phase#STEADY}, owned by nobody. */
-    public Result withFinishedKey(TableId logical, ByteBuffer key, UUID actionId, Epoch epoch, long nowMillis)
+    /**
+     * {@code FinishKey}: the key must be {@link Phase#CLEANUP}, owned by {@code actionId}, with its reconcile generation
+     * reported by every one of {@code replicas}, the natural replicas of its token at this epoch (ADR-033); it becomes
+     * {@link Phase#STEADY}, still owned by {@code actionId} until its base partition tombstone is written
+     * ({@link #withReleasedKey}).
+     */
+    public Result withFinishedKey(TableId logical, ByteBuffer key, UUID actionId, Set<NodeId> replicas, Epoch epoch, long nowMillis)
     {
-        if (logical == null || key == null || actionId == null)
+        if (logical == null || key == null || actionId == null || replicas == null)
             return reject("missing argument");
         String missing = lookup(logical, key);
         if (missing != null)
@@ -304,7 +313,60 @@ public final class LayoutRegistry
             return reject("key is in phase " + state.phase + ", not " + Phase.CLEANUP);
         if (!actionId.equals(state.actionId))
             return reject("key is owned by action " + state.actionId + ", not " + actionId);
+        if (!state.backfillDue())
+            return reject("the reconcile generation of the key has not started");
+        if (replicas.isEmpty())
+            return reject("the key has no natural replica in the placement");
+        Set<NodeId> unreported = new TreeSet<>(replicas);
+        unreported.removeAll(state.backfillDone);
+        if (!unreported.isEmpty())
+        {
+            StringBuilder ids = new StringBuilder();
+            for (NodeId node : unreported)
+                ids.append(ids.length() == 0 ? "" : ", ").append(node.id());
+            return reject("natural replicas [" + ids + "] have not reported reconcile generation " + state.generation);
+        }
         return changed(logical, layout.withKey(key, state.finished(epoch, nowMillis)));
+    }
+
+    /**
+     * {@code ReleaseKey}: the key must be {@link Phase#STEADY} and owned by {@code actionId}, whose base partition
+     * tombstone is written; it becomes owned by nobody. Already owned by nobody: unchanged.
+     */
+    public Result withReleasedKey(TableId logical, ByteBuffer key, UUID actionId)
+    {
+        if (logical == null || key == null || actionId == null)
+            return reject("missing argument");
+        String missing = lookup(logical, key);
+        if (missing != null)
+            return reject(missing);
+        TableLayout layout = byLogical.get(logical);
+        KeyState state = layout.keyState(key);
+        if (state.phase != Phase.STEADY)
+            return reject("key is in phase " + state.phase + ", not " + Phase.STEADY);
+        if (state.actionId == null)
+            return new Result(this, null, true);
+        if (!actionId.equals(state.actionId))
+            return reject("key is owned by action " + state.actionId + ", not " + actionId);
+        return changed(logical, layout.withKey(key, state.withoutAction()));
+    }
+
+    /**
+     * A key past its commit point ({@link Phase#NEW_ONLY}, {@link Phase#CLEANUP}, or {@link Phase#STEADY} without
+     * its base partition tombstone) owned by the action, as {@code ks.table key 0x..}; null if there is none.
+     */
+    public String postCommitKeyOwnedBy(UUID actionId)
+    {
+        if (actionId == null)
+            return null;
+        for (TableLayout layout : byLogical.values())
+            for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
+            {
+                KeyState state = e.getValue();
+                if (actionId.equals(state.actionId) && state.phase.coordinatorClass == 3)
+                    return layout.keyspace + '.' + layout.logicalName + " key 0x" + ByteBufferUtil.bytesToHex(e.getKey()) + " in " + state.phase;
+            }
+        return null;
     }
 
     /** {@code RemoveOrphanLayout}: removes the layout of the logical table, whatever the state of its keys. */

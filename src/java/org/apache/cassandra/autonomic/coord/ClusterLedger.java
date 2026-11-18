@@ -171,6 +171,12 @@ public final class ClusterLedger
         return new Result(null, reason, false);
     }
 
+    /** A rejection, for a transformation that adds a rule of its own to a ledger transition. */
+    static Result rejected(String reason)
+    {
+        return reject(reason);
+    }
+
     /** {@code SetClusterActionsEnabled}: always accepted. Claims in flight are not touched by disabling. */
     public Result withEnabled(boolean enabled)
     {

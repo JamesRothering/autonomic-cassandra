@@ -3213,6 +3213,11 @@ storage_compatibility_mode: NONE
 #     commit_approval: manual
 #     # CLEANUP waits this long for late writes before the reconcile pass and the base partition tombstone
 #     straggler_window: 3h
+#     # the commit point is taken only while straggler_window plus reconcile_budget (the reconcile pass, its
+#     # acknowledgement and FinishKey) still end before the replicas stop copying, half of gc_grace_seconds after
+#     # DUAL_WRITE started; otherwise the split rolls back from CUTOVER. A table whose gc_grace_seconds cannot fit one
+#     # migration under these windows is refused when the split is proposed
+#     reconcile_budget: 30m
 #     # longest time before the commit point (the deadline is also kept below half of gc_grace_seconds)
 #     max_migration_duration: 24h
 #     # triggering. A hot_partition diagnosis open for for_evaluations evaluations is looked at by the policy on the

@@ -21,7 +21,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -38,6 +37,9 @@ import org.junit.Test;
 import org.mockito.Mockito;
 
 import org.apache.cassandra.autonomic.AutonomicConfig;
+import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.detectors.SplitOutcomeDetectors;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
@@ -45,7 +47,11 @@ import org.apache.cassandra.autonomic.coord.FakeCluster;
 import org.apache.cassandra.autonomic.coord.Lane;
 import org.apache.cassandra.autonomic.coord.Recent;
 import org.apache.cassandra.autonomic.execute.ActionContext;
+import org.apache.cassandra.autonomic.execute.ActionExecutor;
+import org.apache.cassandra.autonomic.execute.ActionRecord;
+import org.apache.cassandra.autonomic.execute.ActuatorRegistry;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
+import org.apache.cassandra.autonomic.execute.ManualScheduler;
 import org.apache.cassandra.autonomic.execute.StepResult;
 import org.apache.cassandra.autonomic.execute.Verdict;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
@@ -57,8 +63,10 @@ import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.LayoutVerifier;
+import org.apache.cassandra.autonomic.layout.NaturalReplicas;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
+import org.apache.cassandra.autonomic.layout.ReleaseKey;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.autonomic.layout.ReportBackfill;
 import org.apache.cassandra.autonomic.layout.SplitEvaluation;
@@ -73,6 +81,9 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.DurationSpec;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.locator.Replica;
 import org.apache.cassandra.schema.DistributedSchema;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
@@ -85,7 +96,10 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.MultiStepOperation;
 import org.apache.cassandra.tcm.Transformation;
+import org.apache.cassandra.tcm.membership.MembershipUtils;
 import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.ownership.DataPlacement;
+import org.apache.cassandra.tcm.ownership.DataPlacements;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -181,15 +195,15 @@ public class PartitionSplitActuatorTest
     {
         /** False: some node does not answer the watermark request. */
         volatile boolean allAnswer = true;
-        /** The highest epoch the watermark answered true for. */
-        Epoch acknowledgedUpTo = Epoch.EMPTY;
-        Set<NodeId> replicas = new LinkedHashSet<>();
-        Epoch replicasModified = Epoch.EMPTY;
+        /** A node whose metadata stays at {@link #laggingAt}, the epoch it reports; null: every node has the log's. */
+        NodeId lagging;
+        Epoch laggingAt;
         /** Results of the next checks, in order; a passing check when empty. */
         final List<FakeCheck> checks = new ArrayList<>();
         int checksStarted;
         final List<String> writes = new ArrayList<>();
         boolean failDeletes;
+        boolean failBase;
 
         @Override
         public ClusterMetadata metadata()
@@ -197,14 +211,26 @@ public class PartitionSplitActuatorTest
             return cluster.log;
         }
 
+        /** The epoch each directory member would report: the log's, or its own if it lags. */
+        Epoch reported(NodeId node)
+        {
+            return node.equals(lagging) ? laggingAt : cluster.log.epoch;
+        }
+
+        /** True if every directory member has seen {@code epoch}, whatever the actuator asked. */
+        boolean allAt(Epoch epoch)
+        {
+            for (NodeId node : cluster.log.directory.peerIds())
+                if (epoch.isAfter(reported(node)))
+                    return false;
+            return true;
+        }
+
+        /** Rule O1 as EpochWatermarks answers it: every member reports an epoch at or after {@code epoch}. */
         @Override
         public boolean acknowledged(Epoch epoch)
         {
-            if (!allAnswer || epoch.isAfter(cluster.log.epoch))
-                return false;
-            if (epoch.isAfter(acknowledgedUpTo))
-                acknowledgedUpTo = epoch;
-            return true;
+            return allAnswer && allAt(epoch);
         }
 
         @Override
@@ -235,26 +261,29 @@ public class PartitionSplitActuatorTest
             if (failDeletes)
                 throw new IllegalStateException("an overflow replica is down");
             KeyState state = layout.keyState(key);
-            writes.add("deleteBuckets " + incarnation + " in " + state.phase + " acknowledged=" + acknowledgedUpTo.isEqualOrAfter(state.phaseEpoch));
+            writes.add("deleteBuckets " + incarnation + " in " + state.phase + " acknowledged=" + allAt(state.phaseEpoch));
         }
 
         @Override
         public void deleteBase(TableMetadata logical, ByteBuffer key, long timestampMicros)
         {
+            if (failBase)
+                throw new IllegalStateException("a base replica is down");
             KeyState state = key(cluster.log);
-            writes.add("deleteBase in " + (state == null ? null : state.phase) + " acknowledged=" + (state != null && acknowledgedUpTo.isEqualOrAfter(state.phaseEpoch)));
+            writes.add("deleteBase in " + (state == null ? null : state.phase) + " acknowledged=" + (state != null && allAt(state.phaseEpoch)));
         }
 
+        /** The placement of the metadata, as in production: what FinishKey checks too. */
         @Override
         public Set<NodeId> replicas(ClusterMetadata metadata, TableMetadata logical, ByteBuffer key)
         {
-            return replicas;
+            return NaturalReplicas.of(metadata, logical, key);
         }
 
         @Override
         public Epoch replicasModified(ClusterMetadata metadata, TableMetadata logical, ByteBuffer key)
         {
-            return replicasModified;
+            return NaturalReplicas.lastModified(metadata, logical, key);
         }
 
         @Override
@@ -314,6 +343,29 @@ public class PartitionSplitActuatorTest
         node2.catchUp();
     }
 
+    /**
+     * The whole ring of the keyspace on these nodes, modified at the epoch of this change: a change of the key's
+     * replica group as the completion test and FinishKey see it.
+     */
+    private void setReplicas(int... nodes)
+    {
+        Epoch at = cluster.log.epoch.nextEpoch();
+        Range<Token> ring = new Range<>(cluster.log.partitioner.getMinimumToken(), new org.apache.cassandra.dht.Murmur3Partitioner.LongToken(Long.MAX_VALUE));
+        DataPlacement.Builder placement = DataPlacement.builder();
+        for (int i : nodes)
+        {
+            Replica replica = Replica.fullReplica(MembershipUtils.endpoint(i), ring);
+            placement.withReadReplica(at, replica).withWriteReplica(at, replica);
+        }
+        cluster.log = cluster.log.transformer().with(DataPlacements.builder(1).with(keyspace().params.replication, placement.build()).build()).build().metadata;
+        catchUp();
+    }
+
+    private Set<NodeId> replicas()
+    {
+        return NaturalReplicas.of(cluster.log, keyspace().tables.getNullable(TABLE), KEY);
+    }
+
     private static TableMetadata logicalTable(int gcGrace)
     {
         return TableMetadata.builder(KS, TABLE).id(LOGICAL)
@@ -347,8 +399,7 @@ public class PartitionSplitActuatorTest
         assertTrue(coordinator1.setEnabled(true));
         node2.catchUp();
         env = new FakeEnv();
-        env.replicas.add(cluster.id(1));
-        env.replicas.add(cluster.id(2));
+        setReplicas(1, 2);
         AutonomicConfig.LayoutConfig lc = config.layout;
         lc.ack_poll_interval = new DurationSpec.IntMillisecondsBound("100ms");
         lc.cas_drain = new DurationSpec.IntMillisecondsBound("500ms");
@@ -401,15 +452,40 @@ public class PartitionSplitActuatorTest
             return this;
         }
 
-        /** A takeover of the expired claim of {@code previous} by this owner's node, as the periodic tick does it. */
-        Owner takeOver(Owner previous)
+        /**
+         * The takeover of the expired claim of {@code previous} by the periodic tick of a {@link ClusterActionExecution}
+         * on this owner's node (overview 6.4), with the node of {@code previous} down so that this node is the
+         * preferred proposer. The recovery is then driven here, step by step, with the O1 check of every commit.
+         */
+        Owner takeOverExpired(Owner previous)
         {
             catchUp();
             Claim expired = coordinator.ledger().claim(previous.id);
+            assertNotNull(expired);
             cluster.now.set(expired.leaseExpiresAtMillis + 1);
-            id = coordinator.newActionId();
-            ClusterCoordinator.Outcome outcome = coordinator.takeOver(Lane.SCHEMA_LAYOUT, expired, id);
-            assertTrue(outcome.toString(), outcome.ok());
+            node.down.add(previous.node.self);
+            ActuatorRegistry registry = new ActuatorRegistry();
+            registry.register(actuator);
+            registry.setEnabled(PartitionSplitActuator.NAME, true);
+            ActionExecutor.Host host = new ActionExecutor.Host()
+            {
+                public String gate() { return null; }
+                public boolean killed() { return false; }
+                public void actionFailed(ActionRecord record, String detail) { }
+            };
+            ActionExecutor.Reporter reporter = (next, from, detail, outcome) -> true;
+            ClusterActionExecution execution = new ClusterActionExecution(cluster.now::get, () -> config, coordinator, registry, new ManualScheduler(),
+                                                                          null, host, () -> reporter);
+            execution.tick();
+            node.down.clear();
+            Claim taken = coordinator.ledger().claims.get(Lane.SCHEMA_LAYOUT);
+            assertNotNull("the tick took the expired claim over", taken);
+            assertEquals(Claim.RECOVERING, taken.phase);
+            assertEquals(node.self, taken.owner);
+            assertFalse(taken.actionId.equals(previous.id));
+            assertEquals(expired.state, taken.state);
+            assertEquals(Collections.singleton(taken.actionId), execution.running());
+            id = taken.actionId;
             entry = Entry.RECOVER;
             return this;
         }
@@ -543,8 +619,8 @@ public class PartitionSplitActuatorTest
             return;
         KeyState state = key(cluster.log);
         assertNotNull(state);
-        assertTrue(child + " committed before every node acknowledged epoch " + state.phaseEpoch.getEpoch() + " of " + state.phase,
-                   env.acknowledgedUpTo.isEqualOrAfter(state.phaseEpoch));
+        assertTrue(child + " committed before every node had epoch " + state.phaseEpoch.getEpoch() + " of " + state.phase,
+                   env.allAt(state.phaseEpoch));
     }
 
     /** The replicas commit their reports, as BackfillTask does, for the generation that is due. */
@@ -553,7 +629,7 @@ public class PartitionSplitActuatorTest
         KeyState state = key(cluster.log);
         if (state == null || !state.backfillDue())
             return;
-        for (NodeId node : env.replicas)
+        for (NodeId node : replicas())
             if (!state.backfillDone.contains(node))
             {
                 Transformation.Result result = new ReportBackfill(LOGICAL, KEY, state.generation, state.generationEpoch, node).wrap().execute(cluster.log);
@@ -626,31 +702,79 @@ public class PartitionSplitActuatorTest
                    key(cluster.log).phaseSinceMillis >= acknowledgedAt + drain);
     }
 
+    /** Node 3 has every epoch before the current phase epoch and not that one: it is one phase behind. */
+    private void lagOnePhaseBehind()
+    {
+        env.lagging = cluster.id(3);
+        env.laggingAt = Epoch.create(key(cluster.log).phaseEpoch.getEpoch() - 1);
+    }
+
+    /** Steps for 30 s of fake time: the key keeps its phase, epoch and generation, and nothing but claim sub-steps is committed. */
+    private void assertHeld(Owner owner, String what) throws Exception
+    {
+        int before = cluster.applied.size();
+        KeyState held = key(cluster.log);
+        int writes = env.writes.size();
+        long until = cluster.now.get() + 30_000;
+        owner.until(o -> cluster.now.get() > until);
+        KeyState now = key(cluster.log);
+        assertNotNull(what, now);
+        assertEquals(what, held.phase, now.phase);
+        assertEquals(what, held.phaseEpoch, now.phaseEpoch);
+        assertEquals(what, held.generation, now.generation);
+        assertEquals(what, held.actionId, now.actionId);
+        for (Transformation t : cluster.applied.subList(before, cluster.applied.size()))
+        {
+            Transformation child = t instanceof CustomTransformation ? ((CustomTransformation) t).child() : t;
+            assertFalse(what + ": " + child, child instanceof AdvanceLayout || child instanceof RemoveKey || child instanceof FinishKey
+                                             || child instanceof ReleaseKey);
+        }
+        assertEquals(what + ": no data was written or deleted " + env.writes, writes, env.writes.size());
+    }
+
     @Test
     public void noTransitionWithoutFullAcknowledgement() throws Exception
     {
-        // in every phase that waits for O1, a node that does not answer holds the key where it is
-        for (Phase phase : new Phase[]{ Phase.ANNOUNCED, Phase.DUAL_WRITE, Phase.BACKFILL, Phase.VERIFY, Phase.CUTOVER, Phase.NEW_ONLY, Phase.CLEANUP })
+        // in every phase that waits for O1, a node one phase behind holds the key where it is: waiting on any earlier
+        // epoch (the generation's, the previous phase's) would let it through
+        String[] points = { "ANNOUNCED", "DUAL_WRITE", "BACKFILL", "VERIFY", "CUTOVER", "NEW_ONLY", "CLEANUP", "CLEANUP_RECONCILE", "STEADY" };
+        for (String point : points)
         {
             setUp();
-            Owner owner = owner().reach(phase);
-            env.allAnswer = false;
-            int before = cluster.applied.size();
-            KeyState held = key(cluster.log);
-            long until = cluster.now.get() + 30_000;
-            owner.until(o -> cluster.now.get() > until);
-            KeyState now = key(cluster.log);
-            assertEquals(phase.name(), held.phase, now.phase);
-            assertEquals(phase.name(), held.phaseEpoch, now.phaseEpoch);
-            assertEquals(phase.name(), held.generation, now.generation);
-            // nothing but renewals and recorded sub-steps of the claim were committed
-            for (Transformation t : cluster.applied.subList(before, cluster.applied.size()))
+            Owner owner = owner();
+            switch (point)
             {
-                Transformation child = t instanceof CustomTransformation ? ((CustomTransformation) t).child() : t;
-                assertFalse(phase + ": " + child, child instanceof AdvanceLayout || child instanceof RemoveKey || child instanceof FinishKey);
+                case "CLEANUP_RECONCILE":
+                    owner.reach(Phase.CLEANUP, true);
+                    break;
+                case "STEADY":
+                    owner.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase));
+                    break;
+                default:
+                    owner.reach(Phase.valueOf(point));
             }
-            env.allAnswer = true;
+            lagOnePhaseBehind();
+            assertHeld(owner, point);
+            env.lagging = null;
             assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+        }
+    }
+
+    @Test
+    public void rollbackDualAndAbortingHoldWithoutAcknowledgement() throws Exception
+    {
+        for (Phase phase : new Phase[]{ Phase.ROLLBACK_DUAL, Phase.ABORTING })
+        {
+            setUp();
+            Owner owner = owner().reach(Phase.CUTOVER);
+            PartitionSplitActuator.requestAbort(coordinator1, () -> cluster.log, PartitionSplitActuator.target(KS, TABLE, KEY_HEX), "test");
+            owner.until(o -> key(cluster.log).phase == phase && o.claim() != null && phase.name().equals(o.claim().phase));
+            lagOnePhaseBehind();
+            // in ABORTING the bucket partitions are not deleted either: a coordinator one phase behind still reads them
+            assertHeld(owner, phase.name());
+            env.lagging = null;
+            assertEquals(StepResult.Kind.ROLLED_BACK, owner.toEnd().kind);
+            assertRemovedAndDropped();
         }
     }
 
@@ -694,8 +818,7 @@ public class PartitionSplitActuatorTest
         owner.until(o -> cluster.now.get() > until);
         assertEquals("one of two replicas reported", Phase.BACKFILL, key(cluster.log).phase);
         // a third replica appears in the placement: the generation restarts and every replica must report it again
-        env.replicas.add(cluster.id(3));
-        env.replicasModified = cluster.log.epoch;
+        setReplicas(1, 2, 3);
         owner.until(o -> key(cluster.log).generation == 2);
         assertTrue(key(cluster.log).backfillDone.isEmpty());
         owner.autoReport = true;
@@ -724,14 +847,14 @@ public class PartitionSplitActuatorTest
     public void placementChangeInVerifyAndCleanupRestartsTheGeneration() throws Exception
     {
         Owner owner = owner().reach(Phase.VERIFY);
-        env.replicasModified = cluster.log.epoch;
+        setReplicas(1, 2);
         owner.until(o -> key(cluster.log).phase == Phase.BACKFILL);
         assertEquals(2, key(cluster.log).generation);
         owner.reportReconcile = false;
         owner.reach(Phase.CLEANUP, true);
         int reconcile = key(cluster.log).generation;
         // a replica group change committed after the reconcile generation started
-        env.replicasModified = cluster.log.epoch.nextEpoch();
+        setReplicas(1, 2);
         owner.until(o -> key(cluster.log).generation == reconcile + 1);
         assertEquals(Phase.CLEANUP, key(cluster.log).phase);
         owner.reportReconcile = true;
@@ -894,9 +1017,34 @@ public class PartitionSplitActuatorTest
     {
         Owner owner = ownerWithProfile().reach(Phase.BACKFILL);
         Map<String, String> state = owner.claim().state;
-        assertEquals("1000.0", state.get(SplitEvaluation.P_READ_MICROS));
-        assertEquals("0.6", state.get(SplitEvaluation.P_OPS_SHARE));
-        assertNotNull(SplitEvaluation.Baseline.fromMap(state));
+        SplitEvaluation.Baseline baseline = SplitEvaluation.Baseline.fromMap(state);
+        assertNotNull(baseline);
+        assertEquals(1000, baseline.readMicros, 0.0);
+        assertEquals(0.6, baseline.opsShare, 0.0);
+        assertEquals("the baseline is one entry of the claim state", 1, state.keySet().stream().filter(k -> k.startsWith("baseline")).count());
+    }
+
+    /** A claim holds 16 entries: a proposed split that fails one verification and is size-only still fits to the end. */
+    @Test
+    public void theClaimStateStaysWithinItsBoundOnTheLongestPath() throws Exception
+    {
+        Map<String, String> params = PartitionSplitActuator.params(4, PartitionSplitActuator.MODE_SPLIT);
+        params.putAll(new SplitEvaluation.Baseline(1000, 500, 0.0, 1000, 1000, 0.6, true).toParams());
+        FakeCheck failed = new FakeCheck();
+        failed.missingFromOverflow = 1;
+        env.checks.add(failed);
+        config.layout.commit_approval = "manual";
+        Owner owner = new Owner(coordinator1, node1, params).claimLane();
+        owner.autoApprove = true;
+        int most = 0;
+        for (int i = 0; i < MAX_STEPS && (owner.last == null || !owner.last.isTerminal()); i++)
+        {
+            owner.step();
+            if (owner.claim() != null)
+                most = Math.max(most, owner.claim().state.size());
+        }
+        assertEquals(StepResult.Kind.COMMITTED, owner.last.kind);
+        assertTrue("at most " + most + " entries", most <= Claim.MAX_STATE_ENTRIES);
     }
 
     @Test
@@ -1119,8 +1267,8 @@ public class PartitionSplitActuatorTest
                     first.reach(Phase.valueOf(point));
                     preCommit = PRE_COMMIT.contains(Phase.valueOf(point));
             }
-            // the first owner is lost; a fresh actuator on node 2 takes the expired claim over
-            Owner second = new Owner(coordinator2, node2).takeOver(first);
+            // the first owner is lost; the tick of node 2 takes the expired claim over for a fresh actuator
+            Owner second = new Owner(coordinator2, node2).takeOverExpired(first);
             StepResult end = second.toEnd();
             if (preCommit)
             {
@@ -1211,11 +1359,275 @@ public class PartitionSplitActuatorTest
         assertFalse("no base tombstone", env.writes.toString().contains("deleteBase"));
         // the status names it; resume refuses it
         List<Map<String, String>> status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT);
-        assertTrue(status.toString(), status.get(0).get("status").startsWith(PartitionSplitActuator.RECONCILE_PAST_DEADLINE));
+        assertTrue(status.toString(), status.get(0).get("status").startsWith(PartitionSplitActuator.ORPHANED + ": " + PartitionSplitActuator.RECONCILE_PAST_DEADLINE));
+        assertTrue(PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).get(0).pastLimit);
         Owner resumed = new Owner(coordinator2, node2, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME));
         Optional<String> refused = resumed.actuator.validate(resumed.action, null);
         assertTrue(refused.isPresent());
         assertTrue(refused.get(), refused.get().contains("tombstone deadline"));
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // the commit window (T6.9 review, fix A)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** gc_grace_seconds 28800 with the default windows: half of it is 4 h after DUAL_WRITE. */
+    private void smallGraceWithDefaultWindows()
+    {
+        setSchema(Keyspaces.of(KeyspaceMetadata.create(KS, KeyspaceParams.simple(2), Tables.of(logicalTable(28800)))));
+        setReplicas(1, 2);
+        AutonomicConfig.LayoutConfig defaults = new AutonomicConfig.LayoutConfig();
+        config.layout.straggler_window = defaults.straggler_window;
+        config.layout.max_migration_duration = defaults.max_migration_duration;
+        config.layout.reconcile_budget = defaults.reconcile_budget;
+    }
+
+    @Test
+    public void commitPointRefusedWhenTheReconcilePassCouldNotEndBeforeTheReplicaLimit() throws Exception
+    {
+        // the review's example: approval at DUAL_WRITE + 59 min; 59 min + 3 h straggler window + 30 min reconcile budget > 4 h
+        smallGraceWithDefaultWindows();
+        config.layout.commit_approval = "manual";
+        Owner owner = owner().reach(Phase.CUTOVER);
+        KeyState state = key(cluster.log);
+        TableMetadata logical = keyspace().tables.getNullable(TABLE);
+        assertNull("one migration fits", owner.actuator.migrationDoesNotFit(logical));
+        long window = owner.actuator.commitWindowEnd(state, logical);
+        assertEquals(state.dualWriteSinceMillis + 4 * 3600_000L - WRITE_TIMEOUT - 3 * 3600_000L - 1800_000L - 2 * 100, window);
+        assertTrue("the owner's deadline would not have stopped it", owner.actuator.preCommitDeadline(state, logical) > state.dualWriteSinceMillis + 59 * 60_000L);
+        cluster.now.set(state.dualWriteSinceMillis + 59 * 60_000L);
+        assertTrue(PartitionSplitActuator.approveCommit(coordinator1, owner.id));
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("the commit window closed"));
+        assertTrue(owner.phases.toString(), owner.phases.containsAll(List.of("CUTOVER/1", "ROLLBACK_DUAL/1", "ABORTING/1", "absent")));
+        assertFalse(owner.phases.toString(), owner.phases.contains("NEW_ONLY/1"));
+        assertFalse("the base copy is never deleted by an abort", env.writes.toString().contains("deleteBase"));
+        assertRemovedAndDropped();
+    }
+
+    @Test
+    public void commitPointTakenInsideTheWindow() throws Exception
+    {
+        smallGraceWithDefaultWindows();
+        Owner owner = owner().reach(Phase.CUTOVER);
+        KeyState state = key(cluster.log);
+        long window = owner.actuator.commitWindowEnd(state, keyspace().tables.getNullable(TABLE));
+        cluster.now.set(window - 10_000);
+        owner.reach(Phase.NEW_ONLY);
+        assertTrue(key(cluster.log).phaseSinceMillis < window);
+    }
+
+    @Test
+    public void aTableWhoseGcGraceCannotFitOneMigrationIsRefusedUpFront()
+    {
+        smallGraceWithDefaultWindows();
+        config.layout.reconcile_budget = new DurationSpec.LongMillisecondsBound("1h");
+        PartitionSplitActuator actuator = new PartitionSplitActuator(env, () -> config);
+        Optional<String> refused = actuator.validate(action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(4, "split")), null);
+        assertTrue(refused.isPresent());
+        assertEquals("gc_grace_seconds 28800 of ks.t leaves no time for a migration: half of it less the write timeout is 14398000 ms, and cutover_soak 1s"
+                     + " + straggler_window 3h + reconcile_budget 1h + 2 x ack_poll_interval 100ms need 14401200 ms", refused.get());
+        config.layout.reconcile_budget = new DurationSpec.LongMillisecondsBound("30m");
+        assertEquals(Optional.empty(), actuator.validate(action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(4, "split")), null));
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // FinishKey after a complete reconcile only (ADR-033, fix B)
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void placementChangeBetweenTheReportsAndFinishKeyStartsANewReconcileGeneration() throws Exception
+    {
+        Owner owner = owner();
+        // every replica reported the reconcile generation and the owner has decided to finish
+        owner.until(o -> o.claim() != null && o.claim().state.containsKey(PartitionSplitActuator.S_FINISHING) && Phase.CLEANUP.name().equals(o.claim().phase));
+        int reconcile = key(cluster.log).generation;
+        // a third node becomes a replica of the key before FinishKey: it has not reported
+        owner.autoReport = false;
+        setReplicas(1, 2, 3);
+        owner.until(o -> key(cluster.log).generation == reconcile + 1);
+        assertEquals(Phase.CLEANUP, key(cluster.log).phase);
+        assertTrue(key(cluster.log).backfillDone.isEmpty());
+        long until = cluster.now.get() + 10_000;
+        owner.until(o -> cluster.now.get() > until);
+        assertEquals("no FinishKey while the new replica has not reported", Phase.CLEANUP, key(cluster.log).phase);
+        owner.autoReport = true;
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+        assertEquals(ImmutableSet.of(cluster.id(1), cluster.id(2), cluster.id(3)), key(cluster.log).backfillDone);
+        assertEquals(reconcile + 1, key(cluster.log).generation);
+    }
+
+    @Test
+    public void finishKeyIsRejectedWhileANaturalReplicaHasNotReported() throws Exception
+    {
+        Owner owner = owner();
+        owner.reportReconcile = false;
+        owner.reach(Phase.CLEANUP, true);
+        KeyState state = key(cluster.log);
+        cluster.log = new ReportBackfill(LOGICAL, KEY, state.generation, state.generationEpoch, cluster.id(1)).wrap().execute(cluster.log).success().metadata;
+        catchUp();
+        Claim claim = owner.claim();
+        Transformation.Result result = new FinishKey(owner.id, claim.owner, claim.step, LOGICAL, KEY, cluster.now.get(), 600_000).wrap().execute(cluster.log);
+        assertTrue(String.valueOf(result), result.isRejected());
+        assertTrue(result.rejected().reason, result.rejected().reason.contains("natural replicas [" + cluster.id(2).id() + "] have not reported"));
+        // the owner waits for it
+        long until = cluster.now.get() + 10_000;
+        owner.until(o -> cluster.now.get() > until);
+        assertEquals(Phase.CLEANUP, key(cluster.log).phase);
+        owner.reportReconcile = true;
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // orphaned keys (fix C) and the continuation of a stopped split (fix I)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** A split stopped past its commit point in {@code phase}: the claim is released, the key keeps its action. */
+    private Owner stoppedIn(Phase phase, boolean reconcileStarted) throws Exception
+    {
+        Owner owner = owner().reach(phase, reconcileStarted);
+        owner.entry = Entry.ABORT;
+        assertEquals(StepResult.Kind.COMMITTED_CLEANUP_PENDING, owner.step().kind);
+        assertEquals(owner.id, key(cluster.log).actionId);
+        return owner;
+    }
+
+    private Owner resumeOn(ClusterCoordinator coordinator, FakeCluster.Node node)
+    {
+        return new Owner(coordinator, node, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME));
+    }
+
+    @Test
+    public void anOrphanedKeyIsDiagnosedShownAndAdopted() throws Exception
+    {
+        for (Phase phase : new Phase[]{ Phase.NEW_ONLY, Phase.CLEANUP })
+        {
+            setUp();
+            Owner owner = stoppedIn(phase, false);
+            List<PartitionSplitActuator.Orphan> orphans = PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT);
+            assertEquals(1, orphans.size());
+            assertEquals(KEY_HEX, orphans.get(0).keyHex());
+            assertFalse(orphans.get(0).pastLimit);
+            Map<String, String> status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0);
+            assertTrue(status.toString(), status.get("status").startsWith(PartitionSplitActuator.ORPHANED + ": no owner, past the commit point"));
+            assertEquals("true", status.get("orphaned"));
+            // the diagnosis, on any node
+            InMemoryKnowledgeView view = new InMemoryKnowledgeView(new ObservationStore(8, 8), cluster.now::get);
+            List<Diagnosis> diagnoses = new SplitOutcomeDetectors.Orphaned(() -> cluster.log, () -> WRITE_TIMEOUT).analyze(view);
+            assertEquals(1, diagnoses.size());
+            assertEquals(PartitionSplitActuator.ORPHANED, diagnoses.get(0).type);
+            assertEquals(Severity.CRITICAL, diagnoses.get(0).severity);
+            assertEquals(KEY_HEX, diagnoses.get(0).evidence.get("key_hex"));
+            assertEquals(phase.name(), diagnoses.get(0).evidence.get("phase"));
+
+            // its adoption (what the policy proposes on the preferred proposer): a continuation, which the ledger
+            // takes without the cooldown the stopped action left
+            node2.cooldownAfterCommit = 3_600_000;
+            catchUp();
+            Owner adopter = resumeOn(coordinator2, node2);
+            assertEquals(Optional.empty(), adopter.actuator.validate(adopter.action, null));
+            assertTrue(adopter.actuator.continuation(adopter.action));
+            assertFalse("a new split of the key is not a continuation",
+                        adopter.actuator.continuation(action(KS, TABLE, KEY_HEX, PartitionSplitActuator.params(4, "split"))));
+            ClusterCoordinator.Outcome cooled = coordinator2.claim(Lane.SCHEMA_LAYOUT, adopter.id, PartitionSplitActuator.NAME, adopter.action.target.asString(),
+                                                                   ClusterActionExecution.INITIAL_PHASE, Collections.emptyMap());
+            assertFalse("without the exemption the ledger cooldown refuses it", cooled.ok());
+            catchUp();
+            adopter = resumeOn(coordinator2, node2);
+            ClusterCoordinator.Outcome claimed = coordinator2.claim(Lane.SCHEMA_LAYOUT, adopter.id, PartitionSplitActuator.NAME, adopter.action.target.asString(),
+                                                                    ClusterActionExecution.INITIAL_PHASE, Collections.emptyMap(), true);
+            assertTrue(claimed.toString(), claimed.ok());
+            catchUp();
+            assertTrue("a claim is adopting it", PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).isEmpty());
+            assertTrue(PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status").startsWith("being adopted"));
+            assertEquals(StepResult.Kind.COMMITTED, adopter.toEnd().kind);
+            assertEquals(Phase.STEADY, key(cluster.log).phase);
+            assertNull(key(cluster.log).actionId);
+            assertTrue(env.writes.toString(), env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY"));
+            assertTrue(PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).isEmpty());
+            assertEquals("split", PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status"));
+            assertFalse("a split key has nothing to resume", adopter.actuator.continuation(adopter.action));
+        }
+    }
+
+    @Test
+    public void aSteadyKeyWithoutItsBaseTombstoneIsOrphanedUntilAdopted() throws Exception
+    {
+        Owner owner = owner();
+        env.failBase = true;
+        owner.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase) && o.claim().state.containsKey(PartitionSplitActuator.S_ACKED)
+                         && o.claim().state.get(PartitionSplitActuator.S_ACKED).startsWith("STEADY"));
+        long until = cluster.now.get() + 5_000;
+        owner.until(o -> cluster.now.get() > until);
+        owner.entry = Entry.ABORT;
+        assertEquals(StepResult.Kind.COMMITTED_CLEANUP_PENDING, owner.step().kind);
+        assertEquals(Phase.STEADY, key(cluster.log).phase);
+        assertEquals("owned until the tombstone is written", owner.id, key(cluster.log).actionId);
+        Map<String, String> status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0);
+        assertTrue(status.toString(), status.get("status").contains("base partition tombstone was not written"));
+        assertTrue(status.get("status").startsWith(PartitionSplitActuator.ORPHANED));
+        List<Diagnosis> diagnoses = new SplitOutcomeDetectors.Orphaned(() -> cluster.log, () -> WRITE_TIMEOUT)
+                                    .analyze(new InMemoryKnowledgeView(new ObservationStore(8, 8), cluster.now::get));
+        assertEquals(Severity.WARN, diagnoses.get(0).severity);
+
+        env.failBase = false;
+        Owner adopter = resumeOn(coordinator2, node2);
+        assertTrue(adopter.actuator.continuation(adopter.action));
+        adopter.claimLane();
+        assertEquals(StepResult.Kind.COMMITTED, adopter.toEnd().kind);
+        assertNull(key(cluster.log).actionId);
+        assertTrue(env.writes.toString(), env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY acknowledged=true"));
+        assertEquals("split", PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status"));
+        Optional<String> nothing = adopter.actuator.validate(resumeOn(coordinator2, node2).action, null);
+        assertTrue(nothing.toString(), nothing.isPresent() && nothing.get().contains("nothing to resume"));
+    }
+
+    @Test
+    public void anExpiredClaimThatOwnsAKeyPastItsCommitPointIsNotReplacedByANewAction() throws Exception
+    {
+        Owner owner = owner().reach(Phase.CLEANUP);
+        Claim expired = owner.claim();
+        cluster.now.set(expired.leaseExpiresAtMillis + 1);
+        catchUp();
+        String other = ByteBufferUtil.bytesToHex(Int32Type.instance.decompose(7));
+        UUID newAction = cluster.newActionId();
+        ClusterCoordinator.Outcome replaced = coordinator2.claim(Lane.SCHEMA_LAYOUT, newAction, PartitionSplitActuator.NAME,
+                                                                 PartitionSplitActuator.target(KS, TABLE, other).asString(),
+                                                                 ClusterActionExecution.INITIAL_PHASE, Collections.emptyMap());
+        assertFalse(replaced.ok());
+        assertEquals("the expired claim is still there", owner.id, cluster.ledger().claims.get(Lane.SCHEMA_LAYOUT).actionId);
+        assertTrue(String.valueOf(replaced.detail), replaced.detail.contains("past its commit point; the claim can only be taken over"));
+        // a takeover of it is accepted, and finishes the key
+        Owner second = new Owner(coordinator2, node2).takeOverExpired(owner);
+        assertEquals(StepResult.Kind.COMMITTED, second.toEnd().kind);
+        assertEquals(Phase.STEADY, key(cluster.log).phase);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // abort requests read one snapshot (fix H)
+    // ---------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void abortRequestReadsTheKeyAndTheClaimFromOneSnapshot() throws Exception
+    {
+        Owner owner = owner().reach(Phase.CUTOVER);
+        ClusterMetadata stale = cluster.log;
+        owner.reach(Phase.NEW_ONLY);
+        catchUp();
+        // the first snapshot is from before the commit point, the second is current
+        java.util.Iterator<ClusterMetadata> snapshots = List.of(stale, cluster.log, cluster.log, cluster.log).iterator();
+        try
+        {
+            PartitionSplitActuator.requestAbort(coordinator2, snapshots::next, PartitionSplitActuator.target(KS, TABLE, KEY_HEX), "test");
+            fail("an abort past the commit point must be refused");
+        }
+        catch (IllegalStateException e)
+        {
+            assertTrue(e.getMessage(), e.getMessage().contains("past its commit point (phase NEW_ONLY)"));
+        }
+        assertFalse("no abort request was written onto the claim past the commit point", owner.claim().state.containsKey(PartitionSplitActuator.S_ABORT));
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
     }
 
     // ---------------------------------------------------------------------------------------------------------

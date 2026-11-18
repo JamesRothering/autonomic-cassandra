@@ -277,7 +277,8 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
             reject(approved, Reasons.STORE_UNAVAILABLE, null);
             return;
         }
-        Outcome outcome = coordinator.claim(lane, action.id, action.actuator, action.target.asString(), INITIAL_PHASE, Collections.emptyMap());
+        Outcome outcome = coordinator.claim(lane, action.id, action.actuator, action.target.asString(), INITIAL_PHASE, Collections.emptyMap(),
+                                            actuator.continuation(action));
         if (!outcome.ok())
         {
             deleteInflight(action.id);
