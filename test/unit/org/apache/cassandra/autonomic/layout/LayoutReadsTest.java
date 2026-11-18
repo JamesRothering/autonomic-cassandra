@@ -649,6 +649,45 @@ public class LayoutReadsTest extends CQLTester
         }
     }
 
+    /**
+     * T6.11 review: the probe of a watched key ends with its result, so the later chunks of a lazy fan-out are part of
+     * the read's latency, and a failure while it is consumed is a failed read.
+     */
+    @Test
+    public void aLazyFanOutIsTimedUntilItsResultIsClosedAndAFailureWhileConsumedCounts()
+    {
+        DatabaseDescriptor.getAutonomicConfig().layout.fanout_eager_rows = 5;
+        DatabaseDescriptor.getAutonomicConfig().layout.fanout_chunk_rows = 3;
+        LayoutProfiler.watch(logical.id, key(K), 60_000);
+        ClusterMetadata cutover = keyIn(Phase.CUTOVER);
+        metadata.set(cutover);
+        PartitionIterator result = LayoutReads.read(group(logical, K), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution());
+        assertEquals("the read has not ended while its rows are still to be fetched", 0, LayoutProfiler.get(logical.id, key(K)).shape().timedReads);
+        int rows = clusterings(result).size();
+        assertTrue(rows > 3 * BUCKETS);
+        LayoutProfiler.Shape done = LayoutProfiler.get(logical.id, key(K)).shape();
+        assertEquals(1, done.timedReads);
+        assertEquals(0, done.readErrors);
+
+        // a routing change after rows were returned fails a later chunk: a failed read, not a timed success
+        metadata.set(cutover, cutover, cutover, keyIn(Phase.ROLLBACK_DUAL));
+        PartitionIterator failing = LayoutReads.read(group(logical, K), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution());
+        try (RowIterator partition = failing.next())
+        {
+            while (partition.hasNext())
+                partition.next();
+            fail("expected a read timeout");
+        }
+        catch (ReadTimeoutException expected)
+        {
+            failing.close();
+        }
+        LayoutProfiler.Shape failed = LayoutProfiler.get(logical.id, key(K)).shape();
+        assertEquals(2, failed.timedReads);
+        assertEquals(1, failed.readErrors);
+        assertEquals("the failed read adds no latency", done.readMicros, failed.readMicros);
+    }
+
     // ---- serial reads ----
 
     @Test

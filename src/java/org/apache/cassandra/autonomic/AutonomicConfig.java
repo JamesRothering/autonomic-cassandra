@@ -167,6 +167,11 @@ public class AutonomicConfig
         public double read_regression_tolerance = 1.0;
         /** Stage B: the busiest partition's share of the table's operations must fall by this fraction. */
         public double min_improvement = 0.5;
+        /**
+         * ANNOUNCED is held at least this long, from registration, to take the key's baseline (design 7.3); it also is
+         * the moving window of the C1 guard from DUAL_WRITE to VERIFY.
+         */
+        public DurationSpec.IntMillisecondsBound baseline_window = new DurationSpec.IntMillisecondsBound("3m");
         /** Stage B: the window, ending when the key is STEADY, over which the signals are compared with the baseline. */
         public DurationSpec.IntMillisecondsBound verify_window = new DurationSpec.IntMillisecondsBound("10m");
     }

@@ -39,6 +39,12 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.AutonomicService;
+import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.detectors.CompactionBacklogDetector;
+import org.apache.cassandra.autonomic.analyze.detectors.DiskPressureDetector;
+import org.apache.cassandra.autonomic.analyze.detectors.GcPressureDetector;
+import org.apache.cassandra.autonomic.analyze.detectors.PoolSaturationDetector;
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
 import org.apache.cassandra.autonomic.coord.ClusterLedger;
@@ -70,6 +76,7 @@ import org.apache.cassandra.autonomic.layout.RowMapper;
 import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.CQLStatement;
@@ -132,6 +139,13 @@ import org.apache.cassandra.utils.LocalizeString;
  * action's ownership of the key. The tombstone is written after FinishKey, not before as 4.1 lists it: in CLEANUP a
  * replica that becomes a natural replica of the key without having reported would run the reconcile pass over a base
  * partition that already holds the tombstone, and copy it into every bucket.
+ *
+ * <p><b>Verification signals</b> (design 7.3), for a split the policy proposed with a profile: ANNOUNCED is held for
+ * {@code baseline_window} from registration and the key's baseline is taken over it (too few operations:
+ * {@code INSUFFICIENT_BASELINE}, abort); from DUAL_WRITE to VERIFY every step checks the C1 guard over the last
+ * {@code baseline_window} (key error rate, table write latency, new CRITICAL saturation; a breach aborts); CUTOVER
+ * judges stage A over its soak; stage B judges only samples taken after the commit point. An operator's split has no
+ * profile and is not judged.
  *
  * <p><b>Topology</b> (4.7): while a multi-step metadata operation is in progress nothing moves forward.
  *
@@ -196,6 +210,14 @@ public class PartitionSplitActuator implements ClusterActuator
     public static final String S_COMMIT_APPROVED = "commit_approved";
     /** Timestamp (microseconds) of the base partition tombstone, written ahead of FinishKey. */
     public static final String S_TOMBSTONE = "tombstone";
+    /** When the ANNOUNCED baseline was taken (design 7.3), or {@value #NO_BASELINE}; set once. */
+    public static final String S_BASELINE_AT = "baseline_at";
+    public static final String NO_BASELINE = "none";
+    /** The proposer's time of the commit point (NEW_ONLY); stage B looks at samples from then on only. */
+    public static final String S_COMMITTED_AT = "committed_at";
+    /** Saturation diagnoses whose CRITICAL opening fails the C1 guard (design 7.3), as the policy's headroom check. */
+    private static final Set<String> SATURATION = Set.of(PoolSaturationDetector.NAME, CompactionBacklogDetector.NAME,
+                                                         DiskPressureDetector.NAME, GcPressureDetector.NAME);
     /** {@code <generation>/<generation epoch>}: the reconcile generation was complete and FinishKey follows. */
     public static final String S_FINISHING = "finishing";
 
@@ -767,6 +789,17 @@ public class PartitionSplitActuator implements ClusterActuator
         KeyState key = v.key;
         if (!v.cm.inProgressSequences.isEmpty())
             return hold(v, "a metadata operation is in progress (design 4.7)");
+        if (key.phase.coordinatorClass == 1)
+        {
+            // design 7.3: the guard of class C1, every step from DUAL_WRITE to VERIFY; a breach aborts, loss-free
+            SplitEvaluation.Result guard = guardC1(v, ctx);
+            if (!guard.ok)
+            {
+                Map<String, String> state = new TreeMap<>(v.claim.state);
+                state.put(S_ABORT, text("C1 guard failed in " + key.phase + ": " + guard.detail));
+                return StepResult.advance(v.claim.phase, state, 0);
+            }
+        }
         switch (key.phase)
         {
             case ANNOUNCED:
@@ -775,9 +808,14 @@ public class PartitionSplitActuator implements ClusterActuator
                 if (acked != null)
                     return acked;
                 long drain = Math.max(layoutConfig().cas_drain.toMilliseconds(), env.requestTimeoutsMillis()) + DRAIN_MARGIN_MILLIS;
-                long remaining = ackedAt(v) + drain - ctx.nowMillis();
+                // a split the policy proposed is also held for its baseline window from registration (design 7.3)
+                boolean judged = SplitEvaluation.Baseline.fromMap(v.claim.state) != null;
+                long baselineEnd = judged ? key.phaseSinceMillis + layoutConfig().baseline_window.toMilliseconds() : Long.MIN_VALUE;
+                long remaining = Math.max(ackedAt(v) + drain, baselineEnd) - ctx.nowMillis();
                 if (remaining > 0)
                     return StepResult.stay(Math.min(remaining, pollMillis()));
+                if (!v.claim.state.containsKey(S_BASELINE_AT))
+                    return baseline(v, ctx);
                 return advanceKey(v, ctx, Phase.DUAL_WRITE, key.generation);
             }
             case DUAL_WRITE:
@@ -822,6 +860,15 @@ public class PartitionSplitActuator implements ClusterActuator
                 return advanceKey(v, ctx, Phase.NEW_ONLY, key.generation);
             }
             case NEW_ONLY:
+                if (!v.claim.state.containsKey(S_COMMITTED_AT))
+                {
+                    // when the commit point was taken: stage B looks at samples from then on only; and what
+                    // verification and the commit approval recorded is not needed any more
+                    Map<String, String> state = new TreeMap<>(v.claim.state);
+                    state.keySet().removeAll(List.of(S_VERIFIED, S_VERIFY_FAILED, S_VERIFY_FAILURES, S_COMMIT_APPROVED));
+                    state.put(S_COMMITTED_AT, Long.toString(key.phaseSinceMillis));
+                    return StepResult.advance(v.claim.phase, state, 0);
+                }
                 return advanceKey(v, ctx, Phase.CLEANUP, key.generation);
             case CLEANUP:
                 return cleanup(v, ctx);
@@ -839,17 +886,77 @@ public class PartitionSplitActuator implements ClusterActuator
         return SplitEvaluation.stageA(SplitEvaluation.Baseline.fromMap(v.claim.state), window, layoutConfig());
     }
 
-    /** Stage B over the last {@code verify_window}, ending now: the key has been split for at least {@code straggler_window}. */
+    /**
+     * Stage B over the last {@code verify_window}, ending now, and never before the commit point (T6.11 review): the
+     * window holds samples of the split key only. Without a recorded commit time (a claim that adopted the key later)
+     * it starts no earlier than the key's current phase, which is after the commit point too.
+     */
     private SplitEvaluation.Result stageB(View v, ActionContext ctx)
     {
         KnowledgeView knowledge = env.knowledge();
         if (knowledge == null)
             return SplitEvaluation.stageB(null, null, Double.NaN, layoutConfig());
-        long window = layoutConfig().verify_window.toMilliseconds();
+        long now = ctx.nowMillis();
+        String committed = v.claim.state.get(S_COMMITTED_AT);
+        long since = committed != null ? Long.parseLong(committed) : v.key.phaseSinceMillis;
+        long from = Math.max(now - layoutConfig().verify_window.toMilliseconds(), since);
         Subject key = keySubject(v);
-        SplitEvaluation.Window signals = SplitEvaluation.Window.of(knowledge, key, ctx.nowMillis() - window, ctx.nowMillis());
-        double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, window);
+        SplitEvaluation.Window signals = SplitEvaluation.Window.of(knowledge, key, from, now);
+        double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, Math.max(1, now - from));
         return SplitEvaluation.stageB(SplitEvaluation.Baseline.fromMap(v.claim.state), signals, share, layoutConfig());
+    }
+
+    /**
+     * Design 7.3, ANNOUNCED: the key's baseline over {@code [registration, now]} and the table's write latency, which
+     * replace the numbers of the policy's profile (its busiest share stays, for stage B's goal). A split the policy
+     * proposed is aborted with {@value SplitEvaluation#INSUFFICIENT_BASELINE} when the window has fewer than
+     * {@code min_samples} operations. An operator's split carries no profile and is not judged (as since T6.11): it
+     * takes no baseline, and none of the C1 guard and stages A and B applies. A node without signals judges nothing.
+     */
+    private StepResult baseline(View v, ActionContext ctx)
+    {
+        Map<String, String> state = new TreeMap<>(v.claim.state);
+        long now = ctx.nowMillis();
+        state.put(S_BASELINE_AT, NO_BASELINE);
+        KnowledgeView knowledge = env.knowledge();
+        SplitEvaluation.Baseline proposed = SplitEvaluation.Baseline.fromMap(v.claim.state);
+        if (knowledge != null && proposed != null)
+        {
+            SplitEvaluation.Window window = SplitEvaluation.Window.of(knowledge, keySubject(v), v.key.phaseSinceMillis, now);
+            if (SplitEvaluation.sufficient(window, layoutConfig()))
+            {
+                double tableWrite = SplitEvaluation.mean(knowledge, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS,
+                                                         Subject.table(v.target.keyspace, v.target.table), v.key.phaseSinceMillis, now);
+                state.put(SplitEvaluation.S_BASELINE, SplitEvaluation.Baseline.announced(window, tableWrite, proposed).encode());
+                state.put(S_BASELINE_AT, Long.toString(now));
+            }
+            else
+            {
+                state.put(S_ABORT, text(SplitEvaluation.INSUFFICIENT_BASELINE + ": " + (window.reads + window.writes) + " operations of the key in "
+                                        + "baseline_window " + layoutConfig().baseline_window + ", min_samples " + layoutConfig().min_samples));
+            }
+        }
+        return StepResult.advance(v.claim.phase, state, 0);
+    }
+
+    /** The C1 guard over the last {@code baseline_window}, not before dual write started. */
+    private SplitEvaluation.Result guardC1(View v, ActionContext ctx)
+    {
+        KnowledgeView knowledge = env.knowledge();
+        String at = v.claim.state.get(S_BASELINE_AT);
+        // only a split whose baseline was taken in ANNOUNCED is guarded (an operator's split is not judged)
+        if (knowledge == null || at == null || NO_BASELINE.equals(at))
+            return SplitEvaluation.guardC1(null, null, Double.NaN, Collections.emptyList(), layoutConfig());
+        long now = ctx.nowMillis();
+        long from = Math.max(v.key.dualWriteSinceMillis, now - layoutConfig().baseline_window.toMilliseconds());
+        SplitEvaluation.Window window = SplitEvaluation.Window.of(knowledge, keySubject(v), from, now);
+        double tableWrite = SplitEvaluation.mean(knowledge, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS,
+                                                 Subject.table(v.target.keyspace, v.target.table), from, now);
+        List<String> saturation = new ArrayList<>();
+        for (Diagnosis d : knowledge.activeDiagnoses())
+            if (d.severity == Severity.CRITICAL && SATURATION.contains(d.type) && d.firstSeenMillis >= v.key.dualWriteSinceMillis)
+                saturation.add(d.type);
+        return SplitEvaluation.guardC1(SplitEvaluation.Baseline.fromMap(v.claim.state), window, tableWrite, saturation, layoutConfig());
     }
 
     private static Subject keySubject(View v)

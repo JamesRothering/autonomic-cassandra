@@ -407,6 +407,7 @@ public class PartitionSplitActuatorTest
         lc.straggler_window = new DurationSpec.LongMillisecondsBound("2s");
         lc.verify_recheck_delay = new DurationSpec.IntMillisecondsBound("100ms");
         lc.commit_approval = "auto";
+        lc.baseline_window = new DurationSpec.IntMillisecondsBound("1s");
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -900,6 +901,14 @@ public class PartitionSplitActuatorTest
         return new Owner(coordinator1, node1, proposedWithProfile()).claimLane();
     }
 
+    /** A proposed split whose key had the baseline's numbers in ANNOUNCED: the baseline of design 7.3 is taken there. */
+    private Owner profiled() throws Exception
+    {
+        Owner owner = ownerWithProfile().reach(Phase.ANNOUNCED);
+        keySignals(1000, 500, 0.0);
+        return owner;
+    }
+
     /** Key signals as {@code LayoutSensor} emits them, 300 and 400 ms from now: inside CUTOVER's soak, or the last 10 minutes of STEADY. */
     private void keySignals(double readMicros, double writeMicros, double errorRate)
     {
@@ -924,7 +933,7 @@ public class PartitionSplitActuatorTest
     public void stageAFailureRollsBackThroughRollbackDual() throws Exception
     {
         withKnowledge();
-        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        Owner owner = profiled().reach(Phase.CUTOVER);
         keySignals(2100, 500, 0.0);
         StepResult end = owner.toEnd();
         assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
@@ -938,7 +947,7 @@ public class PartitionSplitActuatorTest
     public void stageAFailureOnTheErrorRateRollsBack() throws Exception
     {
         withKnowledge();
-        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        Owner owner = profiled().reach(Phase.CUTOVER);
         keySignals(1000, 500, 0.05);
         StepResult end = owner.toEnd();
         assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
@@ -949,7 +958,7 @@ public class PartitionSplitActuatorTest
     public void stageAWithinToleranceCommitsAndStageBJudgesTheGoal() throws Exception
     {
         withKnowledge();
-        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        Owner owner = profiled().reach(Phase.CUTOVER);
         keySignals(1900, 500, 0.0);
         owner.reach(Phase.CLEANUP);
         overflowShare(0.2);
@@ -965,7 +974,7 @@ public class PartitionSplitActuatorTest
     {
         // goal missed: the busiest bucket still has 40% of the table: NEUTRAL
         withKnowledge();
-        Owner neutral = ownerWithProfile().reach(Phase.CLEANUP);
+        Owner neutral = profiled().reach(Phase.CLEANUP);
         keySignals(1000, 500, 0.0);
         overflowShare(0.4);
         StepResult end = neutral.toEnd();
@@ -977,7 +986,7 @@ public class PartitionSplitActuatorTest
     public void aBreachedStageBGuardIsRegressed() throws Exception
     {
         withKnowledge();
-        Owner owner = ownerWithProfile().reach(Phase.CUTOVER);
+        Owner owner = profiled().reach(Phase.CUTOVER);
         // fine during the soak, worse than 25% over the baseline's write latency afterwards
         keySignals(1000, 500, 0.0);
         owner.reach(Phase.CLEANUP);
@@ -1004,6 +1013,106 @@ public class PartitionSplitActuatorTest
     }
 
     @Test
+    public void aProposedSplitWithTooFewOperationsInAnnouncedAbortsWithInsufficientBaseline() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile();
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains(SplitEvaluation.INSUFFICIENT_BASELINE));
+        assertEquals(List.of("absent", "ANNOUNCED/1", "ABORTING/1", "absent"), owner.phases);
+        assertRemovedAndDropped();
+    }
+
+    @Test
+    public void theAnnouncedBaselineIsTakenOverTheBaselineWindow() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.ANNOUNCED);
+        long registered = key(cluster.log).phaseSinceMillis;
+        keySignals(800, 400, 0.0);
+        observe(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, Subject.table(KS, TABLE), cluster.now.get() + 200, 3000);
+        owner.reach(Phase.DUAL_WRITE);
+        assertTrue("held for the baseline window", key(cluster.log).phaseSinceMillis >= registered + config.layout.baseline_window.toMilliseconds());
+        Map<String, String> state = owner.claim().state;
+        SplitEvaluation.Baseline baseline = SplitEvaluation.Baseline.fromMap(state);
+        assertEquals("the key's latency in ANNOUNCED, not the profile's", 800, baseline.readMicros, 0.0);
+        assertEquals(400, baseline.writeMicros, 0.0);
+        assertEquals(3000, baseline.tableWriteMicros, 0.0);
+        assertEquals("the goal stays the profile's", 0.6, baseline.opsShare, 0.0);
+        assertFalse(PartitionSplitActuator.NO_BASELINE.equals(state.get(PartitionSplitActuator.S_BASELINE_AT)));
+        // an operator's split is not judged and is not held for it
+        setUp();
+        withKnowledge();
+        Owner operator = owner().reach(Phase.DUAL_WRITE);
+        assertEquals(PartitionSplitActuator.NO_BASELINE, operator.claim().state.get(PartitionSplitActuator.S_BASELINE_AT));
+        assertNull(SplitEvaluation.Baseline.fromMap(operator.claim().state));
+    }
+
+    @Test
+    public void theC1GuardAbortsOnTheKeysErrorRate() throws Exception
+    {
+        withKnowledge();
+        Owner owner = profiled();
+        owner.autoReport = false;
+        owner.reach(Phase.BACKFILL);
+        keySignals(1000, 500, 0.05);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("C1 guard failed in BACKFILL") && end.detail.contains("error rate"));
+        assertFalse(owner.phases.toString(), owner.phases.contains("CUTOVER/1"));
+        assertRemovedAndDropped();
+    }
+
+    @Test
+    public void theC1GuardAbortsOnTheTablesWriteLatencyAndOnNewSaturation() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.ANNOUNCED);
+        keySignals(1000, 500, 0.0);
+        observe(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, Subject.table(KS, TABLE), cluster.now.get() + 200, 2000);
+        owner.reach(Phase.DUAL_WRITE);
+        observe(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, Subject.table(KS, TABLE), cluster.now.get(), 6500);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("table write latency"));
+
+        setUp();
+        withKnowledge();
+        owner = profiled();
+        owner.autoReport = false;
+        owner.reach(Phase.BACKFILL);
+        long dualWrite = key(cluster.log).dualWriteSinceMillis;
+        ((InMemoryKnowledgeView) env.knowledge).setActiveDiagnoses(List.of(
+            new Diagnosis(UUID.randomUUID(), "pool_saturation", Subject.node(), Severity.CRITICAL, 1, dualWrite - 1, dualWrite, "old", Map.of(), null)));
+        long until = cluster.now.get() + 5_000;
+        owner.until(o -> cluster.now.get() > until);
+        assertEquals("a saturation that was open before dual write is not new", Phase.BACKFILL, key(cluster.log).phase);
+        ((InMemoryKnowledgeView) env.knowledge).setActiveDiagnoses(List.of(
+            new Diagnosis(UUID.randomUUID(), "pool_saturation", Subject.node(), Severity.CRITICAL, 1, dualWrite + 1, dualWrite + 1, "new", Map.of(), null)));
+        end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("new CRITICAL saturation diagnosis [pool_saturation]"));
+    }
+
+    @Test
+    public void stageBLooksAtSamplesAfterTheCommitPointOnly() throws Exception
+    {
+        withKnowledge();
+        Owner owner = profiled().reach(Phase.CUTOVER);
+        // slow writes during the soak (stage A judges reads and errors only); stage B must not see them
+        keySignals(1000, 5000, 0.0);
+        owner.reach(Phase.CLEANUP);
+        assertNotNull(owner.claim().state.get(PartitionSplitActuator.S_COMMITTED_AT));
+        cluster.now.addAndGet(1000);
+        keySignals(1000, 500, 0.0);
+        overflowShare(0.1);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), Verdict.IMPROVED, end.verdict);
+        assertTrue(end.detail, end.detail.contains("write latency ok"));
+    }
+
+    @Test
     public void aNodeWithoutKnowledgeJudgesNothing() throws Exception
     {
         env.knowledge = null;
@@ -1021,7 +1130,7 @@ public class PartitionSplitActuatorTest
         assertNotNull(baseline);
         assertEquals(1000, baseline.readMicros, 0.0);
         assertEquals(0.6, baseline.opsShare, 0.0);
-        assertEquals("the baseline is one entry of the claim state", 1, state.keySet().stream().filter(k -> k.startsWith("baseline")).count());
+        assertEquals("the baseline is one entry of the claim state", 1, state.keySet().stream().filter(k -> k.startsWith(SplitEvaluation.P_PREFIX) || k.equals(SplitEvaluation.S_BASELINE)).count());
     }
 
     /** A claim holds 16 entries: a proposed split that fails one verification and is size-only still fits to the end. */

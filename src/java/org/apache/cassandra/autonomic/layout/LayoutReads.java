@@ -40,6 +40,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.PartitionPosition;
 import org.apache.cassandra.db.PartitionRangeReadCommand;
+import org.apache.cassandra.db.RegularAndStaticColumns;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.filter.ClusteringIndexFilter;
 import org.apache.cassandra.db.filter.ClusteringIndexNamesFilter;
@@ -189,19 +190,195 @@ public final class LayoutReads
         if (probe == null)
             return readRegistered(group, consistencyLevel, requestTime);
         long start = Clock.Global.nanoTime();
+        PartitionIterator result;
         try
         {
             // taken by the hook so that its latency is known
-            PartitionIterator result = readRegistered(group, consistencyLevel, requestTime);
+            result = readRegistered(group, consistencyLevel, requestTime);
             if (result == null)
                 result = stock(group, consistencyLevel, requestTime);
-            probe.done(Clock.Global.nanoTime() - start);
-            return result;
         }
         catch (RuntimeException e)
         {
             probe.failed();
             throw e;
+        }
+        // the later chunks of a lazy fan-out and short-read protection run while the result is consumed: the read
+        // ends when it is closed or exhausted, and fails if consuming it throws
+        return new ProbedPartitions(result, probe, start);
+    }
+
+    /** A result whose probe ends with it (T6.11 review). Single-threaded, like the iterator it wraps. */
+    private static final class ProbedPartitions implements PartitionIterator
+    {
+        private final PartitionIterator wrapped;
+        private final LayoutProfiler.Probe probe;
+        private final long startNanos;
+        private boolean ended;
+
+        ProbedPartitions(PartitionIterator wrapped, LayoutProfiler.Probe probe, long startNanos)
+        {
+            this.wrapped = wrapped;
+            this.probe = probe;
+            this.startNanos = startNanos;
+        }
+
+        private void done()
+        {
+            if (!ended)
+            {
+                ended = true;
+                probe.done(Clock.Global.nanoTime() - startNanos);
+            }
+        }
+
+        RuntimeException failed(RuntimeException e)
+        {
+            if (!ended)
+            {
+                ended = true;
+                probe.failed();
+            }
+            return e;
+        }
+
+        @Override
+        public boolean hasNext()
+        {
+            boolean next;
+            try
+            {
+                next = wrapped.hasNext();
+            }
+            catch (RuntimeException e)
+            {
+                throw failed(e);
+            }
+            if (!next)
+                done();
+            return next;
+        }
+
+        @Override
+        public RowIterator next()
+        {
+            try
+            {
+                return new ProbedRows(wrapped.next(), this);
+            }
+            catch (RuntimeException e)
+            {
+                throw failed(e);
+            }
+        }
+
+        @Override
+        public void close()
+        {
+            try
+            {
+                wrapped.close();
+            }
+            catch (RuntimeException e)
+            {
+                throw failed(e);
+            }
+            done();
+        }
+    }
+
+    /** The rows of one partition of a {@link ProbedPartitions}: a failure while they are read fails the probe. */
+    private static final class ProbedRows implements RowIterator
+    {
+        private final RowIterator wrapped;
+        private final ProbedPartitions owner;
+
+        ProbedRows(RowIterator wrapped, ProbedPartitions owner)
+        {
+            this.wrapped = wrapped;
+            this.owner = owner;
+        }
+
+        @Override
+        public TableMetadata metadata()
+        {
+            return wrapped.metadata();
+        }
+
+        @Override
+        public boolean isReverseOrder()
+        {
+            return wrapped.isReverseOrder();
+        }
+
+        @Override
+        public RegularAndStaticColumns columns()
+        {
+            return wrapped.columns();
+        }
+
+        @Override
+        public DecoratedKey partitionKey()
+        {
+            return wrapped.partitionKey();
+        }
+
+        @Override
+        public Row staticRow()
+        {
+            return wrapped.staticRow();
+        }
+
+        @Override
+        public boolean isEmpty()
+        {
+            try
+            {
+                return wrapped.isEmpty();
+            }
+            catch (RuntimeException e)
+            {
+                throw owner.failed(e);
+            }
+        }
+
+        @Override
+        public boolean hasNext()
+        {
+            try
+            {
+                return wrapped.hasNext();
+            }
+            catch (RuntimeException e)
+            {
+                throw owner.failed(e);
+            }
+        }
+
+        @Override
+        public Row next()
+        {
+            try
+            {
+                return wrapped.next();
+            }
+            catch (RuntimeException e)
+            {
+                throw owner.failed(e);
+            }
+        }
+
+        @Override
+        public void close()
+        {
+            try
+            {
+                wrapped.close();
+            }
+            catch (RuntimeException e)
+            {
+                throw owner.failed(e);
+            }
         }
     }
 

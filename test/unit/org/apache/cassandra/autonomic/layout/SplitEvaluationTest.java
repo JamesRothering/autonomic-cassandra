@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.layout;
 
+import java.util.List;
 import java.util.Map;
 
 import org.junit.Test;
@@ -93,6 +94,63 @@ public class SplitEvaluationTest
         assertTrue(SplitEvaluation.stageA(base(1000, 500, 0.0, 10, 1000, 0.6), window(9999, 500, 0.0, 500, 500), lc).ok);
         // no read latency in the window (a write-only key)
         assertTrue(SplitEvaluation.stageA(b, window(NAN, 500, 0.0, 0, 500), lc).ok);
+    }
+
+    // ---- the ANNOUNCED baseline and the C1 guard (T6.11 review) ----
+
+    @Test
+    public void theAnnouncedBaselineReplacesTheProfileButKeepsItsGoal()
+    {
+        Baseline proposed = new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, true);
+        Window announced = window(800, 400, 0.002, 70, 40);
+        assertTrue(SplitEvaluation.sufficient(announced, lc));
+        assertFalse(SplitEvaluation.sufficient(window(800, 400, 0.0, 60, 39), lc));
+        Baseline b = Baseline.announced(announced, 3000, proposed);
+        assertEquals(800, b.readMicros, 0.0);
+        assertEquals(400, b.writeMicros, 0.0);
+        assertEquals(0.002, b.errorRate, 0.0);
+        assertEquals(70, b.reads);
+        assertEquals(0.6, b.opsShare, 0.0);
+        assertTrue(b.sizeOnly);
+        assertEquals(3000, b.tableWriteMicros, 0.0);
+        // one claim state entry, and back
+        Baseline decoded = Baseline.fromMap(Map.of(SplitEvaluation.S_BASELINE, b.encode()));
+        assertEquals(b.toParams(), decoded.toParams());
+        assertTrue(Double.isNaN(Baseline.announced(announced, NAN, null).opsShare));
+    }
+
+    @Test
+    public void c1GuardTable()
+    {
+        Baseline b = new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, false, 2000);
+        assertTrue(SplitEvaluation.guardC1(b, window(5000, 5000, 0.01, 500, 500), 6000, List.of(), lc).ok);
+        SplitEvaluation.Result errors = SplitEvaluation.guardC1(b, window(1000, 500, 0.02, 500, 500), 2000, List.of(), lc);
+        assertFalse(errors.ok);
+        assertTrue(errors.detail, errors.detail.contains("error rate"));
+        SplitEvaluation.Result table = SplitEvaluation.guardC1(b, window(1000, 500, 0.0, 500, 500), 6001, List.of(), lc);
+        assertFalse(table.ok);
+        assertTrue(table.detail, table.detail.contains("table write latency") && table.detail.contains("above"));
+        SplitEvaluation.Result saturated = SplitEvaluation.guardC1(b, window(1000, 500, 0.0, 500, 500), 2000, List.of("pool_saturation"), lc);
+        assertFalse(saturated.ok);
+        assertTrue(saturated.detail, saturated.detail.contains("pool_saturation"));
+        // not judged: no baseline, too few operations, no table latency
+        assertTrue(SplitEvaluation.guardC1(null, null, NAN, List.of(), lc).ok);
+        assertTrue(SplitEvaluation.guardC1(b, window(1000, 500, 1.0, 10, 10), NAN, List.of(), lc).ok);
+        assertTrue(SplitEvaluation.guardC1(new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, false), window(1000, 500, 0.0, 500, 500), 99999, List.of(), lc).ok);
+    }
+
+    @Test
+    public void theMeanOfASignalCountsOnlyItsWindow()
+    {
+        long[] now = { 100_000 };
+        ObservationStore store = new ObservationStore(16, 16);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, () -> now[0]);
+        Subject table = Subject.table("ks", "t");
+        store.accept(new Observation(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, table, 10_000, 9000));
+        store.accept(new Observation(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, table, 50_000, 1000));
+        store.accept(new Observation(Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, table, 60_000, 3000));
+        assertEquals(2000, SplitEvaluation.mean(view, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, table, 40_000, 100_000), 0.0);
+        assertTrue(Double.isNaN(SplitEvaluation.mean(view, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS, table, 70_000, 100_000)));
     }
 
     // ---- stage B: guards, then the goal ----

@@ -3236,6 +3236,10 @@ storage_compatibility_mode: NONE
 #     # verification. The key's read latency during CUTOVER (stage A: else the split is rolled back) and after the
 #     # split (stage B) may grow by read_regression_tolerance of its baseline; stage B also needs the busiest
 #     # partition's share of the table's operations to fall by min_improvement, over the last verify_window
+#     # the key's baseline is taken in ANNOUNCED over baseline_window (a split the policy proposed is aborted with
+#     # INSUFFICIENT_BASELINE if it has fewer than min_samples operations); from DUAL_WRITE to VERIFY the same window
+#     # guards the key's error rate, the table's write latency and new CRITICAL saturation (else the split aborts)
+#     baseline_window: 3m
 #     read_regression_tolerance: 1.0
 #     min_improvement: 0.5
 #     verify_window: 10m

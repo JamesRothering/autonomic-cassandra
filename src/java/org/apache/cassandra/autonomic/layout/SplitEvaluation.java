@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.layout;
 
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -43,6 +44,10 @@ public final class SplitEvaluation
     public static final double ERROR_RATE_TOLERANCE = 0.01;
     /** Stage B guard: the write latency may exceed its baseline by this fraction. */
     public static final double WRITE_TOLERANCE = 0.25;
+    /** C1 guard: the table's coordinator write latency may reach this multiple of its baseline. */
+    public static final double TABLE_WRITE_FACTOR = 3.0;
+    /** Why a migration is aborted in ANNOUNCED when the baseline has too few operations (design 7.3). */
+    public static final String INSUFFICIENT_BASELINE = "INSUFFICIENT_BASELINE";
 
     public static final String P_PREFIX = "baseline.";
     public static final String P_READ_MICROS = P_PREFIX + "read_micros";
@@ -51,6 +56,8 @@ public final class SplitEvaluation
     public static final String P_READS = P_PREFIX + "reads";
     public static final String P_WRITES = P_PREFIX + "writes";
     public static final String P_OPS_SHARE = P_PREFIX + "ops_share";
+    /** The table's coordinator write latency (p99, mean over the window), for the C1 guard. */
+    public static final String P_TABLE_WRITE_MICROS = P_PREFIX + "table_write_micros";
     /** {@code partition_size_only}: the split bounds the partition's size and moves no load (design 7.2 step 5). */
     public static final String P_SIZE_ONLY = P_PREFIX + "size_only";
     /**
@@ -74,9 +81,17 @@ public final class SplitEvaluation
         /** The busiest partition's share of the table's operations. */
         public final double opsShare;
         public final boolean sizeOnly;
+        public final double tableWriteMicros;
 
         public Baseline(double readMicros, double writeMicros, double errorRate, long reads, long writes, double opsShare, boolean sizeOnly)
         {
+            this(readMicros, writeMicros, errorRate, reads, writes, opsShare, sizeOnly, Double.NaN);
+        }
+
+        public Baseline(double readMicros, double writeMicros, double errorRate, long reads, long writes, double opsShare, boolean sizeOnly,
+                        double tableWriteMicros)
+        {
+            this.tableWriteMicros = tableWriteMicros;
             this.readMicros = readMicros;
             this.writeMicros = writeMicros;
             this.errorRate = errorRate;
@@ -84,6 +99,16 @@ public final class SplitEvaluation
             this.writes = writes;
             this.opsShare = opsShare;
             this.sizeOnly = sizeOnly;
+        }
+
+        /**
+         * The baseline taken in ANNOUNCED (design 7.3): the key's signals over the window and the table's write
+         * latency; the busiest share and {@code partition_size_only} stay those of the policy's profile, if any.
+         */
+        public static Baseline announced(Window window, double tableWriteMicros, Baseline proposed)
+        {
+            return new Baseline(window.readMicros, window.writeMicros, window.errorRate, window.reads, window.writes,
+                                proposed == null ? Double.NaN : proposed.opsShare, proposed != null && proposed.sizeOnly, tableWriteMicros);
         }
 
         public static Baseline of(LayoutProfiler.Shape profile, double opsShare, boolean sizeOnly)
@@ -123,7 +148,7 @@ public final class SplitEvaluation
                 return null;
             return new Baseline(number(map, P_READ_MICROS), number(map, P_WRITE_MICROS), number(map, P_ERROR_RATE),
                                 (long) orZero(number(map, P_READS)), (long) orZero(number(map, P_WRITES)), number(map, P_OPS_SHARE),
-                                "true".equals(map.get(P_SIZE_ONLY)));
+                                "true".equals(map.get(P_SIZE_ONLY)), number(map, P_TABLE_WRITE_MICROS));
         }
 
         public Map<String, String> toParams()
@@ -137,6 +162,7 @@ public final class SplitEvaluation
             put(m, P_OPS_SHARE, opsShare);
             if (sizeOnly)
                 m.put(P_SIZE_ONLY, "true");
+            put(m, P_TABLE_WRITE_MICROS, tableWriteMicros);
             return m;
         }
 
@@ -244,6 +270,62 @@ public final class SplitEvaluation
             }
             return new double[]{ num, den };
         }
+    }
+
+    /** The mean of the signal's points at times in {@code [fromMillis, toMillis]}; NaN if there are none. */
+    public static double mean(KnowledgeView knowledge, SignalId signal, Subject subject, long fromMillis, long toMillis)
+    {
+        Series series = knowledge.series(signal, subject, Math.max(0, knowledge.nowMillis() - fromMillis));
+        double sum = 0;
+        int n = 0;
+        for (int i = 0; i < series.size(); i++)
+            if (series.times[i] >= fromMillis && series.times[i] <= toMillis)
+            {
+                sum += series.values[i];
+                n++;
+            }
+        return n == 0 ? Double.NaN : sum / n;
+    }
+
+    /** True if the window has the {@code min_samples} operations a baseline needs (design 7.3). */
+    public static boolean sufficient(Window window, AutonomicConfig.LayoutConfig lc)
+    {
+        return window.reads + window.writes >= lc.min_samples;
+    }
+
+    /**
+     * The guard of class C1 (design 7.3, DUAL_WRITE to VERIFY): the key's error rate not above the baseline's plus
+     * {@link #ERROR_RATE_TOLERANCE}; the table's coordinator write latency not above {@link #TABLE_WRITE_FACTOR} times
+     * its baseline; no CRITICAL saturation diagnosis that opened since dual write started. Fails only on a check that
+     * was judged.
+     *
+     * @param newSaturation the types of such diagnoses
+     */
+    public static Result guardC1(Baseline baseline, Window window, double tableWriteMicros, Collection<String> newSaturation,
+                                 AutonomicConfig.LayoutConfig lc)
+    {
+        StringBuilder detail = new StringBuilder();
+        boolean failed = false;
+        if (baseline != null)
+        {
+            failed |= errorCheck(baseline, window, lc, detail);
+            if (!Double.isNaN(baseline.tableWriteMicros) && !Double.isNaN(tableWriteMicros))
+            {
+                double limit = baseline.tableWriteMicros * TABLE_WRITE_FACTOR;
+                boolean over = tableWriteMicros > limit;
+                failed |= over;
+                detail.append(over ? "table write latency " : "table write latency ok ").append(format(tableWriteMicros)).append(over ? " above " : " within ")
+                      .append(format(limit)).append("us; ");
+            }
+        }
+        if (!newSaturation.isEmpty())
+        {
+            failed = true;
+            detail.append("new CRITICAL saturation diagnosis ").append(newSaturation).append("; ");
+        }
+        if (detail.length() == 0)
+            detail.append(baseline == null ? "C1 guard: no baseline; " : "C1 guard not judged: too few operations; ");
+        return new Result(!failed, null, detail.toString());
     }
 
     /** The outcome of a stage; {@code verdict} is stage B's, stage A's is {@link #ok}. */
