@@ -165,10 +165,15 @@ public class LayoutSchemaCouplingTest extends TestBaseImpl
             assertTrue(expected, expected.contains("}, NodeId{"));
             assertTrue(expected, expected.contains("BACKFILL"));
 
-            // ALTER TABLE ADD is rejected with the documented message, and nothing changed
-            rejected(cluster, "ALTER TABLE " + KEYSPACE + ".t ADD w text", KEYSPACE + ".t has an adapted layout; ");
+            // regular columns are mirrored since T6.14 (LayoutColumnMirrorTest); the registry is not touched by it
+            cluster.schemaChange("ALTER TABLE " + KEYSPACE + ".t ADD w text");
+            ClusterUtils.waitForCMSToQuiesce(cluster, n1);
+            for (IInvokableInstance node : new IInvokableInstance[]{ n1, n2 })
+                assertTrue(node.callOnInstance(() -> Schema.instance.getTableMetadata(KEYSPACE, PHYSICAL).getColumn(
+                    ColumnIdentifier.getInterned("w", false)) != null));
+            assertEquals(expected, registry(n1));
             rejected(cluster, "ALTER TABLE " + KEYSPACE + ".t ADD s int static", "STATIC_COLUMN");
-            rejected(cluster, "ALTER TABLE " + KEYSPACE + "." + PHYSICAL + " ADD w text", "is managed");
+            rejected(cluster, "ALTER TABLE " + KEYSPACE + "." + PHYSICAL + " ADD z text", "is managed");
             rejected(cluster, "DROP TABLE " + KEYSPACE + "." + PHYSICAL, "is managed");
             assertEquals(expected, registry(n1));
 

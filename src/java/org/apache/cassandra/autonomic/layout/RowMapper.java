@@ -175,13 +175,25 @@ public final class RowMapper
     {
         List<ColumnMetadata> mapped = new ArrayList<>(columns.size());
         for (ColumnMetadata column : columns)
-            mapped.add(column(column, to));
+        {
+            ColumnMetadata target = column(column, to);
+            if (target != null)
+                mapped.add(target);
+        }
         return Columns.from(mapped);
     }
 
+    /**
+     * The column of {@code to} that {@code column} maps to, or null if the column was dropped from {@code to}: a table
+     * whose metadata is one epoch ahead of the data being mapped has the column recorded as dropped, and its cells are
+     * invisible to every read of {@code to} anyway, so they are skipped (ADR-034). A column that is neither present nor
+     * dropped (an addition {@code to} has not seen yet) is an error, never silently skipped, so the caller retries.
+     */
     private static ColumnMetadata column(ColumnMetadata column, TableMetadata to)
     {
         ColumnMetadata mapped = to.getColumn(column.name);
+        if (mapped == null && to.droppedColumns.containsKey(column.name.bytes))
+            return null;
         if (mapped == null || !mapped.type.equals(column.type))
             throw new IllegalArgumentException("column " + column.name + " is missing or differs in " + to);
         return mapped;
@@ -196,6 +208,8 @@ public final class RowMapper
         for (ColumnData data : row)
         {
             ColumnMetadata column = column(data.column(), to);
+            if (column == null)
+                continue;
             if (data.column().isComplex())
             {
                 ComplexColumnData complex = (ComplexColumnData) data;

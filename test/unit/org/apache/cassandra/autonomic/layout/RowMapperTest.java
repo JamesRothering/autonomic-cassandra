@@ -418,4 +418,43 @@ public class RowMapperTest extends CQLTester
             assertTrue(expected.getMessage(), expected.getMessage().contains("differs"));
         }
     }
+
+    // ---- one epoch apart (T6.14, ADR-034) ----
+
+    @Test
+    public void cellsOfAColumnDroppedFromTheTargetAreSkippedAndUnseenColumnsStillFail() throws Throwable
+    {
+        setUp("p int, c int, v int, w text, PRIMARY KEY (p, c)");
+        PartitionUpdate.SimpleBuilder b = PartitionUpdate.simpleBuilder(logical, 7).timestamp(5);
+        b.row(1).add("v", 1).add("w", "x");
+        PartitionUpdate withBoth = b.build();
+
+        // the target is one epoch ahead: w was dropped from it
+        schemaChange("ALTER TABLE " + keyspace() + '.' + physical.name + " DROP w");
+        TableMetadata ahead = Schema.instance.getTableMetadata(keyspace(), physical.name);
+        Map<Integer, PartitionUpdate> mapped = RowMapper.toPhysical(withBoth, ahead, layout, INCARNATION);
+        assertEquals(1, mapped.size());
+        PartitionUpdate update = mapped.values().iterator().next();
+        assertEquals(1, update.columns().regulars.size());
+        Row row = update.iterator().next();
+        assertEquals(1, row.columnCount());
+        assertEquals("v", row.columns().iterator().next().name.toString());
+        assertEquals(1, RowMapper.relabel(withBoth.iterator().next(), ahead).columnCount());
+
+        // the target has not seen a column the data has: refused, never dropped
+        TableMetadata behind = ahead;
+        schemaChange("ALTER TABLE " + keyspace() + '.' + logical.name + " ADD x text");
+        TableMetadata logicalAhead = Schema.instance.getTableMetadata(keyspace(), logical.name);
+        PartitionUpdate.SimpleBuilder b2 = PartitionUpdate.simpleBuilder(logicalAhead, 7).timestamp(5);
+        b2.row(1).add("x", "new");
+        try
+        {
+            RowMapper.toPhysical(b2.build(), behind, layout, INCARNATION);
+            fail("a cell of a column the target has not seen must not be dropped");
+        }
+        catch (IllegalArgumentException expected)
+        {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("missing or differs"));
+        }
+    }
 }

@@ -817,8 +817,8 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
         {
             expectRejected(label + " DDL", 2, p, "ALTER TABLE " + KEYSPACE + '.' + PHYSICAL + " ADD extra int", ConsistencyLevel.ALL, "is managed by the adapted layout");
             expectRejected(label + " DDL", 1, p, "DROP TABLE " + KEYSPACE + '.' + PHYSICAL, ConsistencyLevel.ALL, "is managed by the adapted layout");
-            expectRejected(label + " DDL", 2, p, "ALTER TABLE " + KEYSPACE + ".t ADD extra int", ConsistencyLevel.ALL,
-                           "columns cannot be added, dropped, renamed or altered until the layout is removed");
+            expectRejected(label + " DDL", 2, p, "ALTER TABLE " + KEYSPACE + ".t ADD extra int static", ConsistencyLevel.ALL,
+                           "the change would make the table ineligible");
         }
     }
 

@@ -27,6 +27,7 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
@@ -44,6 +45,7 @@ import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.schema.TriggerMetadata;
 import org.apache.cassandra.schema.Triggers;
 import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -173,23 +175,37 @@ public class LayoutSchemaCouplingTest
     // ---- logical table: columns ----
 
     @Test
-    public void columnChangesAreRejectedWithTheDocumentedMessage()
+    public void addedAndDroppedRegularColumnsAreMirroredOntoTheOverflowTable()
     {
-        assertInvalid(ADAPTED, prev(), keyspaces(logicalBuilder().addRegularColumn("w", UTF8Type.instance).build(), physical(), other()));
+        Keyspaces added = LayoutSchemaCoupling.apply(prev(), keyspaces(logicalBuilder().addRegularColumn("w", UTF8Type.instance).build(), physical(), other()));
+        TableMetadata withW = table(added, "t_al_00000001");
+        assertNotNull(withW.getColumn(ColumnIdentifier.getInterned("w", false)));
+        assertEquals(UTF8Type.instance, withW.getColumn(ColumnIdentifier.getInterned("w", false)).type);
+        assertNotNull(withW.getColumn(ColumnIdentifier.getInterned("v", false)));
+        assertTrue(PhysicalTables.matches(table(added, "t"), withW));
 
-        TableMetadata dropped = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
-                                             .addPartitionKeyColumn("p", Int32Type.instance)
-                                             .addClusteringColumn("c1", Int32Type.instance)
-                                             .addClusteringColumn("c2", UTF8Type.instance).build();
-        assertInvalid(ADAPTED, prev(), keyspaces(dropped, physical(), other()));
+        // dropped: the logical table records the drop, the overflow table follows with the same drop time
+        TableMetadata logicalDropped = logicalBuilder().build().unbuild().removeRegularOrStaticColumn(ColumnIdentifier.getInterned("v", false))
+                                                      .recordColumnDrop(logical().getColumn(ColumnIdentifier.getInterned("v", false)), 1234L).build();
+        Keyspaces dropped = LayoutSchemaCoupling.apply(prev(), keyspaces(logicalDropped, physical(), other()));
+        TableMetadata withoutV = table(dropped, "t_al_00000001");
+        assertNull(withoutV.getColumn(ColumnIdentifier.getInterned("v", false)));
+        assertEquals(1234L, withoutV.droppedColumns.get(ByteBufferUtil.bytes("v")).droppedTime);
+        assertTrue(PhysicalTables.matches(table(dropped, "t"), withoutV));
 
-        TableMetadata renamed = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
-                                             .addPartitionKeyColumn("p", Int32Type.instance)
-                                             .addClusteringColumn("c1", Int32Type.instance)
-                                             .addClusteringColumn("c2", UTF8Type.instance)
-                                             .addRegularColumn("v2", UTF8Type.instance).build();
-        assertInvalid(ADAPTED, prev(), keyspaces(renamed, physical(), other()));
+        // a column that is added and dropped in turn
+        ClusterMetadata afterAdd = prev(added);
+        TableMetadata logicalAfterAdd = table(added, "t");
+        TableMetadata droppedAgain = logicalAfterAdd.unbuild().removeRegularOrStaticColumn(ColumnIdentifier.getInterned("w", false))
+                                                    .recordColumnDrop(logicalAfterAdd.getColumn(ColumnIdentifier.getInterned("w", false)), 99L).build();
+        Keyspaces back = LayoutSchemaCoupling.apply(afterAdd, keyspaces(droppedAgain, table(added, "t_al_00000001"), other()));
+        assertTrue(PhysicalTables.matches(table(back, "t"), table(back, "t_al_00000001")));
+        assertTrue(table(back, "t_al_00000001").droppedColumns.containsKey(ByteBufferUtil.bytes("w")));
+    }
 
+    @Test
+    public void otherColumnChangesAreRejectedWithTheDocumentedMessage()
+    {
         TableMetadata retyped = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
                                              .addPartitionKeyColumn("p", Int32Type.instance)
                                              .addClusteringColumn("c1", Int32Type.instance)

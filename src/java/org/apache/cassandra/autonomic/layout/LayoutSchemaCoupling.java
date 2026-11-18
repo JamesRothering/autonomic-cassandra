@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.schema.ColumnMetadata;
+import org.apache.cassandra.schema.DroppedColumn;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.TableMetadata;
@@ -34,8 +36,8 @@ import org.apache.cassandra.tcm.ClusterMetadata;
  * everywhere.
  *
  * <p>For each layout of {@code prev}: dropping the logical table or its keyspace takes the overflow table with it;
- * creating-over, altering or dropping the overflow table by itself, changing the columns of the logical table or making
- * it ineligible is rejected; {@code gc_grace_seconds} is mirrored; everything else is left alone. A rejection is an
+ * creating-over, altering or dropping the overflow table by itself, renaming or altering columns of the logical table or
+ * making it ineligible is rejected; added and dropped regular columns and {@code gc_grace_seconds} are mirrored (T6.14); everything else is left alone. A rejection is an
  * {@link InvalidRequestException}, which {@code AlterSchema} turns into a rejected transformation.
  *
  * <p>The owner creates the overflow table before {@code RegisterKey} (design 2.5); at that point the registry does not
@@ -95,17 +97,50 @@ public final class LayoutSchemaCoupling
                 throw new InvalidRequestException(name + " has an adapted layout; the change would make the table ineligible: "
                                                   + Eligibility.describe(introduced));
 
-            TableMetadata mirrored = newLogical.params.gcGraceSeconds == prevPhysical.params.gcGraceSeconds
-                                     ? prevPhysical
-                                     : prevPhysical.withSwapped(prevPhysical.params.unbuild().gcGraceSeconds(newLogical.params.gcGraceSeconds).build());
+            TableMetadata mirrored = mirrorColumns(newLogical, prevPhysical);
+            if (newLogical.params.gcGraceSeconds != mirrored.params.gcGraceSeconds)
+                mirrored = mirrored.withSwapped(mirrored.params.unbuild().gcGraceSeconds(newLogical.params.gcGraceSeconds).build());
             String mismatch = PhysicalTables.mismatch(newLogical, mirrored);
             if (mismatch != null)
-                throw new InvalidRequestException(name + " has an adapted layout; columns cannot be added, dropped, renamed or altered "
-                                                  + "until the layout is removed (" + mismatch + ')');
+                throw new InvalidRequestException(name + " has an adapted layout; columns cannot be renamed or altered, and "
+                                                  + "primary key columns cannot change, until the layout is removed (" + mismatch + ')');
             if (mirrored != prevPhysical)
                 result = result.withAddedOrUpdated(after.withSwapped(after.tables.withSwapped(mirrored)));
         }
         return result;
+    }
+
+    /**
+     * The overflow table with the regular columns of {@code newLogical}: regular columns the logical table gained are
+     * added, regular columns it lost are removed and recorded as dropped with the logical table's drop time (design
+     * 4.8, T6.14). Unique ids are the overflow table's own. Returns {@code physical} itself if the regular columns
+     * already agree.
+     */
+    static TableMetadata mirrorColumns(TableMetadata newLogical, TableMetadata physical)
+    {
+        List<ColumnMetadata> added = new ArrayList<>();
+        for (ColumnMetadata column : newLogical.regularColumns())
+            if (physical.getColumn(column.name) == null)
+                added.add(column);
+        List<ColumnMetadata> removed = new ArrayList<>();
+        for (ColumnMetadata column : physical.regularColumns())
+            if (newLogical.getColumn(column.name) == null)
+                removed.add(column);
+        if (added.isEmpty() && removed.isEmpty())
+            return physical;
+
+        TableMetadata.Builder builder = physical.unbuild();
+        for (ColumnMetadata column : removed)
+        {
+            DroppedColumn logicalDrop = newLogical.droppedColumns.get(column.name.bytes);
+            builder.removeRegularOrStaticColumn(column.name);
+            builder.recordColumnDrop(column, logicalDrop != null ? logicalDrop.droppedTime : Long.MAX_VALUE);
+        }
+        // a re-added column takes the id of its dropped entry when the table is built, as in AlterTableStatement
+        for (ColumnMetadata column : added)
+            builder.addColumn(ColumnMetadata.regularColumn(physical.keyspace, physical.name, column.name.toString(), column.type,
+                                                           ColumnMetadata.NO_UNIQUE_ID));
+        return builder.build();
     }
 
     /** The layouts of {@code metadata} whose logical table is not in its schema; their registry entries are to be removed. */
