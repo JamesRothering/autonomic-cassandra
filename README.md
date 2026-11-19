@@ -20,6 +20,8 @@
 
 # Autonomic Cassandra
 
+> **[ASSESS.md](ASSESS.md)**: project assessment through D6: code produced, team-effort equivalent, tokens and cost, and what was built.
+
 Autonomic Cassandra re-envisions Cassandra from first principles as a self-healing, self-correcting, self-diagnosing database. If demand spikes, it adapts elastically. If a hot spot develops, it changes the schema on the fly to mitigate it while keeping clients that depend on the old schema satisfied, at least eventually. The goal is a database that operators can leave running with less hand-tuning, without giving up the safety and predictability that operators expect from Cassandra.
 
 ## Status
