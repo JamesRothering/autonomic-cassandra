@@ -74,6 +74,15 @@ public interface Actuator
     }
 
     /**
+     * True if the action is never approved automatically: the governor holds it for an operator's {@code approve}
+     * whatever the approval mode of its scope is (T6.17g: an unsplit). Cheap, side-effect free and thread-safe.
+     */
+    default boolean requiresManualApproval(Action action)
+    {
+        return false;
+    }
+
+    /**
      * Makes the change. Must return what rollback needs. Must be idempotent for a given action id. If it can throw
      * after changing something it must have called {@link ActionContext#recordUndo} first.
      */

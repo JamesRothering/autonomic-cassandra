@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -98,6 +99,7 @@ import org.apache.cassandra.autonomic.plan.Policy;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
 import org.apache.cassandra.autonomic.plan.policies.LoadSpikePolicy;
 import org.apache.cassandra.autonomic.plan.policies.PartitionSplitPolicy;
+import org.apache.cassandra.autonomic.plan.policies.PartitionUnsplitPolicy;
 import org.apache.cassandra.autonomic.plan.policies.Policies;
 import org.apache.cassandra.autonomic.safety.ClusterGate;
 import org.apache.cassandra.autonomic.safety.DefaultSafetyGovernor;
@@ -315,6 +317,9 @@ public class AutonomicService implements AutonomicServiceMBean
         out.add(new SplitOutcomeDetectors.UnsplitResidue());
         out.add(new SplitOutcomeDetectors.Orphaned(ClusterMetadata::currentNullable, () -> DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS)));
         out.add(new SplitOutcomeDetectors.ReclaimDue(ClusterMetadata::currentNullable, () -> config.layout));
+        out.add(new SplitOutcomeDetectors.UnsplitOrphaned(ClusterMetadata::currentNullable));
+        out.add(new SplitOutcomeDetectors.UnsplitPending(ClusterMetadata::currentNullable, this::pendingUnsplits,
+                                                         key -> { if (knowledgeStore != null) knowledgeStore.deleteState(key); }));
         return out;
     }
 
@@ -325,6 +330,11 @@ public class AutonomicService implements AutonomicServiceMBean
             if (policy instanceof LoadSpikePolicy)
                 return ((LoadSpikePolicy) policy).inNodeExhausted(lead, knowledge);
         return Optional.empty();
+    }
+
+    private Map<String, String> pendingUnsplits()
+    {
+        return knowledgeStore == null ? Collections.emptyMap() : knowledgeStore.scanState(PartitionUnsplitActuator.PENDING_PREFIX);
     }
 
     private List<KnobActuator> knobActuators()
@@ -434,6 +444,7 @@ public class AutonomicService implements AutonomicServiceMBean
         builtinDetectors = productionDetectors(config);
         List<Policy> built = new ArrayList<>(Policies.build(config, actuatorRegistry::get, name -> actuatorRegistry.isEnabled(name, config())));
         built.add(PartitionSplitPolicy.create(config, coordinator));
+        built.add(PartitionUnsplitPolicy.create(config, coordinator, actuatorRegistry::get));
         builtinPolicies = built;
         for (Detector detector : builtinDetectors)
             safely("start", detector.name(), detector::start);
@@ -1765,6 +1776,48 @@ public class AutonomicService implements AutonomicServiceMBean
                 && PartitionSplitActuator.MODE_RESUME.equals(r.action.params.get(PartitionSplitActuator.PARAM_MODE)))
                 return describe(r);
         return proposeSplit(keyspace, table, keyHex, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RESUME));
+    }
+
+    @Override
+    public Map<String, String> unsplitPartition(String keyspace, String table, String keyHex, boolean whenReady)
+    {
+        ActionExecutor ex = requireExecutor();
+        Subject target = PartitionSplitActuator.target(keyspace, table, keyHex);
+        String stateKey = PartitionUnsplitActuator.PENDING_PREFIX + keyspace + '.' + table + '/' + keyHex;
+        for (ActionRecord r : ex.liveActions())
+            if (r.state == ActionState.PROPOSED && r.action.actuator.equals(PartitionUnsplitActuator.NAME) && r.action.target.equals(target))
+                return describe(r);
+        VerifySpec verify = new VerifySpec(Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS, Subject.table(keyspace, table), true, 0.0,
+                                           Collections.emptyList(), 0, 0);
+        Action action = new Action(coordinator.newActionId(), PartitionUnsplitActuator.NAME, ActionScope.CLUSTER, target,
+                                   PartitionUnsplitActuator.params(PartitionUnsplitActuator.MODE_AUTO), verify);
+        Actuator actuator = actuatorRegistry.get(PartitionUnsplitActuator.NAME);
+        Optional<String> invalid = actuator == null ? Optional.empty() : actuator.validate(action, view);
+        if (invalid.isPresent())
+        {
+            OptionalLong due = PartitionUnsplitActuator.earliestMillis(invalid.get());
+            if (whenReady && due.isPresent())
+            {
+                if (knowledgeStore == null || !knowledgeStore.putState(stateKey, Long.toString(due.getAsLong()), clock.getAsLong()))
+                    throw new IllegalStateException("The request could not be stored on this node");
+                Map<String, String> m = new LinkedHashMap<>();
+                m.put("state", "PENDING");
+                m.put("diagnosis", PartitionUnsplitActuator.UNSPLIT_PENDING);
+                m.put("target", target.toString());
+                m.put("due_millis", Long.toString(due.getAsLong()));
+                m.put("reason", invalid.get());
+                return m;
+            }
+            if (!whenReady && due.isPresent())
+                throw new IllegalStateException(invalid.get() + " (earliest " + due.getAsLong() + " ms; --when-ready proposes it then)");
+        }
+        if (knowledgeStore != null)
+            knowledgeStore.deleteState(stateKey);
+        Plan plan = new Plan(UUID.randomUUID(), UUID.randomUUID(), OPERATOR_POLICY, Collections.singletonList(action), "nodetool autonomic layout unsplit");
+        ActionRecord record = ex.propose(plan, action, view);
+        if (record == null)
+            throw new IllegalStateException("The proposal was rejected for the same reason as an identical one just before; see `autonomic history`");
+        return describe(record);
     }
 
     /** An operator's proposal: the governor, the actuator's validation and approval as for a policy's (design 8). */

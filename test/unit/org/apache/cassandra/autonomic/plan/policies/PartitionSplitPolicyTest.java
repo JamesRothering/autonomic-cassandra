@@ -414,6 +414,22 @@ public class PartitionSplitPolicyTest
     // ---- the proposal ----
 
     @Test
+    public void aPendingUnsplitTakesTheLaneBeforeANewSplit()
+    {
+        put(Signals.PARTITION_READ_SHARE, subject(), 0.5);
+        active.add(new Diagnosis(UUID.randomUUID(), "layout.unsplit_pending", Subject.partition(KS, "other", "00"), Severity.INFO, 1, 0, 0, "pending",
+                                 Map.of("key_hex", "00", "due_millis", "1"), null));
+        view.setActiveDiagnoses(active);
+        Diagnosis d = hot();
+        for (int i = 0; i < 4; i++)
+            assertEquals(Optional.empty(), tick(d));
+        assertEquals("nothing is looked at while the unsplit waits", 0, env.probesStarted);
+        active.clear();
+        view.setActiveDiagnoses(active);
+        assertTrue(decide(d, rows(20_000), profileWithPointFraction(0.95)).isPresent());
+    }
+
+    @Test
     public void proposesASplitWithTheProfileAndTheEstimates()
     {
         put(Signals.PARTITION_READ_SHARE, subject(), 0.5);

@@ -140,4 +140,11 @@ public interface AutonomicServiceMBean
      * migration that stopped before its commit point and finishes one that stopped after it.
      */
     Map<String, String> resumeSplit(String keyspace, String table, String keyHex);
+
+    /**
+     * {@code layout unsplit}: proposes a {@code partition_unsplit} of a split key, always held for approval. A rejection
+     * carries the earliest time an unsplit is possible. With {@code whenReady} a rejection that names that time is
+     * recorded instead, as the diagnosis {@code layout.unsplit_pending} on this node, and the unsplit is proposed then.
+     */
+    Map<String, String> unsplitPartition(String keyspace, String table, String keyHex, boolean whenReady);
 }

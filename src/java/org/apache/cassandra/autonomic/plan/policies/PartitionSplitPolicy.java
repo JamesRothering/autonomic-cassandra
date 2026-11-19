@@ -254,6 +254,10 @@ public class PartitionSplitPolicy implements Policy
 
         if (busy(cm, knowledge, target))
             return Optional.empty();
+        // a pending unsplit takes the lane before a new split (T6.17g, design 11.8)
+        for (Diagnosis pending : knowledge.activeDiagnoses())
+            if ("layout.unsplit_pending".equals(pending.type))
+                return Optional.empty();
 
         // 1. eligibility: the same checks as the operator's split
         LayoutRegistry registry = LayoutRegistry.of(cm);

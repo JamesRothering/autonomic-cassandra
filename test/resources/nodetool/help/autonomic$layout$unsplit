@@ -1,0 +1,43 @@
+NAME
+        nodetool autonomic layout unsplit - Propose the reverse of a split
+        (always held for approval)
+
+SYNOPSIS
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout unsplit
+                [--when-ready] [--] <keyspace> <table> <key-hex>
+
+OPTIONS
+        -h <host>, --host <host>
+            Node hostname or ip address
+
+        -p <port>, --port <port>
+            Remote jmx agent port number
+
+        -pw <password>, --password <password>
+            Remote jmx agent password
+
+        -pwf <passwordFilePath>, --password-file <passwordFilePath>
+            Path to the JMX password file
+
+        -u <username>, --username <username>
+            Remote jmx agent username
+
+        --when-ready
+            If not possible yet, propose it at the earliest time
+
+        --
+            This option can be used to separate command-line options from the
+            list of argument, (useful when arguments might be mistaken for
+            command-line options
+
+        <keyspace>
+            Keyspace of the table
+
+        <table>
+            Table
+
+        <key-hex>
+            Raw partition key bytes in hex

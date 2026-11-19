@@ -371,7 +371,8 @@ public class Autonomic extends AbstractCommand
              subcommands = { Layout.Status.class,
                              Layout.Split.class,
                              Layout.Abort.class,
-                             Layout.Resume.class })
+                             Layout.Resume.class,
+                             Layout.Unsplit.class })
     public static class Layout extends AbstractCommand
     {
         @Override
@@ -452,6 +453,29 @@ public class Autonomic extends AbstractCommand
             protected void execute(NodeProbe probe)
             {
                 Map<String, String> record = proxy(probe).resumeSplit(keyspace, table, keyHex);
+                printRecords(output.out, List.of(record));
+            }
+        }
+
+        @Command(name = "unsplit", description = "Propose the reverse of a split (always held for approval)")
+        public static class Unsplit extends AbstractCommand
+        {
+            @Parameters(index = "0", arity = "1", paramLabel = "keyspace", description = "Keyspace of the table")
+            private String keyspace;
+
+            @Parameters(index = "1", arity = "1", paramLabel = "table", description = "Table")
+            private String table;
+
+            @Parameters(index = "2", arity = "1", paramLabel = "key-hex", description = "Raw partition key bytes in hex")
+            private String keyHex;
+
+            @Option(names = "--when-ready", description = "If not possible yet, propose it at the earliest time")
+            private boolean whenReady;
+
+            @Override
+            protected void execute(NodeProbe probe)
+            {
+                Map<String, String> record = proxy(probe).unsplitPartition(keyspace, table, keyHex, whenReady);
                 printRecords(output.out, List.of(record));
             }
         }

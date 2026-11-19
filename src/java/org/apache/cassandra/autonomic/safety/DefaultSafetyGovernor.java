@@ -197,7 +197,7 @@ public class DefaultSafetyGovernor implements SafetyGovernor
             return rejection;
         }
         // 13 APPROVAL
-        if (!operatorApproved && !SafetyConfig.APPROVAL_AUTO.equals(approvalMode(action.scope)))
+        if (!operatorApproved && !automaticallyApproved(action))
         {
             reservations.put(action.id, new Reservation(action, proposal.policy, knobs, true));
             return Decision.holdForApproval(Reasons.APPROVAL);
@@ -246,7 +246,7 @@ public class DefaultSafetyGovernor implements SafetyGovernor
             return Decision.reject(Reasons.VALIDATION, "no verify spec");
         // rule 10 of overview 7.3, waived under manual approval (FC4)
         boolean continuation = actuator.continuation(action);
-        if (!actuator.reversible() && !continuation && SafetyConfig.APPROVAL_AUTO.equals(approvalMode(action.scope))
+        if (!actuator.reversible() && !continuation && automaticallyApproved(action)
             && severityOf(proposal.diagnosisId, knowledge) != Severity.CRITICAL)
             return Decision.reject(Reasons.VALIDATION, "an irreversible actuator may only be selected at severity CRITICAL");
         Optional<String> invalid = actuator.validate(action, knowledge);
@@ -314,6 +314,13 @@ public class DefaultSafetyGovernor implements SafetyGovernor
         if (tooLarge.isPresent())
             return Decision.reject(Reasons.BLAST_RADIUS, tooLarge.get());
         return null;
+    }
+
+    /** True if the action would be approved without an operator: the scope's mode is auto and its actuator does not insist on manual approval. */
+    private boolean automaticallyApproved(Action action)
+    {
+        Actuator actuator = env.actuator(action.actuator);
+        return SafetyConfig.APPROVAL_AUTO.equals(approvalMode(action.scope)) && (actuator == null || !actuator.requiresManualApproval(action));
     }
 
     private String approvalMode(ActionScope scope)

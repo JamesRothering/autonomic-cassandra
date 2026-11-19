@@ -150,6 +150,13 @@ public class PartitionUnsplitActuator implements ClusterActuator
 
     /** The diagnosis of a slow reverse aborted on {@code purge_timeout}, and the start of its abort reason. */
     public static final String UNSPLIT_RESIDUE = "layout.unsplit_residue";
+    /** An operator asked for an unsplit {@code --when-ready}; carries the time from which one is possible (T6.17g). */
+    public static final String SPLIT_NOT_EFFECTIVE = "layout.split_not_effective";
+    public static final String UNSPLIT_PENDING = "layout.unsplit_pending";
+    /** A key in a reverse phase whose action holds no claim (T6.17g). */
+    public static final String UNSPLIT_ORPHANED = "layout.unsplit_orphaned";
+    /** Prefix of the node-local state of the requests of {@code layout unsplit --when-ready}: {@code <ks>.<table>/<key hex>} to the due time. */
+    public static final String PENDING_PREFIX = "layout.unsplit_pending/";
     public static final String RECONCILE_PAST_DEADLINE = PartitionSplitActuator.RECONCILE_PAST_DEADLINE;
 
     // claim phases that are not phases of the key
@@ -267,6 +274,79 @@ public class PartitionUnsplitActuator implements ClusterActuator
     public Lane lane()
     {
         return Lane.SCHEMA_LAYOUT;
+    }
+
+    /** Always held for an operator's approval, whatever {@code cluster_approval} says (design 11.8, T6.17g). */
+    @Override
+    public boolean requiresManualApproval(Action action)
+    {
+        return true;
+    }
+
+    private static final java.util.regex.Pattern EARLIEST = java.util.regex.Pattern.compile("slow mode from (\\d+)");
+
+    /**
+     * The earliest time, in milliseconds, that a {@link #validate} rejection names ("slow mode from 1795052794028: ..."),
+     * for {@code layout unsplit --when-ready}; empty if the rejection names none, which means waiting would not help.
+     */
+    public static java.util.OptionalLong earliestMillis(String rejection)
+    {
+        java.util.regex.Matcher m = EARLIEST.matcher(rejection == null ? "" : rejection);
+        return m.find() ? java.util.OptionalLong.of(Long.parseLong(m.group(1))) : java.util.OptionalLong.empty();
+    }
+
+    /**
+     * What a plan says of the action now: the mode it would start in and the estimate of a fast copy, or the rejection.
+     * For {@code PartitionUnsplitPolicy}'s rationale.
+     */
+    public String modeNote(Action action)
+    {
+        PartitionSplitActuator.Target t = PartitionSplitActuator.Target.of(action.target);
+        if (t.rejection != null)
+            return t.rejection;
+        String mode = action.params.getOrDefault(PARAM_MODE, MODE_AUTO);
+        if (MODE_RESUME.equals(mode))
+            return "resumes the reverse migration of an action that holds no claim";
+        ClusterMetadata cm = env.metadata();
+        TableMetadata logical = cm.schema.getTableMetadata(t.keyspace, t.table);
+        TableLayout layout = logical == null ? null : LayoutRegistry.of(cm).layout(logical.id);
+        KeyState key = layout == null ? null : layout.keyState(t.key);
+        if (key == null)
+            return "the key is not split";
+        long now = env.nowMillis();
+        Choice choice = choose(cm, logical, layout, t.key, key, mode, now);
+        if (choice.rejection != null)
+            return choice.rejection;
+        if (choice.mode == KeyState.ReverseMode.SLOW)
+            return "slow mode" + (choice.tombstoneFirst ? " (the base tombstone is written first)" : "");
+        TableMetadata physical = cm.schema.getTableMetadata(layout.physical);
+        return "fast mode, estimate " + estimateMillis(cm, logical, physical, t.key, key, layout.buckets) + " ms";
+    }
+
+    /**
+     * Keys in a reverse phase whose action holds no claim and that no claim of the lane is adopting: the counterpart of
+     * {@link PartitionSplitActuator#orphans}, proposed for {@code mode resume} (T6.17g).
+     */
+    public static java.util.List<PartitionSplitActuator.Orphan> orphans(ClusterMetadata cm)
+    {
+        java.util.List<PartitionSplitActuator.Orphan> out = new java.util.ArrayList<>();
+        ClusterLedger ledger = ClusterLedger.of(cm);
+        for (TableLayout layout : LayoutRegistry.of(cm).byLogical.values())
+        {
+            if (cm.schema.getTableMetadata(layout.logical) == null)
+                continue;
+            for (java.util.Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
+            {
+                KeyState key = e.getValue();
+                if (!key.phase.isReverse() || key.actionId == null || ledger.claim(key.actionId) != null)
+                    continue;
+                if (PartitionSplitActuator.claimOf(ledger, PartitionSplitActuator.target(layout.keyspace, layout.logicalName,
+                                                                                         org.apache.cassandra.utils.ByteBufferUtil.bytesToHex(e.getKey()))) != null)
+                    continue;
+                out.add(new PartitionSplitActuator.Orphan(layout, e.getKey(), key, false));
+            }
+        }
+        return out;
     }
 
     /** There is a commit point (BASE_ONLY) after which nothing is undone. */

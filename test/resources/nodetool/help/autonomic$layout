@@ -32,6 +32,12 @@ SYNOPSIS
                 [(-u <username> | --username <username>)] autonomic layout resume [--]
                 <keyspace> <table> <key-hex>
 
+        nodetool [(-h <host> | --host <host>)] [(-p <port> | --port <port>)]
+                [(-pw <password> | --password <password>)]
+                [(-pwf <passwordFilePath> | --password-file <passwordFilePath>)]
+                [(-u <username> | --username <username>)] autonomic layout unsplit
+                [--when-ready] [--] <keyspace> <table> <key-hex>
+
 OPTIONS
         -h <host>, --host <host>
             Node hostname or ip address
@@ -65,3 +71,8 @@ COMMANDS
         resume
             Take over a split that has no live action: abort it before its commit
             point, finish it after
+        unsplit
+            Propose the reverse of a split (always held for approval)
+
+            With --when-ready option, If not possible yet, propose it at the earliest
+            time
