@@ -56,7 +56,6 @@ import org.apache.cassandra.autonomic.execute.StepResult;
 import org.apache.cassandra.autonomic.execute.Verdict;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.layout.AdoptKey;
-import org.apache.cassandra.autonomic.layout.AdvanceLayout;
 import org.apache.cassandra.autonomic.layout.Eligibility;
 import org.apache.cassandra.autonomic.layout.EpochWatermarks;
 import org.apache.cassandra.autonomic.layout.FinishKey;
@@ -64,6 +63,7 @@ import org.apache.cassandra.autonomic.layout.HintReport;
 import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutHeader;
+import org.apache.cassandra.autonomic.layout.LayoutOwnerSteps;
 import org.apache.cassandra.autonomic.layout.LayoutProfiler;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.LayoutVerifier;
@@ -211,7 +211,7 @@ public class PartitionSplitActuator implements ClusterActuator
     public static final String S_HASHED = "hashed";
     public static final String S_MODE = "mode";
     /** {@code <phase>/<phase epoch>/<millis>}: when every node had acknowledged that phase epoch. */
-    public static final String S_ACKED = "acked";
+    public static final String S_ACKED = LayoutOwnerSteps.S_ACKED;
     /** {@code <generation>/<generation epoch>}: a verification of that generation passed. */
     public static final String S_VERIFIED = "verified";
     /** {@code <generation>/<generation epoch>}: a verification of that generation failed. */
@@ -248,18 +248,8 @@ public class PartitionSplitActuator implements ClusterActuator
                                                             Phase.ROLLBACK_DUAL, Phase.ABORTING);
 
     /** One equivalence check; {@link LayoutVerifier} in production. */
-    public interface Check
+    public interface Check extends LayoutOwnerSteps.Check
     {
-        LayoutVerifier.Status step();
-
-        /** See {@link LayoutVerifier#nextDueMillis}. */
-        long nextDueMillis();
-
-        long count(LayoutVerifier.Kind kind);
-
-        boolean tooManyDifferences();
-
-        String summary();
     }
 
     /** What the actuator does to and reads from the cluster; replaced in unit tests. Actuator thread only. */
@@ -1061,30 +1051,17 @@ public class PartitionSplitActuator implements ClusterActuator
             check = env.check(v.cm, v.logical.id, v.target.key, layoutConfig().verify_page_rows,
                               layoutConfig().verify_recheck_delay.toMilliseconds(), ctx::nowMillis);
         }
-        LayoutVerifier.Status status;
-        // a bounded unit under action_step_timeout: pages until half of the step's time is used
-        long budgetEnd = ctx.nowMillis() + Math.max(1, (ctx.stepDeadlineMillis() - ctx.nowMillis()) / 2);
-        try
+        // a bounded unit under action_step_timeout
+        LayoutOwnerSteps.Run run = LayoutOwnerSteps.run(check, ctx, pollMillis());
+        if (run.failed)
         {
-            do
-            {
-                status = check.step();
-            }
-            while (status == LayoutVerifier.Status.RUNNING && check.nextDueMillis() == 0 && ctx.nowMillis() < budgetEnd && !ctx.killed());
-        }
-        catch (RuntimeException e)
-        {
-            // a read at ALL that failed (a replica down or slow): start over later; the deadline bounds the wait
-            logger.info("Autonomic partition split of {}: verification read failed, starting it again: {}", v.name(), e.toString());
+            logger.info("Autonomic partition split of {}: verification read failed, starting it again: {}", v.name(), run.error.toString());
             check = null;
             checkId = null;
-            return StepResult.stay(pollMillis());
+            return StepResult.stay(run.delayMillis);
         }
-        if (status == LayoutVerifier.Status.RUNNING)
-        {
-            long due = check.nextDueMillis();
-            return StepResult.stay(due == 0 ? 0 : Math.max(1, Math.min(pollMillis(), due - ctx.nowMillis())));
-        }
+        if (!run.done)
+            return StepResult.stay(run.delayMillis);
         Check done = check;
         check = null;
         checkId = null;
@@ -1307,8 +1284,7 @@ public class PartitionSplitActuator implements ClusterActuator
     /** The time at which the replicas stop copying for the key (ADR-031, {@code BackfillTask.pastDeadline}). */
     long replicaLimit(KeyState key, TableMetadata logical)
     {
-        long limit = key.backfillLimitMillis(logical.params.gcGraceSeconds);
-        return limit == Long.MIN_VALUE ? Long.MIN_VALUE : limit - env.writeTimeoutMillis();
+        return LayoutOwnerSteps.forwardReplicaLimit(key, logical.params.gcGraceSeconds, env.writeTimeoutMillis());
     }
 
     /** The owner's deadline before the commit point: design 4.5, and strictly before the replicas' limit. */
@@ -1344,7 +1320,7 @@ public class PartitionSplitActuator implements ClusterActuator
     }
 
     /** Two all-node acknowledgements (NEW_ONLY, CLEANUP) come between the commit and the straggler wait. */
-    static final int COMMIT_ACK_POLLS = 2;
+    static final int COMMIT_ACK_POLLS = LayoutOwnerSteps.COMMIT_ACK_POLLS;
 
     /**
      * The latest time of the commit point (T6.9 review): after it, {@code straggler_window}, the acknowledgements
@@ -1353,16 +1329,12 @@ public class PartitionSplitActuator implements ClusterActuator
      */
     long commitWindowEnd(KeyState key, TableMetadata logical)
     {
-        long limit = replicaLimit(key, logical);
-        if (limit == Long.MIN_VALUE)
-            return Long.MIN_VALUE;
-        return limit - afterCommitMillis();
+        return LayoutOwnerSteps.commitWindowEnd(replicaLimit(key, logical), layoutConfig(), pollMillis());
     }
 
     private long afterCommitMillis()
     {
-        AutonomicConfig.LayoutConfig lc = layoutConfig();
-        return lc.straggler_window.toMilliseconds() + lc.reconcile_budget.toMilliseconds() + COMMIT_ACK_POLLS * pollMillis();
+        return LayoutOwnerSteps.afterCommitMillis(layoutConfig(), pollMillis());
     }
 
     /**
@@ -1401,11 +1373,8 @@ public class PartitionSplitActuator implements ClusterActuator
     /** O1, then the transition with the claim advanced in the same commit. */
     private StepResult advanceKey(View v, ActionContext ctx, Phase to, int generation)
     {
-        if (!env.acknowledged(v.key.phaseEpoch))
-            return waitForAck();
-        AdvanceLayout advance = new AdvanceLayout(v.claim.actionId, v.claim.owner, v.claim.step, v.logical.id, v.target.key, v.key.phase, to,
-                                                  generation, ctx.nowMillis(), leaseMillis());
-        return StepResult.commit(advance.wrap(), to.name(), v.claim.state, 0);
+        return LayoutOwnerSteps.advance(v.claim, v.logical.id, v.target.key, v.key, to, generation, () -> env.acknowledged(v.key.phaseEpoch),
+                                        ctx.nowMillis(), leaseMillis(), pollMillis());
     }
 
     private StepResult waitForAck()
@@ -1425,28 +1394,13 @@ public class PartitionSplitActuator implements ClusterActuator
      */
     private StepResult ackedFor(View v, ActionContext ctx)
     {
-        if (ackedAt(v) >= 0)
-            return null;
-        if (!env.acknowledged(v.key.phaseEpoch))
-            return waitForAck();
-        Map<String, String> state = new TreeMap<>(v.claim.state);
-        state.put(S_ACKED, ackPrefix(v) + ctx.nowMillis());
-        return StepResult.advance(v.claim.phase, state, 0);
-    }
-
-    private static String ackPrefix(View v)
-    {
-        return v.key.phase.name() + '/' + v.key.phaseEpoch.getEpoch() + '/';
+        return LayoutOwnerSteps.ackedFor(v.claim, v.key, () -> env.acknowledged(v.key.phaseEpoch), ctx.nowMillis(), pollMillis());
     }
 
     /** -1 if the claim has no acknowledgement time of the current phase epoch. */
     private static long ackedAt(View v)
     {
-        String acked = v.claim.state.get(S_ACKED);
-        String prefix = ackPrefix(v);
-        if (acked == null || !acked.startsWith(prefix))
-            return -1;
-        return Long.parseLong(acked.substring(prefix.length()));
+        return LayoutOwnerSteps.ackedAt(v.claim, v.key);
     }
 
     /**
@@ -1506,7 +1460,7 @@ public class PartitionSplitActuator implements ClusterActuator
 
     private long pollMillis()
     {
-        return Math.max(1, layoutConfig().ack_poll_interval.toMilliseconds());
+        return LayoutOwnerSteps.pollMillis(layoutConfig());
     }
 
     private long leaseMillis()
