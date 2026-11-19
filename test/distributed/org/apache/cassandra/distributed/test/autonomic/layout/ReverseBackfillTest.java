@@ -42,6 +42,7 @@ import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
 import org.apache.cassandra.autonomic.layout.RowMapper;
 import org.apache.cassandra.autonomic.layout.TableLayout;
+import org.apache.cassandra.batchlog.BatchlogManager;
 import org.apache.cassandra.config.DataRateSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.Clustering;
@@ -308,7 +309,10 @@ public class ReverseBackfillTest extends TestBaseImpl
             cluster.coordinator(1).execute("UPDATE " + KEYSPACE + ".t USING TIMESTAMP 2002 SET m = {9: 'nine'} WHERE p = " + K + " AND c = 8", ConsistencyLevel.ALL);
             cluster.coordinator(1).execute("DELETE s FROM " + KEYSPACE + ".t USING TIMESTAMP 2003 WHERE p = " + K + " AND c = 9", ConsistencyLevel.ALL);
             cluster.get(3).flush(KEYSPACE);
-            // a row delete and a range delete (in every bucket) that node 3 never sees
+            // a row delete and a range delete (in every bucket) that node 3 never sees. The range delete spans four
+            // bucket partitions, so it is a logged batch: batchlog replay, which hinted_handoff_enabled does not turn
+            // off, would deliver it to node 3 about 4 to 14 s later. Replay stays paused for the rest of the test
+            cluster.forEach(n -> n.runOnInstance(() -> BatchlogManager.instance.pauseReplay()));
             cluster.filters().verbs(Verb.MUTATION_REQ.id).to(3).drop().on();
             cluster.coordinator(1).execute("DELETE FROM " + KEYSPACE + ".t USING TIMESTAMP 2004 WHERE p = " + K + " AND c = 21", ConsistencyLevel.ONE);
             cluster.coordinator(1).execute("DELETE FROM " + KEYSPACE + ".t USING TIMESTAMP 2005 WHERE p = " + K + " AND c >= 30 AND c <= 32", ConsistencyLevel.ONE);
@@ -322,6 +326,8 @@ public class ReverseBackfillTest extends TestBaseImpl
             assertTrue(expected, expected.contains("partition deletion deletedAt=1005"));
             String node3 = merged(n1, List.of(all.get(2)));
             assertFalse("node 3 missed the range delete: " + node3, node3.contains("range tombstone over 31:"));
+            assertTrue(expected, expected.contains("del=deletedAt=2004"));
+            assertFalse("node 3 missed the row delete: " + node3, node3.contains("del=deletedAt=2004"));
             for (int node = 1; node <= 3; node++)
                 assertEquals("nothing in base on node " + node, "partition deletion LIVE\n", base(cluster.get(node)));
 
@@ -355,10 +361,12 @@ public class ReverseBackfillTest extends TestBaseImpl
                 assertTrue("node 2 does not start its pass", System.nanoTime() < deadline);
                 Thread.sleep(100);
             }
-            assertEquals(Phase.REVERSE_BACKFILL + ":" + generation + ":0", progress(n1));
+            // nodes 1 and 3 may have reported already (node 1 has three chunks to copy); node 2 has not
+            assertEquals("node 2 is in the middle of its pass", reportsBefore[2], stat(n2, "reports"));
             ClusterUtils.stopUnchecked(n2);
             Thread.sleep(2000);
             n2.startup();
+            n2.runOnInstance(() -> BatchlogManager.instance.pauseReplay());
 
             String done = Phase.REVERSE_BACKFILL + ":" + generation + ":3";
             deadline = System.nanoTime() + 300_000_000_000L;
