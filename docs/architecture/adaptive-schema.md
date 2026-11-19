@@ -1066,6 +1066,12 @@ Negative variants that must fail:
 
 Budget: 2 coordinators (3 if it fits), 3 operations, under an hour for the positive run, recorded in `docs/specs/README.md` as for the forward model.
 
+Assumptions of the model as built (T6.17i, `docs/specs/layout-reverse.tla`; the README has the bounds actually run):
+- **Stock timestamp assumption.** No client write carries a timestamp at or below that of a delete of the same row which compaction may already have purged (local deletion time plus `gc_grace_seconds` passed). Without it even an unsplit table shows the later, older-stamped write once the delete is gone. Only a delete stamped with a client clock in the future can create such a gap, and stock Cassandra has the same behaviour, so the invariants do not cover it. TLC found it as an I22 counterexample before the assumption was added: `DELETE` with a future timestamp, purge, then an `INSERT` stamped below the delete.
+- **Bounded delivery.** All sends, re-executions and the ack of an operation happen within the tick of its first start. A tick stands for more than the request timeout and the hint TTL, and is far below `gc_grace_seconds`. A mutation is never delivered later.
+- **"Held" at client level.** An acknowledged put may be missing from the authoritative copy only if a client delete that overrides it was sent. An unacknowledged delete may apply (R4), and once purged it leaves nothing behind.
+- Compactions happen at tick boundaries. The owner's margins (estimate, `straggler_window`, `reconcile_budget`, write timeout) are 0, so a limit `L` means "only while `clock < L`". `probeClean` is folded into the guard of `REVERSE_ANNOUNCED -> REVERSE_DUAL_WRITE`.
+
 ### 11.8 Triggers and interactions
 
 | Topic | Design |
