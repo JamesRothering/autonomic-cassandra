@@ -1019,6 +1019,16 @@ public final class LayoutReads
     // helpers
     // ---------------------------------------------------------------------------------------------------------
 
+    /**
+     * A read of the base table that is not routed (T6.17e): the stock path with the hook bypassed, in memory, so that
+     * nothing it does lazily re-enters the hook. For the verifier of a reverse migration, whose base table is read while
+     * the hook would send every read of the key to the overflow table.
+     */
+    static PartitionIterator readBase(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
+    {
+        return materialize(stock(group, consistencyLevel, requestTime));
+    }
+
     private static PartitionIterator stock(SinglePartitionReadCommand.Group group, ConsistencyLevel consistencyLevel, Dispatcher.RequestTime requestTime)
     {
         boolean outer = reentrant.get();

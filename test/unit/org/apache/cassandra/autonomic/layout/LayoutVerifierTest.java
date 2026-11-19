@@ -45,6 +45,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -199,7 +200,7 @@ public class LayoutVerifierTest
         Fake base = new Fake(TEN);
         Fake overflow = new Fake(TEN);
         overflow.rows.put(2, mk(2, 102, "other", 0));      // a differing value
-        overflow.rows.put(3, mk(3, 999, "v3", 0));         // a differing timestamp
+        overflow.rows.put(3, mk(3, 1, "v3", 0));           // a differing timestamp, older in the target (a newer one is NEWER_IN_TARGET)
         overflow.rows.put(4, mk(4, 104, "v4", 3600));      // a differing ttl
         overflow.rows.remove(6);                            // a missing row
         overflow.rows.put(11, mk(11));                     // an extra row
@@ -349,12 +350,155 @@ public class LayoutVerifierTest
         for (int i = 0; i < 60; i++)
         {
             base.rows.put(i, mk(i));
-            overflow.rows.put(i, mk(i, 5000, "x", 0));
+            overflow.rows.put(i, mk(i, 1, "x", 0));
         }
         LayoutVerifier verifier = verifier(base, overflow, 1000);
         run(verifier);
         assertEquals(60, verifier.count(Kind.CONTENT_DIFFERS));
         assertEquals(LayoutVerifier.SAMPLE_LIMIT, verifier.mismatches().size());
+    }
+
+    // ---- roles, tolerance and NEWER_IN_TARGET (T6.17e) ----
+
+    private LayoutVerifier verifier(Fake base, Fake overflow, LayoutVerifier.Direction direction, java.util.Set<Kind> tolerated)
+    {
+        return new LayoutVerifier(table.comparator, base, overflow, direction, tolerated, 4, 3, 2000, clock::get);
+    }
+
+    private LayoutVerifier verifier(Fake base, Fake overflow, LayoutVerifier.Direction direction)
+    {
+        return verifier(base, overflow, direction, LayoutVerifier.defaultTolerated(direction));
+    }
+
+    /** The five differences, with the newer cell in the base table (row 2) and in the overflow table (row 3). */
+    private static Fake[] differing()
+    {
+        Fake base = new Fake(TEN);
+        Fake overflow = new Fake(TEN);
+        overflow.rows.put(2, mk(2, 102, "other", 0));      // CONTENT_DIFFERS: the same timestamps, another value
+        base.rows.put(3, mk(3, 500, "v3", 0));             // newer in the base table
+        overflow.rows.put(4, mk(4, 900, "v4", 0));         // newer in the overflow table
+        overflow.rows.remove(6);                            // only in the base table
+        overflow.rows.put(11, mk(11));                     // only in the overflow table
+        return new Fake[]{ base, overflow };
+    }
+
+    @Test
+    public void everyKindIsCountedInTheForwardDirectionAndTheTargetIsTheOverflowTable()
+    {
+        Fake[] t = differing();
+        LayoutVerifier verifier = verifier(t[0], t[1], LayoutVerifier.Direction.FORWARD);
+        run(verifier);
+        assertEquals(Status.FAILED, verifier.status());
+        // row 3 is newer in the authoritative table: a difference; row 4 is newer in the target: tolerated
+        assertEquals(2, verifier.count(Kind.CONTENT_DIFFERS));
+        assertEquals(1, verifier.count(Kind.NEWER_IN_TARGET));
+        assertEquals(1, verifier.count(Kind.MISSING_FROM_OVERFLOW));
+        assertEquals(1, verifier.count(Kind.MISSING_FROM_BASE));
+        assertEquals("only NEWER_IN_TARGET is tolerated by default", 1, verifier.toleratedCount());
+        assertTrue(verifier.isTolerated(Kind.NEWER_IN_TARGET));
+        assertFalse(verifier.isTolerated(Kind.MISSING_FROM_OVERFLOW));
+        Map<Integer, Kind> kinds = new HashMap<>();
+        for (LayoutVerifier.Mismatch m : verifier.mismatches())
+            kinds.put(ByteBufferUtil.toInt((ByteBuffer) m.clustering.bufferAt(0)), m.kind);
+        assertEquals(Kind.CONTENT_DIFFERS, kinds.get(2));
+        assertEquals(Kind.CONTENT_DIFFERS, kinds.get(3));
+        assertEquals(Kind.NEWER_IN_TARGET, kinds.get(4));
+        assertEquals(Kind.MISSING_FROM_OVERFLOW, kinds.get(6));
+        assertEquals(Kind.MISSING_FROM_BASE, kinds.get(11));
+        assertTrue(verifier.summary(), verifier.summary().contains("1 newer in the target"));
+    }
+
+    @Test
+    public void everyKindIsCountedInTheReverseDirectionAndTheTargetIsTheBaseTable()
+    {
+        Fake[] t = differing();
+        LayoutVerifier verifier = verifier(t[0], t[1], LayoutVerifier.Direction.REVERSE);
+        run(verifier);
+        assertEquals(Status.FAILED, verifier.status());
+        // now row 3, newer in the base table, is the tolerated one, and row 4 a difference
+        assertEquals(2, verifier.count(Kind.CONTENT_DIFFERS));
+        assertEquals(1, verifier.count(Kind.NEWER_IN_TARGET));
+        assertEquals(1, verifier.count(Kind.MISSING_FROM_OVERFLOW));
+        assertEquals(1, verifier.count(Kind.MISSING_FROM_BASE));
+        assertEquals("a base-only row and a newer base cell are tolerated", 2, verifier.toleratedCount());
+        Map<Integer, Kind> kinds = new HashMap<>();
+        for (LayoutVerifier.Mismatch m : verifier.mismatches())
+            kinds.put(ByteBufferUtil.toInt((ByteBuffer) m.clustering.bufferAt(0)), m.kind);
+        assertEquals(Kind.NEWER_IN_TARGET, kinds.get(3));
+        assertEquals(Kind.CONTENT_DIFFERS, kinds.get(4));
+    }
+
+    @Test
+    public void toleratedKindsAreCountedAndDoNotFailTheVerification()
+    {
+        for (LayoutVerifier.Direction direction : LayoutVerifier.Direction.values())
+        {
+            Fake base = new Fake(TEN);
+            Fake overflow = new Fake(TEN);
+            // the target's copy of row 5 is newer
+            (direction == LayoutVerifier.Direction.FORWARD ? overflow : base).rows.put(5, mk(5, 700, "v5", 0));
+            LayoutVerifier verifier = verifier(base, overflow, direction);
+            run(verifier);
+            assertEquals(direction.name(), Status.PASSED, verifier.status());
+            assertEquals(1, verifier.count(Kind.NEWER_IN_TARGET));
+            assertEquals(1, verifier.toleratedCount());
+            assertTrue(verifier.mismatches().get(0).detail, verifier.mismatches().get(0).detail.contains("timestamp"));
+
+            // the same difference with an empty tolerance set fails
+            Fake base2 = new Fake(TEN);
+            Fake overflow2 = new Fake(TEN);
+            (direction == LayoutVerifier.Direction.FORWARD ? overflow2 : base2).rows.put(5, mk(5, 700, "v5", 0));
+            LayoutVerifier strict = verifier(base2, overflow2, direction, java.util.Set.of());
+            run(strict);
+            assertEquals(direction.name(), Status.FAILED, strict.status());
+            assertEquals(1, strict.count(Kind.NEWER_IN_TARGET));
+            assertEquals(0, strict.toleratedCount());
+        }
+        // a one-sided row of the tolerated kind passes too, in the direction it belongs to
+        Fake base = new Fake(TEN);
+        Fake overflow = new Fake(TEN);
+        overflow.rows.remove(7);
+        LayoutVerifier reverse = verifier(base, overflow, LayoutVerifier.Direction.REVERSE);
+        run(reverse);
+        assertEquals(Status.PASSED, reverse.status());
+        assertEquals(1, reverse.count(Kind.MISSING_FROM_OVERFLOW));
+        LayoutVerifier forward = verifier(base, overflow, LayoutVerifier.Direction.FORWARD);
+        run(forward);
+        assertEquals(Status.FAILED, forward.status());
+    }
+
+    @Test
+    public void aCellThatIsNewerInTheTargetIsOnlyTolerableIfNothingElseDiffers()
+    {
+        Row old = mk(1);
+        // v newer in the target, w the same: tolerable
+        assertTrue(LayoutVerifier.newerInTarget(old, mk(1, 101, "v1", 0)) == false);
+        Row.Builder b = BTreeRow.sortedBuilder();
+        b.newRow(c(1));
+        b.addPrimaryKeyLivenessInfo(LivenessInfo.create(101));
+        b.addCell(BufferCell.live(v, 500, ByteBufferUtil.bytes("new")));
+        b.addCell(BufferCell.live(w, 101, ByteBufferUtil.bytes("w1")));
+        Row newer = b.build();
+        assertTrue(LayoutVerifier.newerInTarget(old, newer));
+        assertFalse("the other way round the authoritative row is the newer one", LayoutVerifier.newerInTarget(newer, old));
+        // v newer, w older in the target: a real difference
+        Row.Builder m = BTreeRow.sortedBuilder();
+        m.newRow(c(1));
+        m.addPrimaryKeyLivenessInfo(LivenessInfo.create(101));
+        m.addCell(BufferCell.live(v, 500, ByteBufferUtil.bytes("new")));
+        m.addCell(BufferCell.live(w, 5, ByteBufferUtil.bytes("old")));
+        assertFalse(LayoutVerifier.newerInTarget(old, m.build()));
+        // a column that only the target has
+        Row.Builder only = BTreeRow.sortedBuilder();
+        only.newRow(c(1));
+        only.addPrimaryKeyLivenessInfo(LivenessInfo.create(101));
+        only.addCell(BufferCell.live(v, 101, ByteBufferUtil.bytes("v1")));
+        Row without = only.build();
+        assertTrue(LayoutVerifier.newerInTarget(without, old));
+        assertFalse("a column only the authoritative row has is a difference", LayoutVerifier.newerInTarget(old, without));
+        // equal rows differ in nothing
+        assertFalse(LayoutVerifier.newerInTarget(old, mk(1)));
     }
 
     // ---- row comparison ----

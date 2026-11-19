@@ -20,11 +20,13 @@ package org.apache.cassandra.autonomic.layout;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.LongSupplier;
 
@@ -49,7 +51,6 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.service.StorageProxy;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Dispatcher;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -60,8 +61,11 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  * extra is re-read on its own after a delay, up to {@link #recheckAttempts} times in all, to let in-flight dual writes
  * settle; what still differs after that is a mismatch.
  *
- * <p>The three kinds of mismatch are reported apart (see {@link Kind}); this class does not decide what any of them
- * means for the migration.
+ * <p>The kinds of mismatch are reported apart (see {@link Kind}); this class does not decide what any of them
+ * means for the migration, except that the kinds of the <em>tolerated</em> set are counted and do not fail the
+ * verification. The tables have roles (T6.17e): in the {@link Direction#FORWARD forward} direction the base table is
+ * authoritative and the overflow table the target, in {@link Direction#REVERSE} the other way round. The roles decide
+ * which side {@link Kind#NEWER_IN_TARGET} is looked for on; the kinds are named after the physical tables.
  *
  * <p>Verification is <em>steppable</em>: {@link #step} does a bounded amount of work, one page of each table or one
  * batch of re-reads, never sleeps, and keeps all of its progress in this object, so an actuator can run it in steps
@@ -105,7 +109,35 @@ public final class LayoutVerifier
          * The row is in the overflow table and not in the base table. Arises legitimately: a write of class C1 whose
          * overflow copy succeeded and whose base copy did not was never acknowledged.
          */
-        MISSING_FROM_BASE
+        MISSING_FROM_BASE,
+        /**
+         * The row is in both tables and differs only in cells that are newer in the target than in the authoritative
+         * table (strictly greater timestamp), or that the target has and the authoritative table has not: the write
+         * of an update whose target copy succeeded and whose authoritative copy did not, an unknown-outcome write that
+         * D6 allows to show after the cutover (hazard 4 of design 11.9). Re-copying from the authoritative table cannot
+         * remove it. Tolerated and counted in both directions.
+         */
+        NEWER_IN_TARGET
+    }
+
+    /** Which table is authoritative. */
+    public enum Direction
+    {
+        /** Split: the base table is authoritative, the overflow table is the target. */
+        FORWARD,
+        /** Unsplit: the overflow table is authoritative, the base table is the target. */
+        REVERSE
+    }
+
+    /**
+     * The kinds tolerated by default: {@link Kind#NEWER_IN_TARGET} in both directions (owner answer 8); and in the
+     * reverse direction {@link Kind#MISSING_FROM_OVERFLOW}, a base-only row, which is an unacknowledged write (C2
+     * writes the base table first) or, in fast mode, an unacknowledged straggler in the residue. The forward verifier
+     * fails on a row that is only in the overflow table too: the actuator decides what to do with the counts (ADR-030).
+     */
+    public static Set<Kind> defaultTolerated(Direction direction)
+    {
+        return direction == Direction.REVERSE ? EnumSet.of(Kind.NEWER_IN_TARGET, Kind.MISSING_FROM_OVERFLOW) : EnumSet.of(Kind.NEWER_IN_TARGET);
     }
 
     public enum Status
@@ -159,6 +191,8 @@ public final class LayoutVerifier
     private final ClusteringComparator comparator;
     private final Reader base;
     private final Reader overflow;
+    private final Direction direction;
+    private final Set<Kind> tolerated;
     private final int pageRows;
     private final int recheckAttempts;
     private final long recheckDelayMillis;
@@ -176,14 +210,23 @@ public final class LayoutVerifier
     private boolean overflowed;
     private Status status = Status.RUNNING;
 
+    /** The forward verifier of VERIFY: base authoritative, {@link #defaultTolerated}. */
     public LayoutVerifier(ClusteringComparator comparator, Reader base, Reader overflow, int pageRows, int recheckAttempts, long recheckDelayMillis,
                           LongSupplier clockMillis)
+    {
+        this(comparator, base, overflow, Direction.FORWARD, defaultTolerated(Direction.FORWARD), pageRows, recheckAttempts, recheckDelayMillis, clockMillis);
+    }
+
+    public LayoutVerifier(ClusteringComparator comparator, Reader base, Reader overflow, Direction direction, Set<Kind> tolerated, int pageRows,
+                          int recheckAttempts, long recheckDelayMillis, LongSupplier clockMillis)
     {
         if (pageRows < 1 || recheckAttempts < 1)
             throw new IllegalArgumentException("page rows and re-check attempts must be positive");
         this.comparator = comparator;
         this.base = base;
         this.overflow = overflow;
+        this.direction = direction;
+        this.tolerated = tolerated.isEmpty() ? EnumSet.noneOf(Kind.class) : EnumSet.copyOf(tolerated);
         this.pageRows = pageRows;
         this.recheckAttempts = recheckAttempts;
         this.recheckDelayMillis = recheckDelayMillis;
@@ -240,8 +283,9 @@ public final class LayoutVerifier
     private long total()
     {
         long total = 0;
-        for (long c : counts)
-            total += c;
+        for (Kind k : Kind.values())
+            if (!tolerated.contains(k))
+                total += counts[k.ordinal()];
         return total + (overflowed ? 1 : 0);
     }
 
@@ -290,7 +334,7 @@ public final class LayoutVerifier
                 j++;
                 String diff = diff(br, or);
                 if (diff != null)
-                    suspect(at, Kind.CONTENT_DIFFERS, diff, now);
+                    suspect(at, classify(br, or), diff, now);
             }
             if (overflowed)
                 return;
@@ -354,7 +398,7 @@ public final class LayoutVerifier
             else
             {
                 detail = diff(br, or);
-                kind = detail == null ? null : Kind.CONTENT_DIFFERS;
+                kind = detail == null ? null : classify(br, or);
             }
 
             if (kind == null)
@@ -389,9 +433,29 @@ public final class LayoutVerifier
         return new ArrayList<>(samples);
     }
 
+    /** The confirmed mismatches of the kind, tolerated or not. */
     public long count(Kind kind)
     {
         return counts[kind.ordinal()];
+    }
+
+    public boolean isTolerated(Kind kind)
+    {
+        return tolerated.contains(kind);
+    }
+
+    /** The confirmed mismatches of the tolerated kinds: counted, and not a reason to fail. */
+    public long toleratedCount()
+    {
+        long total = 0;
+        for (Kind k : tolerated)
+            total += counts[k.ordinal()];
+        return total;
+    }
+
+    public Direction direction()
+    {
+        return direction;
     }
 
     /** Rows that differed at first sight and did not at a re-read. */
@@ -420,10 +484,99 @@ public final class LayoutVerifier
     {
         return status + ": " + rowsCompared + " rows compared, " + counts[Kind.CONTENT_DIFFERS.ordinal()] + " content mismatches, "
                + counts[Kind.MISSING_FROM_OVERFLOW.ordinal()] + " missing from the overflow table, " + counts[Kind.MISSING_FROM_BASE.ordinal()]
-               + " missing from the base table, " + settled + " settled at a re-read" + (overflowed ? ", too many differences" : "");
+               + " missing from the base table, " + counts[Kind.NEWER_IN_TARGET.ordinal()] + " newer in the target, " + toleratedCount()
+               + " tolerated, " + settled + " settled at a re-read" + (overflowed ? ", too many differences" : "");
     }
 
     // ---- comparing rows ----
+
+    /** The kind of a difference between the base and the overflow row ({@link #diff} found one). */
+    private Kind classify(Row baseRow, Row overflowRow)
+    {
+        Row authoritative = direction == Direction.FORWARD ? baseRow : overflowRow;
+        Row target = direction == Direction.FORWARD ? overflowRow : baseRow;
+        return newerInTarget(authoritative, target) ? Kind.NEWER_IN_TARGET : Kind.CONTENT_DIFFERS;
+    }
+
+    /**
+     * True if the rows differ and every difference is a cell (or the row liveness) that is strictly newer in the
+     * target, or a column the target has and the authoritative row has not.
+     */
+    static boolean newerInTarget(Row authoritative, Row target)
+    {
+        if (!authoritative.clustering().equals(target.clustering()) || !authoritative.deletion().equals(target.deletion()))
+            return false;
+        boolean newer = false;
+        long la = authoritative.primaryKeyLivenessInfo().timestamp();
+        long lt = target.primaryKeyLivenessInfo().timestamp();
+        if (la != lt)
+        {
+            if (lt < la)
+                return false;
+            newer = true;
+        }
+        else if (authoritative.primaryKeyLivenessInfo().ttl() != target.primaryKeyLivenessInfo().ttl()
+                 || authoritative.primaryKeyLivenessInfo().localExpirationTime() != target.primaryKeyLivenessInfo().localExpirationTime())
+        {
+            return false;
+        }
+
+        Iterator<ColumnData> ia = authoritative.columnData().iterator();
+        Iterator<ColumnData> it = target.columnData().iterator();
+        ColumnData ca = ia.hasNext() ? ia.next() : null;
+        ColumnData ct = it.hasNext() ? it.next() : null;
+        while (ca != null || ct != null)
+        {
+            int c = ca == null ? 1 : ct == null ? -1 : ca.column().compareTo(ct.column());
+            if (c < 0)
+                return false;
+            if (c > 0)
+            {
+                // a column only the target has
+                newer = true;
+                ct = it.hasNext() ? it.next() : null;
+                continue;
+            }
+            if (ca instanceof ComplexColumnData != ct instanceof ComplexColumnData)
+                return false;
+            if (ca instanceof ComplexColumnData)
+            {
+                ComplexColumnData xa = (ComplexColumnData) ca;
+                ComplexColumnData xt = (ComplexColumnData) ct;
+                if (!xa.complexDeletion().equals(xt.complexDeletion()) || xa.cellsCount() != xt.cellsCount())
+                    return false;
+                Iterator<Cell<?>> sa = xa.iterator();
+                Iterator<Cell<?>> st = xt.iterator();
+                while (sa.hasNext())
+                {
+                    Cell<?> a = sa.next();
+                    Cell<?> t = st.next();
+                    if (a.path() == null != (t.path() == null) || (a.path() != null && !a.path().equals(t.path())))
+                        return false;
+                    if (diff("", a, t) != null)
+                    {
+                        if (t.timestamp() <= a.timestamp())
+                            return false;
+                        newer = true;
+                    }
+                }
+            }
+            else
+            {
+                Cell<?> a = (Cell<?>) ca;
+                Cell<?> t = (Cell<?>) ct;
+                if (diff("", a, t) != null)
+                {
+                    if (t.timestamp() <= a.timestamp())
+                        return false;
+                    newer = true;
+                }
+            }
+            ca = ia.hasNext() ? ia.next() : null;
+            ct = it.hasNext() ? it.next() : null;
+        }
+        return newer;
+    }
 
     /** Null if the rows are the same in everything that verification sees; else the first difference. */
     static String diff(Row a, Row b)
@@ -507,6 +660,19 @@ public final class LayoutVerifier
     public static LayoutVerifier forPartition(ClusterMetadata cm, TableId logical, ByteBuffer key, ConsistencyLevel consistencyLevel, int pageRows,
                                               int recheckAttempts, long recheckDelayMillis, LongSupplier clockMillis)
     {
+        return forPartition(cm, logical, key, Direction.FORWARD, defaultTolerated(Direction.FORWARD), consistencyLevel, pageRows, recheckAttempts,
+                            recheckDelayMillis, clockMillis);
+    }
+
+    /**
+     * As above with the roles and the tolerated kinds given (T6.17e). The base table is read through
+     * {@link LayoutReads#readBase}, which bypasses H17: in a reverse phase of class C2 the hook would send the read to
+     * the overflow table.
+     */
+    public static LayoutVerifier forPartition(ClusterMetadata cm, TableId logical, ByteBuffer key, Direction direction, Set<Kind> tolerated,
+                                              ConsistencyLevel consistencyLevel, int pageRows, int recheckAttempts, long recheckDelayMillis,
+                                              LongSupplier clockMillis)
+    {
         LayoutRegistry registry = LayoutRegistry.of(cm);
         RoutedKey routed = RoutedKey.of(cm, registry, logical, key);
         if (routed == null)
@@ -514,7 +680,7 @@ public final class LayoutVerifier
         TableMetadata table = RoutedKey.logical(cm, routed.layout);
         DecoratedKey decorated = table.partitioner.decorateKey(key);
         return new LayoutVerifier(table.comparator, new TableReader(table, decorated, null, consistencyLevel),
-                                  new TableReader(table, decorated, new Overflow(cm, routed), consistencyLevel),
+                                  new TableReader(table, decorated, new Overflow(cm, routed), consistencyLevel), direction, tolerated,
                                   pageRows, recheckAttempts, recheckDelayMillis, clockMillis);
     }
 
@@ -574,7 +740,7 @@ public final class LayoutVerifier
             Dispatcher.RequestTime requestTime = Dispatcher.RequestTime.forImmediateExecution();
             List<Row> rows = new ArrayList<>();
             try (PartitionIterator partitions = overflow == null
-                                                ? StorageProxy.read(SinglePartitionReadCommand.Group.one(command), consistencyLevel, requestTime)
+                                                ? LayoutReads.readBase(SinglePartitionReadCommand.Group.one(command), consistencyLevel, requestTime)
                                                 : LayoutReads.fanOut(command, overflow.routed, overflow.cm, consistencyLevel, requestTime, () -> {}))
             {
                 while (partitions.hasNext())

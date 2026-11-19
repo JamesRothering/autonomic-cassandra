@@ -62,10 +62,17 @@ public class LayoutVerifierTest extends TestBaseImpl
     /** Runs a verification of the partition on the node to its end; the report is the summary and one line per mismatch. */
     private static String verify(IInvokableInstance node, int pageRows)
     {
+        return verify(node, pageRows, LayoutVerifier.Direction.FORWARD);
+    }
+
+    private static String verify(IInvokableInstance node, int pageRows, LayoutVerifier.Direction direction)
+    {
+        String directionName = direction.name();
         return node.callOnInstance(() -> {
+            LayoutVerifier.Direction d = LayoutVerifier.Direction.valueOf(directionName);
             ClusterMetadata cm = ClusterMetadata.current();
             TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
-            LayoutVerifier verifier = LayoutVerifier.forPartition(cm, logical, Int32Type.instance.decompose(K),
+            LayoutVerifier verifier = LayoutVerifier.forPartition(cm, logical, Int32Type.instance.decompose(K), d, LayoutVerifier.defaultTolerated(d),
                                                                   org.apache.cassandra.db.ConsistencyLevel.ALL, pageRows, 3, 50, Clock.Global::currentTimeMillis);
             long deadline = System.nanoTime() + 60_000_000_000L;
             while (verifier.step() == LayoutVerifier.Status.RUNNING)
@@ -146,6 +153,61 @@ public class LayoutVerifierTest extends TestBaseImpl
                 assertTrue(report, report.contains("CONTENT_DIFFERS c=13") || report.contains("CONTENT_DIFFERS 13"));
                 assertTrue(report, report.contains("MISSING_FROM_OVERFLOW c=22") || report.contains("MISSING_FROM_OVERFLOW 22"));
                 assertTrue(report, report.contains("MISSING_FROM_BASE c=77") || report.contains("MISSING_FROM_BASE 77"));
+            }
+        }
+    }
+
+    /**
+     * T6.17e: the verifier with the roles swapped (overflow authoritative, base the target), at a phase in which the
+     * read hook sends every read of the key to the overflow table, so that the base table is only reached by the
+     * bypass. A base row changed behind the router's back fails it and is named; a base-only row and a base cell that
+     * is newer are tolerated and counted.
+     */
+    @Test
+    public void corruptedBaseRowFailsReverseVerificationWithItsClustering() throws Exception
+    {
+        try (Cluster cluster = init(Cluster.build(2)
+                                           .withConfig(c -> c.with(NETWORK, GOSSIP).set("autonomic.enabled", c.num() == 1))
+                                           .start()))
+        {
+            IInvokableInstance n1 = cluster.get(1);
+            cluster.schemaChange("CREATE TABLE " + KEYSPACE + ".t (p int, c int, v int, s text, PRIMARY KEY (p, c))");
+            String derived = n1.callOnInstance(() -> PhysicalTables.derive(Schema.instance.getTableMetadata(KEYSPACE, "t"), LAYOUT_ID, TableId.generate()));
+            cluster.schemaChange(derived);
+            ClusterUtils.waitForCMSToQuiesce(cluster, n1);
+
+            String id = register(n1, 1);
+            ClusterUtils.waitForCMSToQuiesce(cluster, n1);
+            advance(cluster, id, Phase.ANNOUNCED, Phase.DUAL_WRITE);
+            for (int c = 0; c < 40; c++)
+                cluster.coordinator(1 + c % 2).execute("INSERT INTO " + KEYSPACE + ".t (p, c, v, s) VALUES (" + K + ", " + c + ", " + c + ", 's" + c + "') USING TIMESTAMP "
+                                                       + (1000 + c), ConsistencyLevel.ALL);
+            advance(cluster, id, Phase.DUAL_WRITE, Phase.BACKFILL);
+            advance(cluster, id, Phase.BACKFILL, Phase.VERIFY);
+            advance(cluster, id, Phase.VERIFY, Phase.CUTOVER);
+            advance(cluster, id, Phase.CUTOVER, Phase.NEW_ONLY);
+
+            for (int node = 1; node <= 2; node++)
+            {
+                String report = verify(cluster.get(node), 7, LayoutVerifier.Direction.REVERSE);
+                assertTrue(report, report.startsWith("PASSED: 40 rows compared"));
+            }
+
+            for (int node = 1; node <= 2; node++)
+            {
+                IInvokableInstance n = cluster.get(node);
+                n.executeInternal("INSERT INTO " + KEYSPACE + '.' + "t (p, c, v, s) VALUES (?, 13, 999, 's13') USING TIMESTAMP 1013", K);
+                n.executeInternal("INSERT INTO " + KEYSPACE + '.' + "t (p, c, v, s) VALUES (?, 5, 5, 's5') USING TIMESTAMP 5000", K);
+                n.executeInternal("INSERT INTO " + KEYSPACE + '.' + "t (p, c, v) VALUES (?, 77, 1) USING TIMESTAMP 1077", K);
+            }
+            for (int node = 1; node <= 2; node++)
+            {
+                String report = verify(cluster.get(node), 7, LayoutVerifier.Direction.REVERSE);
+                String[] lines = report.split("\n");
+                assertTrue(report, lines[0].startsWith("FAILED: "));
+                assertTrue(report, lines[0].contains("1 content mismatches, 1 missing from the overflow table, 0 missing from the base table, 1 newer in the target, 2 tolerated"));
+                assertTrue(report, report.contains("CONTENT_DIFFERS c=13") || report.contains("CONTENT_DIFFERS 13"));
+                assertTrue(report, report.contains("NEWER_IN_TARGET c=5") || report.contains("NEWER_IN_TARGET 5"));
             }
         }
     }
