@@ -328,7 +328,7 @@ public class PartitionSplitPolicyTest
     @Test
     public void handlesHotPartition()
     {
-        assertEquals(java.util.Set.of("hot_partition", "layout.orphaned"), policy.handles());
+        assertEquals(java.util.Set.of("hot_partition", "layout.orphaned", "layout.reclaim_due"), policy.handles());
         assertEquals("partition_split", policy.name());
     }
 
@@ -774,6 +774,67 @@ public class PartitionSplitPolicyTest
         for (int i = 0; i < 4; i++)
             assertEquals(Optional.empty(), tick(d));
         assertEquals(0, env.probesStarted);
+    }
+
+    // ---- reclaim (ADR-036) ----
+
+    private static KeyState released(long frozenSince, UUID owner, KeyState.BaseState base)
+    {
+        return new KeyState(Phase.STEADY, Epoch.create(10), 1000, 1, 1, Epoch.create(10), ImmutableSet.of(), owner, 500, ImmutableSet.of(),
+                            base, frozenSince, 0, null, 0);
+    }
+
+    private static Diagnosis reclaimDue()
+    {
+        return new Diagnosis(UUID.randomUUID(), "layout.reclaim_due", Subject.partition(KS, TABLE, KEY_HEX), Severity.INFO, 1, 0, 0, "due",
+                             Map.of("key_hex", KEY_HEX, "table", KS + '.' + TABLE), null);
+    }
+
+    /** The reclaim is proposed exactly when it is due: not before, not while the key is owned, not in a reverse phase. */
+    @Test
+    public void aReclaimIsProposedExactlyWhenItIsDueByThePreferredProposer()
+    {
+        config.layout.reclaim_window = new org.apache.cassandra.config.DurationSpec.LongMillisecondsBound("1h");
+        long frozen = now[0];
+        useRegistry(layout(LOGICAL, 8, Map.of(KEY, released(frozen, null, KeyState.BaseState.RESIDUE))));
+        Diagnosis d = reclaimDue();
+        now[0] = frozen + 3_600_000 - 1;
+        assertEquals("not yet due", Optional.empty(), policy.plan(d, view));
+        now[0] = frozen + 3_600_000;
+        Optional<Plan> plan = policy.plan(d, view);
+        assertTrue(plan.isPresent());
+        Action a = plan.get().actions.get(0);
+        assertEquals(PartitionSplitActuator.MODE_RECLAIM, a.params.get(PartitionSplitActuator.PARAM_MODE));
+        assertEquals(PartitionSplitActuator.target(KS, TABLE, KEY_HEX), a.target);
+        assertEquals(d.id, plan.get().diagnosisId);
+
+        // only the preferred proposer, no member down, no claim on the lane
+        env.preferred = false;
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        env.preferred = true;
+        env.notAlive.add(new NodeId(3));
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        env.notAlive.clear();
+        ledger = new ClusterLedger(ClusterLedger.FORMAT_VERSION, true,
+                                   Map.of(Lane.SCHEMA_LAYOUT, new Claim(UUID.randomUUID(), "partition_split", "x", new NodeId(1), "CLAIMED", 0, 0, 1, Map.of())),
+                                   List.of());
+        assertEquals(Optional.empty(), policy.plan(d, view));
+        ledger = ClusterLedger.EMPTY;
+
+        // never while owned, already tombstoned, in a forward phase before STEADY, or in any reverse phase
+        useRegistry(layout(LOGICAL, 8, Map.of(KEY, released(frozen, new UUID(7, 7), KeyState.BaseState.RESIDUE))));
+        assertEquals("owned", Optional.empty(), policy.plan(d, view));
+        useRegistry(layout(LOGICAL, 8, Map.of(KEY, released(frozen, null, KeyState.BaseState.TOMBSTONED))));
+        assertEquals("tombstoned", Optional.empty(), policy.plan(d, view));
+        for (Phase phase : Phase.values())
+        {
+            if (phase == Phase.STEADY)
+                continue;
+            KeyState k = new KeyState(phase, Epoch.create(10), 1000, 1, 1, Epoch.create(10), ImmutableSet.of(), new UUID(7, 7), 500, ImmutableSet.of(),
+                                      KeyState.BaseState.RESIDUE, frozen, 0, phase.isReverse() ? KeyState.ReverseMode.FAST : null, 0);
+            useRegistry(layout(LOGICAL, 8, Map.of(KEY, k)));
+            assertEquals(phase.name(), Optional.empty(), policy.plan(d, view));
+        }
     }
 
     // ---- helpers for the registry ----

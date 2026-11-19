@@ -56,6 +56,11 @@ public final class LayoutRegistry
      * registry of this format is written as format 1 (so that a node that cannot read format 2 can still read it).
      */
     public static final int FORMAT_VERSION = 1;
+    /**
+     * The {@code previousActionId} of an {@code AdoptKey} for a key that nobody owns: a {@code STEADY} key in base state
+     * {@code RESIDUE}, adopted by a reclaim (ADR-036).
+     */
+    public static final UUID NO_ACTION = new UUID(0, 0);
     /** Adds the base state fields of {@link KeyState} and the reverse phases (design 11.5). */
     public static final int FORMAT_VERSION_2 = 2;
     /** The newest format this code reads and writes. */
@@ -347,6 +352,12 @@ public final class LayoutRegistry
         KeyState state = layout.keyState(key);
         if (state.phase != phase)
             return reject("key is in phase " + state.phase + ", not " + phase);
+        if (state.actionId == null && NO_ACTION.equals(previous))
+        {
+            if (state.phase != Phase.STEADY || state.baseState != KeyState.BaseState.RESIDUE)
+                return reject("key is in phase " + state.phase + " with base state " + state.baseState + "; only a STEADY key in RESIDUE is adopted from no owner");
+            return changed(logical, layout.withKey(key, state.withAction(actionId)));
+        }
         if (state.actionId == null)
             return reject("key is in phase " + state.phase + " and owned by no action");
         if (actionId.equals(state.actionId))

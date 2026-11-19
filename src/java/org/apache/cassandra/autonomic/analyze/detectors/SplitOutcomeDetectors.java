@@ -29,6 +29,7 @@ import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.analyze.Detector;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
@@ -45,7 +46,7 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 
 /**
  * The outcomes of a partition split that an operator should look at (adaptive-schema design 7.3), as WARN diagnoses of
- * the key's partition subject that stay open for {@link #OPEN_MILLIS} after the outcome. Nothing is proposed for
+ * the key's partition subject that stay open for {@link #OPEN_MILLIS} after the outcome. Nothing (but the reclaim, ADR-036) is proposed for
  * them: reverse migration (T6.17) is not built.
  */
 public final class SplitOutcomeDetectors
@@ -53,6 +54,7 @@ public final class SplitOutcomeDetectors
     public static final String VERIFY_FAILED = "layout.verify_failed";
     public static final String SPLIT_NOT_EFFECTIVE = "layout.split_not_effective";
     public static final String ORPHANED = PartitionSplitActuator.ORPHANED;
+    public static final String RECLAIM_DUE = PartitionSplitActuator.RECLAIM_DUE;
     public static final long OPEN_MILLIS = 24L * 3_600_000;
 
     private SplitOutcomeDetectors()
@@ -203,6 +205,59 @@ public final class SplitOutcomeDetectors
             }
             firstSeen.keySet().retainAll(seen.keySet());
             firstSeen.putAll(seen);
+            return out;
+        }
+    }
+
+    /**
+     * A split key whose action has released it and whose base partition still holds the pre-split data, once the time
+     * after which a fast reverse could no longer be completed has passed (ADR-036, design 11.5). The policy
+     * {@code partition_split} proposes the {@code reclaim} on the preferred proposer. Never raised for a key that is
+     * owned or in a reverse phase: only a released {@code STEADY} key in base state {@code RESIDUE} qualifies.
+     */
+    public static final class ReclaimDue implements Detector
+    {
+        private final Supplier<ClusterMetadata> metadata;
+        private final Supplier<AutonomicConfig.LayoutConfig> config;
+
+        public ReclaimDue(Supplier<ClusterMetadata> metadata, Supplier<AutonomicConfig.LayoutConfig> config)
+        {
+            this.metadata = metadata;
+            this.config = config;
+        }
+
+        @Override
+        public String name()
+        {
+            return RECLAIM_DUE;
+        }
+
+        @Override
+        public Set<SignalId> requires()
+        {
+            return Collections.emptySet();
+        }
+
+        @Override
+        public List<Diagnosis> analyze(KnowledgeView knowledge)
+        {
+            ClusterMetadata cm = metadata.get();
+            if (cm == null)
+                return Collections.emptyList();
+            long now = knowledge.nowMillis();
+            List<Diagnosis> out = new ArrayList<>();
+            for (PartitionSplitActuator.Orphan o : PartitionSplitActuator.reclaimsDue(cm, now, config.get()))
+            {
+                UUID id = id(RECLAIM_DUE, UUID.nameUUIDFromBytes((o.layout.layoutId + ":" + o.keyHex() + ':' + o.state.incarnation)
+                                                                 .getBytes(StandardCharsets.UTF_8)));
+                Map<String, String> evidence = new LinkedHashMap<>();
+                evidence.put("key_hex", o.keyHex());
+                evidence.put("table", o.layout.keyspace + '.' + o.layout.logicalName);
+                evidence.put("frozen_since", Long.toString(o.state.frozenSinceMillis));
+                out.add(new Diagnosis(id, RECLAIM_DUE, Subject.partition(o.layout.keyspace, o.layout.logicalName, o.keyHex()), Severity.INFO, 1.0, now, now,
+                                      "The base partition of 0x" + o.keyHex() + " of " + o.layout.keyspace + '.' + o.layout.logicalName
+                                      + " still holds its pre-split data and its reclaim is due", evidence, null));
+            }
             return out;
         }
     }

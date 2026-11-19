@@ -3216,6 +3216,9 @@ storage_compatibility_mode: NONE
 #     commit_approval: manual
 #     # CLEANUP waits this long for late writes before the reconcile pass and the base partition tombstone
 #     straggler_window: 3h
+#     # time after a split completes before the base residue is deleted by the reclaim action; default: half of gc_grace_seconds
+#     # less straggler_window, reconcile_budget and cutover_soak
+#     # reclaim_window: 10d
 #     # the commit point is taken only while straggler_window plus reconcile_budget (the reconcile pass, its
 #     # acknowledgement and FinishKey) still end before the replicas stop copying, half of gc_grace_seconds after
 #     # DUAL_WRITE started; otherwise the split rolls back from CUTOVER. A table whose gc_grace_seconds cannot fit one

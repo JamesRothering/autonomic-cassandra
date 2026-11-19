@@ -312,6 +312,7 @@ public class AutonomicService implements AutonomicServiceMBean
         out.add(new SplitOutcomeDetectors.VerifyFailed());
         out.add(new SplitOutcomeDetectors.SplitNotEffective());
         out.add(new SplitOutcomeDetectors.Orphaned(ClusterMetadata::currentNullable, () -> DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS)));
+        out.add(new SplitOutcomeDetectors.ReclaimDue(ClusterMetadata::currentNullable, () -> config.layout));
         return out;
     }
 

@@ -134,7 +134,7 @@ t  t_al_14810cff
   - What holds it: hint delivery paused (`nodetool pausehandoff`) on any node, a replica that refuses or times out on hints, a corrupt hints file, or a large backlog toward one of the key's replicas. `nodetool autonomic layout status` shows `waits for hint reports (ADR-035), <n> of <m> nodes reported`, and each waiting node logs `waits in ANNOUNCED until this node has delivered the hints created before the split` once a minute with the oldest file per host.
   - If the reports are not all in within `layout.hint_drain_timeout` (default 10m) after every node acknowledged `ANNOUNCED`, the migration aborts before the commit point. The abort reason starts with `HINTS_NOT_DRAINED` and names the nodes that still hold hints (`nodetool autonomic events <id>`, `layout status` while it aborts). No data is lost: the key goes back to the base table, where the hints land.
   - To clear it: on each named node, run `nodetool listpendinghints` and `nodetool statushandoff`; resume delivery with `nodetool resumehandoff` and wait for the backlog to drain, or, if you accept losing those hints (and repair the replicas afterwards), drop them with `nodetool truncatehints <replica address>`. Then propose the split again.
-- **Base rows stay on disk** after `CLEANUP` until the base partition tombstone is written. They are unreachable through the logical table. Reverse migration must not assume the base partition is empty (ADR-033).
+- **Base rows stay on disk** after the split is complete (`STEADY`, status `base residue kept`) until a separate `reclaim` action writes the base partition tombstone, `autonomic.layout.reclaim_window` after the key froze (default: half of the table's `gc_grace_seconds` less `straggler_window`, `reconcile_budget` and `cutover_soak`, i.e. when a fast reverse can no longer be completed). The reclaim is proposed by the policy and needs the usual cluster approval. The rows are unreachable through the logical table. Reverse migration must not assume the base partition is empty (ADR-033, ADR-036).
 - **Replicas stop backfilling** once the local clock is past `DUAL_WRITE` start plus half of the table's `gc_grace_seconds` (ADR-031). This depends on clock sync between nodes.
 - **A split that verification finds ineffective stays split.** It raises `layout.split_not_effective`. Until reverse migration exists, the only way back is an abort before the commit point (ADR-025).
 
@@ -181,6 +181,7 @@ autonomic:
     commit_approval: manual        # a second `approve` is needed before the commit point
     cutover_soak: 10m              # CUTOVER is held this long before the commit point
     straggler_window: 3h           # CLEANUP waits this long for late writes
+    # reclaim_window: 10d          # time after a split before the base residue is deleted (default: gc_grace/2 - straggler_window - reconcile_budget - cutover_soak)
     max_migration_duration: 24h    # the longest time before the commit point
     backfill_throughput: 1MiB/s    # per node, 0 is unlimited
     cas_drain: 15s                 # ANNOUNCED waits at least this, and the longest request timeout
@@ -430,7 +431,7 @@ Empty result (`(0 rows)`) means no key is split.
 | `VERIFY` | Both copies are compared row by row. A mismatch fails the check and starts one more backfill generation. |
 | `CUTOVER` | Writes go to both copies, the base copy first. Reads move to the overflow table. The soak (`cutover_soak`) starts here. An abort here is still possible. |
 | `NEW_ONLY` | The commit point. Writes go only to the overflow table. Abort is refused. |
-| `CLEANUP` | The owner waits `straggler_window`, copies late data, then writes the base partition tombstone. Base rows stay on disk until then (ADR-033). |
+| `CLEANUP` | The owner waits `straggler_window` and copies late data. It does not delete the base rows: they stay on disk as residue until the later `reclaim` writes the base partition tombstone (ADR-036). |
 | `STEADY` | The split is done. The claim is released. |
 | `ROLLBACK_DUAL`, `ABORTING` | Abort in progress. The key is removed from the table when the abort finishes. |
 

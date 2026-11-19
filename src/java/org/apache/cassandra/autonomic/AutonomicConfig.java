@@ -150,6 +150,13 @@ public class AutonomicConfig
          * the replicas' tombstone deadline (ADR-031); otherwise the migration rolls back from CUTOVER.
          */
         public DurationSpec.LongMillisecondsBound reconcile_budget = new DurationSpec.LongMillisecondsBound("30m");
+        /**
+         * ADR-036: when set, the base partition tombstone of a split key is written this long after the key was frozen
+         * (entered STEADY's class), in place of the time computed from {@code gc_grace_seconds}, {@code straggler_window},
+         * {@code reconcile_budget} and {@code cutover_soak} (design 11.5). For tests and for operators who want the space
+         * back sooner; a shorter window closes the fast reverse sooner.
+         */
+        public DurationSpec.LongMillisecondsBound reclaim_window = null;
         /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
         public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
 

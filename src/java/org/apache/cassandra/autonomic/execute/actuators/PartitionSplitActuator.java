@@ -53,6 +53,7 @@ import org.apache.cassandra.autonomic.execute.ActionContext;
 import org.apache.cassandra.autonomic.execute.ClusterActionExecution;
 import org.apache.cassandra.autonomic.execute.ClusterActuator;
 import org.apache.cassandra.autonomic.execute.StepResult;
+import org.apache.cassandra.autonomic.execute.Verdict;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.layout.AdoptKey;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
@@ -139,10 +140,17 @@ import org.apache.cassandra.utils.LocalizeString;
  * reconcile generation and waits for it; then the base tombstone's timestamp is written ahead, completion and
  * placement are checked again on every step until {@code FinishKey} (a change starts a new reconcile generation), and
  * {@code FinishKey} itself is rejected unless every natural replica at its epoch reported (ADR-033). In STEADY, once
- * every node acknowledged STEADY, the base partition tombstone is written at ALL and {@code ReleaseKey} ends the
- * action's ownership of the key. The tombstone is written after FinishKey, not before as 4.1 lists it: in CLEANUP a
- * replica that becomes a natural replica of the key without having reported would run the reconcile pass over a base
- * partition that already holds the tombstone, and copy it into every bucket.
+ * every node acknowledged STEADY, {@code ReleaseKey} ends the action's ownership of the key with base state
+ * {@code RESIDUE} (ADR-036, T6.17b): the base partition is not deleted here. A tombstone is never written while a
+ * reconcile pass can still run, and in STEADY none can; the later {@code reclaim} writes it.
+ *
+ * <p><b>Reclaim</b> (mode {@value #MODE_RECLAIM}, ADR-036, a {@link #continuation}): for a STEADY key that no action
+ * owns, in base state {@code RESIDUE}, once {@link #reclaimDueMillis} has passed (the time after which a fast reverse can
+ * no longer be completed, or {@code reclaim_window} after the freeze if configured). It adopts the key
+ * ({@code AdoptKey}, from no owner), waits for acknowledgement and the write timeout, writes the base partition
+ * tombstone at ALL with {@link Env#deleteBase} and releases the key with {@code TOMBSTONED(Tt)}. A reclaim that is
+ * stopped leaves the key owned and orphaned; its resume finishes the reclaim when it is still due. The tombstone only
+ * reclaims space and starts the slow-mode clock: safety rests on the windows, not on it.
  *
  * <p><b>Verification signals</b> (design 7.3), for a split the policy proposed with a profile: ANNOUNCED is held for
  * {@code baseline_window} from registration and the key's baseline is taken over it (too few operations:
@@ -186,6 +194,8 @@ public class PartitionSplitActuator implements ClusterActuator
     public static final String PARAM_MODE = "mode";
     public static final String MODE_SPLIT = "split";
     public static final String MODE_RESUME = "resume";
+    /** Writes the base partition tombstone of a split key that has been STEADY for its residue window (ADR-036). */
+    public static final String MODE_RECLAIM = "reclaim";
 
     // phases of the claim that are not phases of the key
     public static final String CREATING = "CREATING";
@@ -415,7 +425,7 @@ public class PartitionSplitActuator implements ClusterActuator
         if (t.rejection != null)
             return Optional.of(t.rejection);
         String mode = action.params.getOrDefault(PARAM_MODE, MODE_SPLIT);
-        if (!MODE_SPLIT.equals(mode) && !MODE_RESUME.equals(mode))
+        if (!MODE_SPLIT.equals(mode) && !MODE_RESUME.equals(mode) && !MODE_RECLAIM.equals(mode))
             return Optional.of("unknown mode " + text(mode));
         ClusterMetadata cm = env.metadata();
         KeyspaceMetadata ksm = cm.schema.getKeyspaces().getNullable(t.keyspace);
@@ -427,6 +437,8 @@ public class PartitionSplitActuator implements ClusterActuator
         KeyState state = layout == null ? null : layout.keyState(t.key);
         if (MODE_RESUME.equals(mode))
             return validateResume(cm, logical, t.key, state);
+        if (MODE_RECLAIM.equals(mode))
+            return validateReclaim(cm, logical, state);
 
         AutonomicConfig.LayoutConfig lc = layoutConfig();
         if (lc.excluded_tables != null && lc.excluded_tables.contains(logical.keyspace + '.' + logical.name))
@@ -483,7 +495,8 @@ public class PartitionSplitActuator implements ClusterActuator
     @Override
     public boolean continuation(Action action)
     {
-        if (!MODE_RESUME.equals(action.params.get(PARAM_MODE)))
+        String mode = action.params.get(PARAM_MODE);
+        if (!MODE_RESUME.equals(mode) && !MODE_RECLAIM.equals(mode))
             return false;
         Target t = Target.of(action.target);
         if (t.rejection != null)
@@ -492,7 +505,55 @@ public class PartitionSplitActuator implements ClusterActuator
         TableMetadata logical = cm.schema.getTableMetadata(t.keyspace, t.table);
         TableLayout layout = logical == null ? null : LayoutRegistry.of(cm).layout(logical.id);
         KeyState key = layout == null ? null : layout.keyState(t.key);
-        return key != null && key.actionId != null && key.phase.coordinatorClass == 3;
+        if (key == null)
+            return false;
+        if (MODE_RECLAIM.equals(mode))
+            return reclaimable(key);
+        return key.actionId != null && forwardPastCommit(key.phase);
+    }
+
+    /** NEW_ONLY, CLEANUP and STEADY: the forward phases of class C3. The reverse phases are not the split's. */
+    private static boolean forwardPastCommit(Phase phase)
+    {
+        return phase.coordinatorClass == 3 && !phase.isReverse();
+    }
+
+    /** A STEADY key that no action owns and whose base partition has not been deleted (ADR-036). */
+    private static boolean reclaimable(KeyState key)
+    {
+        return key.phase == Phase.STEADY && key.actionId == null && key.baseState == KeyState.BaseState.RESIDUE;
+    }
+
+    /**
+     * When the reclaim of a key is due (design 11.5): once a fast reverse could no longer be completed for the smallest
+     * estimate, {@code frozenSince + G - straggler_window - reconcile_budget - cutover_soak} with
+     * {@code G = gc_grace_seconds / 2}; or {@code frozenSince + reclaim_window} if that is configured. A key with no
+     * recorded freeze is due at once. Reusable by the unsplit actuator for a key stuck in CLEANUP (owner answer 6).
+     */
+    public static long reclaimDueMillis(KeyState key, TableMetadata logical, AutonomicConfig.LayoutConfig lc)
+    {
+        if (key.frozenSinceMillis <= 0)
+            return Long.MIN_VALUE;
+        if (lc.reclaim_window != null)
+            return key.frozenSinceMillis + lc.reclaim_window.toMilliseconds();
+        long g = logical.params.gcGraceSeconds * 1000L / 2;
+        return key.frozenSinceMillis + g - lc.straggler_window.toMilliseconds() - lc.reconcile_budget.toMilliseconds() - lc.cutover_soak.toMilliseconds();
+    }
+
+    private Optional<String> validateReclaim(ClusterMetadata cm, TableMetadata logical, KeyState state)
+    {
+        if (state == null)
+            return Optional.of("the key is not in the layout of " + logical.keyspace + '.' + logical.name + "; nothing to reclaim");
+        if (state.phase != Phase.STEADY)
+            return Optional.of("the key is in " + state.phase + "; only a STEADY key is reclaimed");
+        if (state.actionId != null)
+            return Optional.of("the key is owned by action " + state.actionId + "; it is not reclaimed while owned");
+        if (state.baseState != KeyState.BaseState.RESIDUE)
+            return Optional.of("the base partition of the key is already " + state.baseState);
+        long due = reclaimDueMillis(state, logical, layoutConfig());
+        if (env.nowMillis() < due)
+            return Optional.of("the reclaim of the key is due at " + due + ", not yet");
+        return Optional.empty();
     }
 
     private static LayoutProfiler.Shape profile(TableId table, ByteBuffer key)
@@ -508,7 +569,9 @@ public class PartitionSplitActuator implements ClusterActuator
         if (state.actionId != null && ClusterLedger.of(cm).claim(state.actionId) != null)
             return Optional.of("the migration of the key is running under action " + state.actionId);
         if (state.actionId == null)
-            return Optional.of("the key is split and its base partition tombstone is written; nothing to resume");
+            return Optional.of("the key is split and released; nothing to resume (a base residue is reclaimed by mode " + MODE_RECLAIM + ')');
+        if (state.phase.isReverse())
+            return Optional.of("the key is in the reverse phase " + state.phase + "; it is not the split's to resume");
         if (state.phase == Phase.CLEANUP && !complete(cm, logical, key, state) && env.nowMillis() >= replicaLimit(state, logical))
             return Optional.of("the key is in CLEANUP and its reconcile pass can no longer complete before the tombstone deadline (ADR-031); "
                                + "it stays routed to the overflow copy and its base copy is not deleted; it needs an operator decision");
@@ -567,13 +630,10 @@ public class PartitionSplitActuator implements ClusterActuator
         if (baseline != null)
             state.put(SplitEvaluation.S_BASELINE, baseline.encode());
         TableLayout layout = LayoutRegistry.of(cm).layout(logical.id);
-        if (MODE_RESUME.equals(mode))
+        if (MODE_RESUME.equals(mode) || MODE_RECLAIM.equals(mode))
         {
             state.put(S_PHYSICAL, layout.physical.toString());
             KeyState key = layout.keyState(t.key);
-            if (key.phase == Phase.STEADY)
-                // finished, and still owned: its base tombstone was not written (a stop between FinishKey and it)
-                state.put(S_TOMBSTONE, Long.toString(ctx.nowMillis() * 1000));
             if (PRE_COMMIT.contains(key.phase))
                 state.put(S_ABORT, "resumed by an operator before the commit point: the migration is aborted");
             return StepResult.advance(ADOPTING, state, 0);
@@ -771,14 +831,14 @@ public class PartitionSplitActuator implements ClusterActuator
             // never registered, or already removed: only the overflow table may be left
             return undoCreation(claim, v.cm, "the key is not in the layout registry; nothing to recover");
         if (v.key.phase == Phase.STEADY && v.key.actionId == null)
-            // finished and released by its action: nothing is left to do
-            return finished(v, ctx);
-        if (v.key.phase == Phase.STEADY && !claim.state.containsKey(S_TOMBSTONE))
         {
-            // owned, so its base tombstone may never have been written: write it again, after the adoption
-            Map<String, String> state = new TreeMap<>(claim.state);
-            state.put(S_TOMBSTONE, Long.toString(ctx.nowMillis() * 1000));
-            return StepResult.advance(claim.phase, state, 0);
+            if (!reclaiming(claim) || !reclaimable(v.key))
+                // finished and released by its action, or already reclaimed: nothing is left to do
+                return finished(v, ctx);
+            // a reclaim adopts a key that nobody owns (ADR-036)
+            AdoptKey adopt = new AdoptKey(claim.actionId, claim.owner, claim.step, v.logical.id, v.target.key, Phase.STEADY, LayoutRegistry.NO_ACTION,
+                                          ctx.nowMillis(), leaseMillis());
+            return StepResult.commit(adopt.wrap(), Phase.STEADY.name(), claim.state, 0);
         }
         if (mode == Mode.STOP && !PRE_COMMIT.contains(v.key.phase) && v.key.phase != Phase.STEADY)
             return StepResult.committedCleanupPending(v.name() + " is past its commit point in " + v.key.phase + " and was not adopted");
@@ -1091,7 +1151,6 @@ public class PartitionSplitActuator implements ClusterActuator
             // what verification and the commit approval recorded is not needed past the commit point
             state.keySet().removeAll(List.of(S_VERIFIED, S_VERIFY_FAILED, S_VERIFY_FAILURES, S_COMMIT_APPROVED));
             state.put(S_FINISHING, generation);
-            state.put(S_TOMBSTONE, Long.toString(ctx.nowMillis() * 1000));
             return StepResult.advance(Phase.CLEANUP.name(), state, 0);
         }
         if (!env.acknowledged(key.phaseEpoch))
@@ -1108,22 +1167,30 @@ public class PartitionSplitActuator implements ClusterActuator
                                  + "the base partition tombstone is not written. An operator must decide (see T6.17)");
     }
 
+    private static boolean reclaiming(Claim claim)
+    {
+        return MODE_RECLAIM.equals(claim.state.get(S_MODE));
+    }
+
     /**
-     * STEADY, owned by this action: every node acknowledged it, then the base partition tombstone at ALL (ADR-033),
-     * then {@code ReleaseKey}, after which the key is owned by nobody.
+     * STEADY, owned by this action: every node acknowledged it, then {@code ReleaseKey} with base state {@code RESIDUE},
+     * after which the key is owned by nobody (ADR-036). A reclaim, or a resume of a key whose reclaim is due, writes the
+     * base partition tombstone at ALL first, after the write timeout, and releases the key as {@code TOMBSTONED(Tt)}.
      */
     private StepResult steady(View v, ActionContext ctx, Mode mode)
     {
         Claim claim = v.claim;
         if (v.key.actionId == null)
-            // released already: the tombstone was written
+            // released already
             return finished(v, ctx);
         if (!claim.actionId.equals(v.key.actionId))
             return StepResult.failed(v.name() + " is owned by action " + v.key.actionId + ", not by this action " + claim.actionId);
         if (!Phase.STEADY.name().equals(claim.phase))
             return StepResult.failed("the claim is in phase " + claim.phase + " but " + v.name() + " is STEADY");
+        boolean reclaim = reclaiming(claim)
+                          || (MODE_RESUME.equals(claim.state.get(S_MODE)) && ctx.nowMillis() >= reclaimDueMillis(v.key, v.logical, layoutConfig()));
         String tombstone = claim.state.get(S_TOMBSTONE);
-        if (tombstone == null)
+        if (reclaim && tombstone == null)
         {
             Map<String, String> state = new TreeMap<>(claim.state);
             state.put(S_TOMBSTONE, Long.toString(ctx.nowMillis() * 1000));
@@ -1132,28 +1199,39 @@ public class PartitionSplitActuator implements ClusterActuator
         // no replica has a pass due once every node has STEADY; the wait lets a chunk read before that be written
         StepResult acked = ackedFor(v, ctx);
         if (acked != null)
-            return acked;
+            return mode == Mode.STOP ? StepResult.committedCleanupPending(v.name() + " is STEADY and not yet released: not every node has acknowledged it") : acked;
+        if (!reclaim)
+        {
+            ReleaseKey release = new ReleaseKey(claim.actionId, claim.owner, claim.step, v.logical.id, v.target.key, KeyState.BaseState.RESIDUE, 0,
+                                                ctx.nowMillis(), leaseMillis());
+            return StepResult.commit(release.wrap(), ReleaseKey.CLAIM_PHASE, claim.state, 0);
+        }
         long remaining = ackedAt(v) + env.writeTimeoutMillis() - ctx.nowMillis();
         if (remaining > 0)
             return StepResult.stay(remaining);
+        long tt = Long.parseLong(tombstone);
         try
         {
-            env.deleteBase(v.logical, v.target.key, Long.parseLong(tombstone));
+            env.deleteBase(v.logical, v.target.key, tt);
         }
         catch (Exception e)
         {
-            logger.info("Autonomic partition split of {}: base partition tombstone not written yet: {}", v.name(), e.toString());
+            logger.info("Autonomic partition reclaim of {}: base partition tombstone not written yet: {}", v.name(), e.toString());
             // a stop leaves the key owned and orphaned: the preferred proposer adopts it, or `layout resume`, and writes it again
             return mode == Mode.STOP ? StepResult.committedCleanupPending(v.name() + " is STEADY; its base partition tombstone was not written: " + e)
                                      : StepResult.stay(pollMillis());
         }
-        ReleaseKey release = new ReleaseKey(claim.actionId, claim.owner, claim.step, v.logical.id, v.target.key, ctx.nowMillis(), leaseMillis());
+        ReleaseKey release = new ReleaseKey(claim.actionId, claim.owner, claim.step, v.logical.id, v.target.key, KeyState.BaseState.TOMBSTONED, tt,
+                                            ctx.nowMillis(), leaseMillis());
         return StepResult.commit(release.wrap(), ReleaseKey.CLAIM_PHASE, claim.state, 0);
     }
 
-    /** The end of a split: the base tombstone is written and the key released. Stage B decides the verdict. */
+    /** The end of a split: the key is released (its base residue stays until a reclaim). Stage B decides the verdict. */
     private StepResult finished(View v, ActionContext ctx)
     {
+        if (reclaiming(v.claim))
+            return StepResult.committed(Verdict.INCONCLUSIVE, "the base partition of " + v.name() + " is " + v.key.baseState
+                                                              + (v.key.baseTombstoneMicros > 0 ? " (tombstone written at " + v.key.baseTombstoneMicros + ')' : ""));
         SplitEvaluation.Result stageB = stageB(v, ctx);
         String tombstone = v.claim.state.get(S_TOMBSTONE);
         return StepResult.committed(stageB.verdict, v.name() + " is split into " + v.layout.buckets + " buckets of " + v.layout.keyspace + '.'
@@ -1522,12 +1600,37 @@ public class PartitionSplitActuator implements ClusterActuator
     {
         for (Phase p : Phase.values())
             if (p.name().equals(claimPhase))
-                return p.coordinatorClass == 3;
+                return forwardPastCommit(p);
         return ReleaseKey.CLAIM_PHASE.equals(claimPhase);
     }
 
     /** The diagnosis of an orphaned key, and the start of its status. */
     public static final String ORPHANED = "layout.orphaned";
+    /** The diagnosis of a released key whose base residue is due to be reclaimed (ADR-036). */
+    public static final String RECLAIM_DUE = "layout.reclaim_due";
+
+    /** Released STEADY keys in base state RESIDUE whose {@link #reclaimDueMillis} has passed, of tables that exist. */
+    public static List<Orphan> reclaimsDue(ClusterMetadata cm, long nowMillis, AutonomicConfig.LayoutConfig lc)
+    {
+        List<Orphan> out = new ArrayList<>();
+        ClusterLedger ledger = ClusterLedger.of(cm);
+        for (TableLayout layout : LayoutRegistry.of(cm).byLogical.values())
+        {
+            TableMetadata logical = cm.schema.getTableMetadata(layout.logical);
+            if (logical == null)
+                continue;
+            for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
+            {
+                KeyState key = e.getValue();
+                if (!reclaimable(key) || nowMillis < reclaimDueMillis(key, logical, lc))
+                    continue;
+                if (claimOf(ledger, target(layout.keyspace, layout.logicalName, ByteBufferUtil.bytesToHex(e.getKey()))) != null)
+                    continue;
+                out.add(new Orphan(layout, e.getKey(), key, false));
+            }
+        }
+        return out;
+    }
 
     /** A key past its commit point that no action owns: nothing finishes it until it is adopted (T6.9 review). */
     public static final class Orphan
@@ -1554,12 +1657,12 @@ public class PartitionSplitActuator implements ClusterActuator
 
     private static boolean reconcileExpired(KeyState key, TableMetadata logical, long nowMillis, long writeTimeoutMillis)
     {
-        return key.phase.coordinatorClass == 3 && key.phase != Phase.STEADY && key.dualWriteSinceMillis > 0
+        return forwardPastCommit(key.phase) && key.phase != Phase.STEADY && key.dualWriteSinceMillis > 0
                && nowMillis >= key.backfillLimitMillis(logical.params.gcGraceSeconds) - writeTimeoutMillis;
     }
 
     /**
-     * Keys in NEW_ONLY, CLEANUP, or STEADY without their base tombstone, of a table that exists, whose action holds no
+     * Keys in NEW_ONLY, CLEANUP, or STEADY that their action has not released, of a table that exists, whose action holds no
      * claim and that no claim of the lane is adopting.
      */
     public static List<Orphan> orphans(ClusterMetadata cm, long nowMillis, long writeTimeoutMillis)
@@ -1574,7 +1677,8 @@ public class PartitionSplitActuator implements ClusterActuator
             for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
             {
                 KeyState key = e.getValue();
-                if (key.phase.coordinatorClass != 3 || key.actionId == null || ledger.claim(key.actionId) != null)
+                // the reverse phases are class 3 too (REVERSE_ANNOUNCED) but are not the split's to adopt
+                if (!forwardPastCommit(key.phase) || key.actionId == null || ledger.claim(key.actionId) != null)
                     continue;
                 if (claimOf(ledger, target(layout.keyspace, layout.logicalName, ByteBufferUtil.bytesToHex(e.getKey()))) != null)
                     continue;
@@ -1611,9 +1715,13 @@ public class PartitionSplitActuator implements ClusterActuator
                 if (logical == null)
                     status = "orphan (logical table dropped)";
                 else if (key.phase == Phase.STEADY && key.actionId == null)
-                    status = "split";
+                    status = key.baseState == KeyState.BaseState.RESIDUE
+                             ? "split; base residue kept, reclaim due at " + reclaimDueMillis(key, logical, lc) + " (now " + nowMillis + ')'
+                             : "split; base partition tombstoned" + (key.baseTombstoneMicros > 0 ? " at " + key.baseTombstoneMicros : "");
                 else if (claim == null && lane != null)
                     status = "being adopted by action " + lane.actionId + " on node " + lane.owner.id();
+                else if (claim == null && key.phase.isReverse())
+                    status = "reverse migration in " + key.phase + " with no owner; it is not the split's to adopt";
                 else if (claim == null)
                 {
                     if (reconcileExpired(key, logical, nowMillis, writeTimeoutMillis))
@@ -1621,7 +1729,7 @@ public class PartitionSplitActuator implements ClusterActuator
                     else if (PRE_COMMIT.contains(key.phase))
                         status = "no owner; `layout resume` aborts it";
                     else if (key.phase == Phase.STEADY)
-                        status = ORPHANED + ": split, but no owner, past the commit point, and the base partition tombstone was not written; "
+                        status = ORPHANED + ": split, but no owner, past the commit point, and not released (or its reclaim was stopped); "
                                  + "the preferred proposer adopts it, or `layout resume` on the lowest live node finishes it";
                     else
                         status = ORPHANED + ": no owner, past the commit point; the preferred proposer adopts it, "

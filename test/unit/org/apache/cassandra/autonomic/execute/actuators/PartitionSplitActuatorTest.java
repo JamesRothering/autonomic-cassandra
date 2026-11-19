@@ -30,6 +30,7 @@ import java.util.UUID;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
 import org.junit.Before;
@@ -63,6 +64,7 @@ import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutEvents;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
+import org.apache.cassandra.autonomic.layout.LayoutRegistryValue;
 import org.apache.cassandra.autonomic.layout.LayoutVerifier;
 import org.apache.cassandra.autonomic.layout.NaturalReplicas;
 import org.apache.cassandra.autonomic.layout.Phase;
@@ -699,10 +701,12 @@ public class PartitionSplitActuatorTest
         assertEquals(Phase.STEADY, state.phase);
         assertNull(state.actionId);
         assertTrue(state.dualWriteSinceMillis > 0);
-        // the overflow table was created, never dropped; no bucket was deleted; the base tombstone came last, in STEADY
-        assertEquals(2, env.writes.size());
+        // the overflow table was created, never dropped; no bucket was deleted; and (ADR-036) the base partition was not
+        // deleted: STEADY releases the key with its residue kept
+        assertEquals(env.writes.toString(), 1, env.writes.size());
         assertTrue(env.writes.get(0), env.writes.get(0).startsWith("create "));
-        assertEquals("deleteBase in STEADY acknowledged=true", env.writes.get(1));
+        assertEquals(KeyState.BaseState.RESIDUE, state.baseState);
+        assertEquals(LayoutRegistry.FORMAT_VERSION_2, LayoutRegistry.of(cluster.log).formatVersion);
         assertEquals(1, env.checksStarted);
         assertEquals(ClusterActionExecution.FINAL_COMMITTED, released(owner.id).finalState);
         assertTrue(end.detail, end.detail.contains("missing_from_base=0"));
@@ -1369,7 +1373,7 @@ public class PartitionSplitActuatorTest
             resumed.claimLane();
             assertEquals(StepResult.Kind.COMMITTED, resumed.toEnd().kind);
             assertEquals(Phase.STEADY, key(cluster.log).phase);
-            assertTrue(env.writes.toString(), env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY"));
+            assertResidueKept(env.writes.toString());
         }
     }
 
@@ -1395,7 +1399,7 @@ public class PartitionSplitActuatorTest
     public void takeoverInEachPhase() throws Exception
     {
         String[] points = { "CREATING", "ANNOUNCED", "DUAL_WRITE", "BACKFILL", "VERIFY", "CUTOVER", "ROLLBACK_DUAL", "ABORTING",
-                            "KEY_REMOVED", "NEW_ONLY", "CLEANUP", "CLEANUP_RECONCILE", "CLEANUP_TOMBSTONE", "STEADY" };
+                            "KEY_REMOVED", "NEW_ONLY", "CLEANUP", "CLEANUP_RECONCILE", "STEADY" };
         for (String point : points)
         {
             setUp();
@@ -1424,11 +1428,6 @@ public class PartitionSplitActuatorTest
                     first.reach(Phase.CLEANUP, true);
                     preCommit = false;
                     break;
-                case "CLEANUP_TOMBSTONE":
-                    first.until(o -> o.claim() != null && o.claim().state.containsKey(PartitionSplitActuator.S_TOMBSTONE)
-                                     && Phase.CLEANUP.name().equals(o.claim().phase));
-                    preCommit = false;
-                    break;
                 case "STEADY":
                     first.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase));
                     preCommit = false;
@@ -1449,7 +1448,7 @@ public class PartitionSplitActuatorTest
             {
                 assertEquals(point + ": " + end, StepResult.Kind.COMMITTED, end.kind);
                 assertEquals(Phase.STEADY, key(cluster.log).phase);
-                assertTrue(point + ": " + env.writes, env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY acknowledged=true"));
+                assertResidueKept(point + ": " + env.writes);
             }
         }
     }
@@ -1714,43 +1713,215 @@ public class PartitionSplitActuatorTest
             assertEquals(StepResult.Kind.COMMITTED, adopter.toEnd().kind);
             assertEquals(Phase.STEADY, key(cluster.log).phase);
             assertNull(key(cluster.log).actionId);
-            assertTrue(env.writes.toString(), env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY"));
+            assertResidueKept(env.writes.toString());
             assertTrue(PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).isEmpty());
-            assertEquals("split", PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status"));
+            assertTrue(PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status").startsWith("split; base residue kept"));
             assertFalse("a split key has nothing to resume", adopter.actuator.continuation(adopter.action));
         }
     }
 
     @Test
-    public void aSteadyKeyWithoutItsBaseTombstoneIsOrphanedUntilAdopted() throws Exception
+    public void aSteadyKeyThatWasNotReleasedIsOrphanedUntilAdopted() throws Exception
     {
         Owner owner = owner();
-        env.failBase = true;
-        owner.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase) && o.claim().state.containsKey(PartitionSplitActuator.S_ACKED)
-                         && o.claim().state.get(PartitionSplitActuator.S_ACKED).startsWith("STEADY"));
-        long until = cluster.now.get() + 5_000;
-        owner.until(o -> cluster.now.get() > until);
+        owner.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase));
         owner.entry = Entry.ABORT;
         assertEquals(StepResult.Kind.COMMITTED_CLEANUP_PENDING, owner.step().kind);
         assertEquals(Phase.STEADY, key(cluster.log).phase);
-        assertEquals("owned until the tombstone is written", owner.id, key(cluster.log).actionId);
+        assertEquals("owned until released", owner.id, key(cluster.log).actionId);
         Map<String, String> status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0);
-        assertTrue(status.toString(), status.get("status").contains("base partition tombstone was not written"));
+        assertTrue(status.toString(), status.get("status").contains("not released"));
         assertTrue(status.get("status").startsWith(PartitionSplitActuator.ORPHANED));
         List<Diagnosis> diagnoses = new SplitOutcomeDetectors.Orphaned(() -> cluster.log, () -> WRITE_TIMEOUT)
                                     .analyze(new InMemoryKnowledgeView(new ObservationStore(8, 8), cluster.now::get));
         assertEquals(Severity.WARN, diagnoses.get(0).severity);
 
-        env.failBase = false;
         Owner adopter = resumeOn(coordinator2, node2);
         assertTrue(adopter.actuator.continuation(adopter.action));
         adopter.claimLane();
         assertEquals(StepResult.Kind.COMMITTED, adopter.toEnd().kind);
         assertNull(key(cluster.log).actionId);
-        assertTrue(env.writes.toString(), env.writes.get(env.writes.size() - 1).startsWith("deleteBase in STEADY acknowledged=true"));
-        assertEquals("split", PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status"));
+        assertResidueKept("adoption of an unreleased STEADY key");
+        assertTrue(PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status").startsWith("split; base residue kept"));
         Optional<String> nothing = adopter.actuator.validate(resumeOn(coordinator2, node2).action, null);
         assertTrue(nothing.toString(), nothing.isPresent() && nothing.get().contains("nothing to resume"));
+    }
+
+    /** ADR-036: the key is released with its base residue, and nothing deleted the base partition. */
+    private void assertResidueKept(String what)
+    {
+        assertFalse(what + ": " + env.writes, env.writes.toString().contains("deleteBase"));
+        assertEquals(what, Phase.STEADY, key(cluster.log).phase);
+        assertNull(what, key(cluster.log).actionId);
+        assertEquals(what, KeyState.BaseState.RESIDUE, key(cluster.log).baseState);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // reclaim and the reverse phases (ADR-036, T6.17b)
+    // ---------------------------------------------------------------------------------------------------------
+
+    private Owner reclaimOn(ClusterCoordinator coordinator, FakeCluster.Node node)
+    {
+        return new Owner(coordinator, node, PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RECLAIM));
+    }
+
+    /** A completed split: released, base residue kept; the reclaim window is one hour from the freeze. */
+    private long splitAndRelease() throws Exception
+    {
+        config.layout.reclaim_window = new DurationSpec.LongMillisecondsBound("1h");
+        Owner owner = owner();
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+        assertResidueKept("a split");
+        return key(cluster.log).frozenSinceMillis;
+    }
+
+    @Test
+    public void aReclaimWritesTheTombstoneWhenDueAndReleasesTheKeyTombstoned() throws Exception
+    {
+        long frozen = splitAndRelease();
+        assertTrue(frozen > 0);
+        long due = PartitionSplitActuator.reclaimDueMillis(key(cluster.log), logicalTable(864000), config.layout);
+        assertEquals(frozen + 3_600_000, due);
+        // not before it is due
+        Owner early = reclaimOn(coordinator1, node1);
+        cluster.now.set(due - 1);
+        Optional<String> notYet = early.actuator.validate(early.action, null);
+        assertTrue(notYet.toString(), notYet.isPresent() && notYet.get().contains("not yet"));
+        assertTrue(PartitionSplitActuator.reclaimsDue(cluster.log, due - 1, config.layout).isEmpty());
+        String before = PartitionSplitActuator.status(cluster.log, due - 1, config.layout, WRITE_TIMEOUT).get(0).get("status");
+        assertTrue(before, before.startsWith("split; base residue kept, reclaim due at " + due));
+
+        SplitOutcomeDetectors.ReclaimDue detector = new SplitOutcomeDetectors.ReclaimDue(() -> cluster.log, () -> config.layout);
+        assertTrue(detector.analyze(new InMemoryKnowledgeView(new ObservationStore(8, 8), () -> due - 1)).isEmpty());
+        cluster.now.set(due);
+        catchUp();
+        List<Diagnosis> raised = detector.analyze(new InMemoryKnowledgeView(new ObservationStore(8, 8), () -> due));
+        assertEquals(1, raised.size());
+        assertEquals("layout.reclaim_due", raised.get(0).type);
+        assertEquals(KEY_HEX, raised.get(0).evidence.get("key_hex"));
+        assertEquals(1, PartitionSplitActuator.reclaimsDue(cluster.log, due, config.layout).size());
+        Owner reclaim = reclaimOn(coordinator1, node1);
+        assertEquals(Optional.empty(), reclaim.actuator.validate(reclaim.action, null));
+        assertTrue("no new approval and no cooldown: a continuation", reclaim.actuator.continuation(reclaim.action));
+        reclaim.claimLane();
+        StepResult end = reclaim.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.COMMITTED, end.kind);
+        assertEquals("deleteBase in STEADY acknowledged=true", env.writes.get(env.writes.size() - 1));
+        KeyState k = key(cluster.log);
+        assertEquals(Phase.STEADY, k.phase);
+        assertNull(k.actionId);
+        assertEquals(KeyState.BaseState.TOMBSTONED, k.baseState);
+        assertTrue(k.baseTombstoneMicros > 0);
+        assertEquals(frozen, k.frozenSinceMillis);
+        assertTrue(PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status")
+                                         .startsWith("split; base partition tombstoned at " + k.baseTombstoneMicros));
+        // once is enough
+        catchUp();
+        Owner again = reclaimOn(coordinator1, node1);
+        Optional<String> done = again.actuator.validate(again.action, null);
+        assertTrue(done.toString(), done.isPresent() && done.get().contains("already TOMBSTONED"));
+        assertFalse(again.actuator.continuation(again.action));
+        assertTrue(PartitionSplitActuator.reclaimsDue(cluster.log, cluster.now.get(), config.layout).isEmpty());
+    }
+
+    @Test
+    public void aReclaimIsRefusedWhileTheKeyIsOwnedAndInEveryOtherPhase() throws Exception
+    {
+        config.layout.reclaim_window = new DurationSpec.LongMillisecondsBound("1s");
+        // owned: a STEADY key its action has not released
+        Owner owner = owner();
+        owner.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase));
+        cluster.now.addAndGet(3_600_000);
+        catchUp();
+        Owner reclaim = reclaimOn(coordinator2, node2);
+        Optional<String> owned = reclaim.actuator.validate(reclaim.action, null);
+        assertTrue(owned.toString(), owned.isPresent() && owned.get().contains("not reclaimed while owned"));
+        assertFalse(reclaim.actuator.continuation(reclaim.action));
+        assertTrue(PartitionSplitActuator.reclaimsDue(cluster.log, cluster.now.get(), config.layout).isEmpty());
+
+        // every other phase, forward and reverse, owned or not
+        for (Phase phase : Phase.values())
+        {
+            if (phase == Phase.STEADY)
+                continue;
+            setKeyState(phase, new UUID(7, 7));
+            Optional<String> refused = reclaim.actuator.validate(reclaim.action, null);
+            assertTrue(phase + ": " + refused, refused.isPresent() && refused.get().contains("only a STEADY key is reclaimed"));
+            assertFalse(phase.name(), reclaim.actuator.continuation(reclaim.action));
+            assertTrue(phase.name(), PartitionSplitActuator.reclaimsDue(cluster.log, cluster.now.get() + 10_000_000_000L, config.layout).isEmpty());
+        }
+    }
+
+    /** Replaces the state of the key with one in {@code phase} owned by {@code owner}, which holds no claim. */
+    private void setKeyState(Phase phase, UUID owner)
+    {
+        TableLayout layout = LayoutRegistry.of(cluster.log).layout(LOGICAL);
+        KeyState old = layout.keyState(KEY);
+        Epoch e = cluster.log.epoch;
+        KeyState state = new KeyState(phase, e, 1000, old.incarnation, 1, e, ImmutableSet.of(), owner, 500, ImmutableSet.of(), KeyState.BaseState.RESIDUE,
+                                      1000, 0, phase.isReverse() ? KeyState.ReverseMode.FAST : null, 0);
+        TableLayout changed = new TableLayout(layout.header(), layout.nextIncarnation, ImmutableMap.of(KEY, state), layout.version + 1);
+        cluster.log = cluster.log.transformer().with(LayoutRegistryValue.KEY,
+                                                    new LayoutRegistryValue(new LayoutRegistry(LayoutRegistry.FORMAT_VERSION_2, ImmutableMap.of(LOGICAL, changed))))
+                                 .build().metadata;
+        catchUp();
+    }
+
+    /** Orphan adoption (class 3 and no claim) must not match the reverse phases, REVERSE_ANNOUNCED included. */
+    @Test
+    public void orphanAdoptionNeverMatchesAReversePhase() throws Exception
+    {
+        splitAndRelease();
+        for (Phase phase : Phase.values())
+        {
+            if (!phase.isReverse())
+                continue;
+            setKeyState(phase, new UUID(7, 7));
+            String what = phase.name();
+            assertTrue(what, PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).isEmpty());
+            assertTrue(what, new SplitOutcomeDetectors.Orphaned(() -> cluster.log, () -> WRITE_TIMEOUT)
+                             .analyze(new InMemoryKnowledgeView(new ObservationStore(8, 8), cluster.now::get)).isEmpty());
+            Owner resume = resumeOn(coordinator2, node2);
+            assertFalse(what, resume.actuator.continuation(resume.action));
+            Optional<String> refused = resume.actuator.validate(resume.action, null);
+            assertTrue(what + ": " + refused, refused.isPresent() && refused.get().contains("reverse phase"));
+            String status = PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status");
+            assertFalse(what + ": " + status, status.startsWith(PartitionSplitActuator.ORPHANED));
+        }
+        // while a forward C3 phase of the same shape is an orphan
+        setKeyState(Phase.CLEANUP, new UUID(7, 7));
+        assertEquals(1, PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).size());
+    }
+
+    @Test
+    public void aReclaimInterruptedByAStopIsResumedAndWritesTheTombstoneWhenStillDue() throws Exception
+    {
+        long frozen = splitAndRelease();
+        cluster.now.set(frozen + 3_600_000);
+        catchUp();
+        env.failBase = true;
+        Owner reclaim = reclaimOn(coordinator1, node1).claimLane();
+        reclaim.until(o -> o.claim() != null && Phase.STEADY.name().equals(o.claim().phase) && o.claim().state.containsKey(PartitionSplitActuator.S_TOMBSTONE)
+                           && o.claim().state.containsKey(PartitionSplitActuator.S_ACKED));
+        long until = cluster.now.get() + 5_000;
+        reclaim.until(o -> cluster.now.get() > until);
+        reclaim.entry = Entry.ABORT;
+        assertEquals(StepResult.Kind.COMMITTED_CLEANUP_PENDING, reclaim.step().kind);
+        assertEquals("the key stays owned by the stopped reclaim", reclaim.id, key(cluster.log).actionId);
+        assertEquals(KeyState.BaseState.RESIDUE, key(cluster.log).baseState);
+        assertTrue(PartitionSplitActuator.status(cluster.log, cluster.now.get(), config.layout, WRITE_TIMEOUT).get(0).get("status")
+                                         .startsWith(PartitionSplitActuator.ORPHANED));
+        assertEquals(1, PartitionSplitActuator.orphans(cluster.log, cluster.now.get(), WRITE_TIMEOUT).size());
+
+        env.failBase = false;
+        Owner resumed = resumeOn(coordinator2, node2);
+        assertEquals(Optional.empty(), resumed.actuator.validate(resumed.action, null));
+        assertTrue(resumed.actuator.continuation(resumed.action));
+        resumed.claimLane();
+        assertEquals(StepResult.Kind.COMMITTED, resumed.toEnd().kind);
+        assertEquals("deleteBase in STEADY acknowledged=true", env.writes.get(env.writes.size() - 1));
+        assertEquals(KeyState.BaseState.TOMBSTONED, key(cluster.log).baseState);
+        assertNull(key(cluster.log).actionId);
     }
 
     @Test

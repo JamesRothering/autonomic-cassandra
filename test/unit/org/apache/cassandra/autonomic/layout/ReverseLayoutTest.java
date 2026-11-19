@@ -902,4 +902,21 @@ public class ReverseLayoutTest
             // expected
         }
     }
+
+    // ---- adoption from no owner (reclaim, ADR-036) ----
+
+    @Test
+    public void aReclaimAdoptsAnUnownedSteadyResidueKeyOnly()
+    {
+        ClusterMetadata md = forwardIn(Phase.STEADY, null, RESIDUE, 0, LayoutRegistry.FORMAT_VERSION_2);
+        LayoutRegistry.Result adopted = registry(md).withAdoptedKey(LOGICAL, K1, Phase.STEADY, LayoutRegistry.NO_ACTION, B);
+        assertEquals(B, adopted.registry.layout(LOGICAL).keyState(K1).actionId);
+        assertEquals(RESIDUE, adopted.registry.layout(LOGICAL).keyState(K1).baseState);
+        // a tombstoned key, a key in another phase, and an ordinary adoption of an unowned key are refused
+        ClusterMetadata tombstoned = forwardIn(Phase.STEADY, null, TOMBSTONED, TT, LayoutRegistry.FORMAT_VERSION_2);
+        assertTrue(registry(tombstoned).withAdoptedKey(LOGICAL, K1, Phase.STEADY, LayoutRegistry.NO_ACTION, B).rejection.contains("only a STEADY key in RESIDUE"));
+        assertTrue(registry(md).withAdoptedKey(LOGICAL, K1, Phase.STEADY, A, B).rejection.contains("owned by no action"));
+        ClusterMetadata reverse = reverseIn(Phase.REVERSE_ANNOUNCED);
+        assertTrue(registry(reverse).withAdoptedKey(LOGICAL, K1, Phase.REVERSE_ANNOUNCED, LayoutRegistry.NO_ACTION, B).rejection != null);
+    }
 }

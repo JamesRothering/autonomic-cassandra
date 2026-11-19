@@ -48,10 +48,12 @@ import org.apache.cassandra.autonomic.execute.ActionState;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.layout.Eligibility;
+import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutAnnotations;
 import org.apache.cassandra.autonomic.layout.LayoutProfiler;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
 import org.apache.cassandra.autonomic.layout.PartitionProbe;
+import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
 import org.apache.cassandra.autonomic.monitor.Subject;
@@ -182,7 +184,7 @@ public class PartitionSplitPolicy implements Policy
     @Override
     public Set<String> handles()
     {
-        return Set.of(HotPartitionDetector.NAME, PartitionSplitActuator.ORPHANED);
+        return Set.of(HotPartitionDetector.NAME, PartitionSplitActuator.ORPHANED, PartitionSplitActuator.RECLAIM_DUE);
     }
 
     /** The number of buckets of design 7.2 step 4: {@code clamp(nextPowerOfTwo(ceil(share / target_share)), 4, 32)}. */
@@ -222,6 +224,8 @@ public class PartitionSplitPolicy implements Policy
     {
         if (PartitionSplitActuator.ORPHANED.equals(diagnosis.type))
             return adoption(diagnosis, knowledge);
+        if (PartitionSplitActuator.RECLAIM_DUE.equals(diagnosis.type))
+            return reclaim(diagnosis, knowledge);
         long now = knowledge.nowMillis();
         states.values().removeIf(s -> now - s.lastSeenMillis > STATE_TTL_MILLIS);
         AutonomicConfig.LayoutConfig lc = config.layout;
@@ -410,6 +414,48 @@ public class PartitionSplitPolicy implements Policy
         return Optional.of(new Plan(UUID.randomUUID(), diagnosis.id, NAME, List.of(action),
                                     "partition " + keyHex + " of " + table.keyspace + '.' + table.name + " is past its commit point in "
                                     + diagnosis.evidence.get("phase") + " with no owner: adopt it and finish its cleanup"));
+    }
+
+    /**
+     * {@code layout.reclaim_due} (ADR-036): the preferred proposer proposes the {@code reclaim} of the key, which
+     * writes its base partition tombstone. Not while an action holds the lane, a member is down, or a metadata operation
+     * runs; and only if the registry still shows a released {@code STEADY} key in {@code RESIDUE}, due. A continuation
+     * of the split, so it is exempt from the cooldown.
+     */
+    private Optional<Plan> reclaim(Diagnosis diagnosis, KnowledgeView knowledge)
+    {
+        if (!env.preferredProposer())
+            return Optional.empty();
+        Subject subject = diagnosis.subject;
+        String keyHex = diagnosis.evidence.get("key_hex");
+        if (keyHex == null)
+            return Optional.empty();
+        ClusterMetadata cm = env.metadata();
+        TableMetadata table = cm.schema.getTableMetadata(subject.keyspace, subject.table);
+        if (table == null || busy(cm, knowledge, null) || !env.membersNotAlive().isEmpty() || !cm.inProgressSequences.isEmpty())
+            return Optional.empty();
+        TableLayout layout = LayoutRegistry.of(cm).layout(table.id);
+        KeyState state;
+        try
+        {
+            state = layout == null ? null : layout.keyState(ByteBufferUtil.hexToBytes(keyHex));
+        }
+        catch (RuntimeException e)
+        {
+            return Optional.empty();
+        }
+        if (state == null || state.phase != Phase.STEADY || state.actionId != null || state.baseState != KeyState.BaseState.RESIDUE
+            || knowledge.nowMillis() < PartitionSplitActuator.reclaimDueMillis(state, table, config.layout))
+            return Optional.empty();
+        Subject target = PartitionSplitActuator.target(table.keyspace, table.name, keyHex);
+        VerifySpec verify = new VerifySpec(Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS, Subject.table(table.keyspace, table.name), true, 0.0,
+                                           List.of(), 0, 0);
+        Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), PartitionSplitActuator.NAME, ActionScope.CLUSTER, target,
+                                   PartitionSplitActuator.params(0, PartitionSplitActuator.MODE_RECLAIM), verify);
+        LayoutAnnotations.set(subject, "proposed(reclaim)");
+        return Optional.of(new Plan(UUID.randomUUID(), diagnosis.id, NAME, List.of(action),
+                                    "partition " + keyHex + " of " + table.keyspace + '.' + table.name
+                                    + " is split and released and its reclaim is due: write the tombstone of its base residue"));
     }
 
     private Optional<Plan> no(Subject subject, String reason)
