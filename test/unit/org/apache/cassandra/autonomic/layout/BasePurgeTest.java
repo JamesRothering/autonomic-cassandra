@@ -306,7 +306,7 @@ public class BasePurgeTest extends CQLTester
         List<BasePurge.Published> waiting = BasePurge.parsePublished(purge.summary());
         assertEquals(1, waiting.size());
         assertEquals(BasePurge.Reason.WAITING_GC_GRACE, waiting.get(0).reason);
-        assertTrue(waiting.get(0).detail, waiting.get(0).detail.contains("may be purged from " + waiting.get(0).maxTimestamp));
+        assertTrue(waiting.get(0).detail, waiting.get(0).detail.contains("may be purged from " + waiting.get(0).purgeFromMillis));
         sleepPastGcGrace();
         assertEquals(0, purge.poll());
         List<BasePurge.Published> published = BasePurge.parsePublished(purge.summary());
@@ -314,6 +314,7 @@ public class BasePurgeTest extends CQLTester
         BasePurge.Published p = published.get(0);
         assertEquals(BasePurge.Reason.RESIDUE_ABOVE_TT, p.reason);
         assertEquals(future, p.maxTimestamp);
+        assertEquals("the purge time stays published after gc_grace", waiting.get(0).purgeFromMillis, p.purgeFromMillis);
         assertEquals(ByteBufferUtil.bytesToHex(Int32Type.instance.decompose(K)), p.keyHex);
         assertTrue(p.detail, p.detail.contains("needs the operator") || p.detail.contains("residue above"));
         assertTrue(BasePurge.parsePublished("garbage\nx y Z 1").isEmpty());

@@ -1090,13 +1090,20 @@ public class PartitionUnsplitActuatorTest
         assertEquals(Optional.empty(), validate(PartitionUnsplitActuator.MODE_AUTO));
         long due = now + 10 * 60_000;
         for (int node : new int[]{ 1, 2 })
-            env.published.put(cluster.id(node), reason(BasePurge.Reason.WAITING_GC_GRACE, due, "the partition deletion may be purged from " + due));
+            env.published.put(cluster.id(node), new BasePurge.Published(LOGICAL, KEY_HEX, BasePurge.Reason.WAITING_GC_GRACE, Long.MIN_VALUE, due,
+                                                                        "the partition deletion may be purged from " + due));
         reportPurge = false;
         Owner owner = owner(PartitionUnsplitActuator.MODE_AUTO).reach(Phase.REVERSE_ANNOUNCED);
         long until = cluster.now.get() + 2 * config.layout.purge_timeout.toMilliseconds();
         owner.until(o -> cluster.now.get() > until);
         assertEquals("not aborted while the replicas wait for gc_grace", Phase.REVERSE_ANNOUNCED, key(cluster.log).phase);
         assertFalse(owner.claim().state.containsKey(PartitionUnsplitActuator.S_ABORT));
+        // past gc_grace a replica's probe may still find the deletion (a compaction raced it): the time it published still counts
+        for (int node : new int[]{ 1, 2 })
+            env.published.put(cluster.id(node), new BasePurge.Published(LOGICAL, KEY_HEX, BasePurge.Reason.STILL_SHADOWED, 5, due, "not purged yet"));
+        cluster.now.set(due + config.layout.purge_timeout.toMilliseconds() / 2);
+        owner.step();
+        assertFalse("not before purge_timeout after the published time", owner.claim().state.containsKey(PartitionUnsplitActuator.S_ABORT));
         // the replicas purge and report (before the owner's next step, which would otherwise find the time up)
         reportPurge = true;
         report();

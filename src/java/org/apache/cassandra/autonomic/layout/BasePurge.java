@@ -347,6 +347,8 @@ public final class BasePurge
         String detail = "";
         /** The largest timestamp the last probe found, {@link Long#MIN_VALUE} if nothing. */
         long maxTimestamp = Long.MIN_VALUE;
+        /** When this node's partition deletion of the key may first be purged, {@link Long#MIN_VALUE} if not known. */
+        long purgeFromMillis = Long.MIN_VALUE;
 
         Pending(TableId logical, ByteBuffer key)
         {
@@ -504,14 +506,15 @@ public final class BasePurge
         {
             if (before.partitionDeletion)
             {
-                long due = TimeUnit.SECONDS.toMillis(before.partitionDeletionLocalTime + base.params.gcGraceSeconds);
+                // compaction purges a deletion whose local deletion time is strictly below now (in seconds) less gc_grace
+                long due = TimeUnit.SECONDS.toMillis(before.partitionDeletionLocalTime + base.params.gcGraceSeconds + 1);
+                // published: the owner of a key whose Tt it does not know learns from it when the purge can start
+                p.purgeFromMillis = Math.max(p.purgeFromMillis, due);
                 if (now < due)
                 {
                     wait(p, Reason.WAITING_GC_GRACE, "the partition deletion at " + before.partitionDeletionTimestamp + " may be purged from "
                                                       + due + " (local deletion time " + before.partitionDeletionLocalTime + " plus gc_grace_seconds "
                                                       + base.params.gcGraceSeconds + ')', due);
-                    // published as the time the purge can start: the owner of a key whose Tt it does not know learns it here
-                    p.maxTimestamp = due;
                     return false;
                 }
             }
@@ -604,14 +607,22 @@ public final class BasePurge
         public final Reason reason;
         /** {@link Long#MIN_VALUE} if unknown. */
         public final long maxTimestamp;
+        /** When the node's partition deletion of the key may first be purged (milliseconds), {@link Long#MIN_VALUE} if unknown. */
+        public final long purgeFromMillis;
         public final String detail;
 
         public Published(TableId logical, String keyHex, Reason reason, long maxTimestamp, String detail)
+        {
+            this(logical, keyHex, reason, maxTimestamp, Long.MIN_VALUE, detail);
+        }
+
+        public Published(TableId logical, String keyHex, Reason reason, long maxTimestamp, long purgeFromMillis, String detail)
         {
             this.logical = logical;
             this.keyHex = keyHex;
             this.reason = reason;
             this.maxTimestamp = maxTimestamp;
+            this.purgeFromMillis = purgeFromMillis;
             this.detail = detail;
         }
 
@@ -623,9 +634,10 @@ public final class BasePurge
     }
 
     /**
-     * One line per key this node is held for, {@code <logical table id> <key hex> <REASON> <largest timestamp> <detail>},
-     * with the detail shortened and the whole bounded. For {@link Reason#WAITING_GC_GRACE} the timestamp field is the
-     * time (milliseconds) from which the local partition deletion may be purged.
+     * One line per key this node is held for,
+     * {@code <logical table id> <key hex> <REASON> <largest timestamp> <purge from millis> <detail>}, with the detail
+     * shortened and the whole bounded. The purge time is when this node's partition deletion may first be purged; the
+     * owner of a key whose {@code Tt} the registry does not know counts {@code purge_timeout} from it.
      */
     synchronized String summary()
     {
@@ -637,7 +649,7 @@ public final class BasePurge
             String detail = p.detail.replace('\n', ' ');
             if (detail.length() > MAX_PUBLISHED_DETAIL)
                 detail = detail.substring(0, MAX_PUBLISHED_DETAIL);
-            String line = p.logical + " " + ByteBufferUtil.bytesToHex(p.key) + ' ' + p.reason + ' ' + p.maxTimestamp + ' ' + detail + '\n';
+            String line = p.logical + " " + ByteBufferUtil.bytesToHex(p.key) + ' ' + p.reason + ' ' + p.maxTimestamp + ' ' + p.purgeFromMillis + ' ' + detail + '\n';
             if (sb.length() + line.length() > MAX_PUBLISHED_BYTES)
                 break;
             sb.append(line);
@@ -653,12 +665,13 @@ public final class BasePurge
             return out;
         for (String line : summary.split("\n"))
         {
-            String[] f = line.split(" ", 5);
-            if (f.length < 4)
+            String[] f = line.split(" ", 6);
+            if (f.length < 5)
                 continue;
             try
             {
-                out.add(new Published(TableId.fromString(f[0]), f[1], Reason.valueOf(f[2]), Long.parseLong(f[3]), f.length == 5 ? f[4] : ""));
+                out.add(new Published(TableId.fromString(f[0]), f[1], Reason.valueOf(f[2]), Long.parseLong(f[3]), Long.parseLong(f[4]),
+                                      f.length == 6 ? f[5] : ""));
             }
             catch (RuntimeException e)
             {
