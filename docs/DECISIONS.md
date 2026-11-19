@@ -627,3 +627,19 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 7. `forceCompactionForKey` in slow mode: accepted; the operator may choose to wait for natural compaction with only the probe.
 8. `NEWER_IN_TARGET` cell differences tolerated (and counted) in verification, in both directions.
 9. Contract D6 amended as in 11.8.
+
+## ADR-037: Unsplit actuator decisions beyond the T6.17 design note
+
+- **Date:** 2026-11-19
+- **Status:** Accepted (orchestrator decision on T6.17c and T6.17f; within ADR-036)
+- **Deliverable:** D6 follow-up (T6.17)
+
+**Context.** Building the replica copy (T6.17c) and the unsplit actuator (T6.17f) exposed four points that section 11 did not settle.
+
+**Decision.**
+1. `REVERSE_BACKFILL` and `REVERSE_CLEANUP` each start their own reconcile generation on entry, and completion counts only reports of a generation started in that phase. Otherwise slow-mode purge reports in the `BeginUnsplit` generation would be counted as backfill.
+2. For a key stuck at `RECONCILE_PAST_DEADLINE` (owner answer 6), `BeginUnsplit` carries an optional `Tt` (flags byte; values without it decode as before), accepted only for `CLEANUP` with `RESIDUE` in slow mode. The action records `Tt` in its claim first, writes the tombstone, then begins the slow unsplit.
+3. Each replica's `BasePurge` reason is published in gossip application state `X1` (no other user in the codebase), and `SplitOutcomeDetectors.UnsplitResidue` raises `layout.unsplit_residue` from it. The remedy text names a repair of the key's range for the repair-state reasons (T6.17d finding, 11.5).
+4. `purge_timeout` counts from the later of the all-node ack and `Tt + gc_grace_seconds`.
+
+**Consequences.** `X1` is reserved for the autonomic layer. Slow-mode unsplits of keys whose sstables are in mixed repair states wait for an operator repair, then time out with a diagnosis that says so.
