@@ -40,8 +40,9 @@ import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFac
  * registry written by one that does.
  *
  * <p>It registers one {@link ChangeListener} and reacts to changes of the registry only. It creates no thread while
- * the registry holds no key in a phase that needs backfill (BACKFILL or CLEANUP); the {@code LayoutBackfill} thread
- * is created lazily when one appears and released when none is left. What the thread does is a hook (T6.7). In REVERSE_ANNOUNCED of a slow reverse it also has {@link BasePurge} purge and probe this node's base partition of the key (T6.17d), on its own executor. While a key
+ * the registry holds no key in a phase that needs backfill (BACKFILL or CLEANUP, or REVERSE_BACKFILL or REVERSE_CLEANUP
+ * for the reverse pass of T6.17c); the {@code LayoutBackfill} thread is created lazily when one appears and released
+ * when none is left. What the thread does is a hook (T6.7), {@link BackfillTask} for both directions. In REVERSE_ANNOUNCED of a slow reverse it also has {@link BasePurge} purge and probe this node's base partition of the key (T6.17d), on its own executor. While a key
  * is in ANNOUNCED it also has {@link HintReport} report this node's hints (ADR-035), on the shared optional-tasks executor.
  */
 public final class LayoutService implements ChangeListener
@@ -196,7 +197,7 @@ public final class LayoutService implements ChangeListener
     {
         for (TableLayout layout : registry.byLogical.values())
             for (KeyState key : layout.keys.values())
-                if (key.phase == Phase.BACKFILL || key.phase == Phase.CLEANUP)
+                if (key.phase == Phase.BACKFILL || key.phase == Phase.CLEANUP || key.phase == Phase.REVERSE_BACKFILL || key.phase == Phase.REVERSE_CLEANUP)
                     return true;
         return false;
     }

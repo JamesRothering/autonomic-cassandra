@@ -324,6 +324,19 @@ public final class KeyState
     }
 
     /**
+     * True if replicas have a reverse pass to run for {@link #generation} (design 11.4, T6.17c): in
+     * {@link Phase#REVERSE_BACKFILL} and {@link Phase#REVERSE_CLEANUP}, only for a generation that was started in the
+     * phase. {@code REVERSE_BACKFILL} entered from {@code REVERSE_DUAL_WRITE} keeps the generation of
+     * {@code BeginUnsplit}, whose {@link #backfillDone} may hold the purge reports of a slow reverse; the owner starts
+     * a new generation before replicas copy. {@code REVERSE_CLEANUP} is entered with the generation of the backfill,
+     * as {@code CLEANUP} is.
+     */
+    public boolean reverseBackfillDue()
+    {
+        return (phase == Phase.REVERSE_BACKFILL || phase == Phase.REVERSE_CLEANUP) && generationEpoch.equals(phaseEpoch);
+    }
+
+    /**
      * True if {@code ReportBackfill} counts for the current generation: {@link #backfillDue()} in the forward phases;
      * in {@link Phase#REVERSE_ANNOUNCED} (the purge reports of a slow reverse) and {@link Phase#REVERSE_BACKFILL}
      * always; in {@link Phase#REVERSE_CLEANUP} only for a generation that was started there, the reconcile pass.

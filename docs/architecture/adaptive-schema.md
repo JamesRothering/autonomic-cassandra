@@ -988,6 +988,12 @@ Legacy values (format 1) decode as follows:
 - `RemoveKey` also accepts `REVERSE_CLEANUP`, when every natural replica of every bucket token of the incarnation (`NaturalReplicas.ofBuckets`) has reported the reconcile generation.
 - `KeyState.reverseReplicaLimitMillis` implements the replica limits of the table below; the owner's windows are T6.17f.
 
+**As built in T6.17c** (the replica side of `REVERSE_BACKFILL` and of the reconcile pass of `REVERSE_CLEANUP`).
+- `BackfillTask` runs the reverse pass only for a generation that was started in the phase it runs in (`KeyState.reverseBackfillDue`: `generationEpoch = phaseEpoch`), as the forward `CLEANUP` does. **This adds to 11.4:** `REVERSE_DUAL_WRITE -> REVERSE_BACKFILL` keeps the generation of `BeginUnsplit`, whose `backfillDone` may already hold the purge reports of a slow reverse, and the registry accepts reports for it. So the owner (T6.17f) starts a new generation (`REVERSE_BACKFILL -> REVERSE_BACKFILL`) right after entering `REVERSE_BACKFILL`, and its completion test counts only that generation.
+- The node's buckets are those whose bucket token's read placement contains it. If that set changes, the pass is dropped, as a placement change of K drops a forward pass. Each bucket is read with `nowInSec = 0` in chunks, mapped with `RowMapper.toLogical` (unchanged), and written to base at `ALL` with `LayoutWrites.writeUnrouted`. Each bucket's partition deletion goes with its first chunk, so base receives the same deletion once per bucket. Resume records are `layout/<layout id>/<key hash>/r<generation>/<bucket>`, with values as in the forward pass. All the key's records are deleted after the report.
+- The limit is `reverseReplicaLimitMillis` with the smaller `gc_grace_seconds` of the two tables. It is checked before each chunk write and before the report. Past it, the pass writes nothing and does not report.
+- `LayoutService` also runs the `LayoutBackfill` thread while a key is in `REVERSE_BACKFILL` or `REVERSE_CLEANUP`. `NaturalReplicas` is unchanged: the replica test per bucket key is the one the forward pass uses.
+
 **Limits.** `G = gc_grace_seconds * 1000 / 2`, `wt` = write timeout.
 
 | Limit | Value |

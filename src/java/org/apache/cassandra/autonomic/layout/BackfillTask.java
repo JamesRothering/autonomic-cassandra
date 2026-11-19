@@ -105,6 +105,19 @@ import org.apache.cassandra.utils.MD5Digest;
  * compares the clock with {@link KeyState#backfillLimitMillis} less the write timeout, the longest a write handed to
  * the stock path can still take to reach a replica that is up. Past it, the pass writes nothing more and does not
  * report, for as long as the key stays in that incarnation.
+ *
+ * <p><b>The reverse pass</b> (design 11.4, T6.17c). In {@code REVERSE_BACKFILL}, and in {@code REVERSE_CLEANUP} for
+ * its reconcile generation, the copy goes the other way: every natural replica of a bucket partition of the key's
+ * incarnation copies what it holds locally of each bucket it replicates, read as above, into the base partition, each
+ * chunk mapped by {@link RowMapper#toLogical} and written at {@code ALL} outside the routing. Each bucket has its own
+ * resume record; the node reports once all its buckets are copied. A pass runs only for a generation that was started
+ * in the phase it runs in ({@link KeyState#reverseBackfillDue}): {@code REVERSE_BACKFILL} entered from
+ * {@code REVERSE_DUAL_WRITE} keeps the generation of {@code BeginUnsplit}, whose {@code backfill_done} holds the purge
+ * reports of a slow reverse, so the owner starts a new generation there. The limit is the replica limit of 11.5
+ * ({@link KeyState#reverseReplicaLimitMillis}, invariants I16 and I18), compared before every chunk write and before
+ * the report, with the smaller {@code gc_grace_seconds} of the two tables. A bucket partition deletion maps to a base
+ * partition deletion: the bucket partitions of the incarnation are deleted only after the key is removed (I20), when
+ * no pass is owed any more.
  */
 public final class BackfillTask
 {
@@ -112,6 +125,9 @@ public final class BackfillTask
 
     /** Prefix of the resume records in {@code system_autonomic.local_state}. */
     static final String STATE_PREFIX = "layout/";
+
+    /** Marks the generation field of the per-bucket records of a reverse pass: {@code <prefix>r<generation>/<bucket>}. */
+    static final String REVERSE_MARK = "r";
 
     /**
      * The local read time of a backfill chunk. With it {@code ReadCommand.executeLocally} does not purge and nothing
@@ -128,7 +144,7 @@ public final class BackfillTask
         /** The node id of this node in the metadata, or null if it has none yet. */
         NodeId self(ClusterMetadata cm);
 
-        /** True if this node is a natural replica of the key of the logical table. */
+        /** True if this node is a natural replica of the key of the table (the logical one, or a bucket key of the overflow table). */
         boolean isNaturalReplica(ClusterMetadata cm, TableMetadata logical, DecoratedKey key);
 
         /** Writes at ALL on the stock path; returns when every replica acknowledged, throws otherwise. */
@@ -272,6 +288,8 @@ public final class BackfillTask
         public final AtomicLong reportsCommitted = new AtomicLong();
         /** Times a pass was not started, or was stopped before a chunk or its report, because the deadline had passed. */
         public final AtomicLong refusedPastDeadline = new AtomicLong();
+        /** Bucket partitions a reverse pass finished copying. */
+        public final AtomicLong bucketsCopied = new AtomicLong();
         /** The record the last resumed pass continued from. */
         public volatile String lastResumeRecord;
     }
@@ -338,12 +356,35 @@ public final class BackfillTask
         final TableLayout layout;
         final ByteBuffer key;
         final KeyState state;
+        /** True for a pass from the bucket partitions to base (design 11.4). */
+        final boolean reverse;
+        /** For a reverse pass, the buckets of the incarnation this node replicates, ascending; empty otherwise. */
+        final List<Integer> buckets;
 
         Pass(TableLayout layout, ByteBuffer key, KeyState state)
+        {
+            this(layout, key, state, false, List.of());
+        }
+
+        Pass(TableLayout layout, ByteBuffer key, KeyState state, boolean reverse, List<Integer> buckets)
         {
             this.layout = layout;
             this.key = key;
             this.state = state;
+            this.reverse = reverse;
+            this.buckets = buckets;
+        }
+
+        /** The prefix of the per-bucket records of this reverse generation. */
+        String reverseStatePrefix()
+        {
+            return statePrefix() + REVERSE_MARK + state.generation + '/';
+        }
+
+        /** The key of the resume record of one bucket of a reverse pass. */
+        String bucketStateKey(int bucket)
+        {
+            return reverseStatePrefix() + bucket;
         }
 
         /** The key of the resume record (design 4.5). */
@@ -369,14 +410,16 @@ public final class BackfillTask
 
         Object identity()
         {
-            return layout.layoutId + "/" + ByteBufferUtil.bytesToHex(key) + '/' + stateOwner() + '/' + state.generation + '/' + state.phase;
+            // a reverse pass over other buckets (a placement change seen before the owner's restart) is another pass
+            return layout.layoutId + "/" + ByteBufferUtil.bytesToHex(key) + '/' + stateOwner() + '/' + state.generation + '/' + state.phase
+                   + (reverse ? "/" + buckets : "");
         }
 
         @Override
         public String toString()
         {
-            return "backfill of key 0x" + ByteBufferUtil.bytesToHex(key) + " of " + layout.keyspace + '.' + layout.logicalName
-                   + " (" + state.phase + ", incarnation " + state.incarnation + ", generation " + state.generation + ')';
+            return (reverse ? "reverse backfill of key 0x" : "backfill of key 0x") + ByteBufferUtil.bytesToHex(key) + " of " + layout.keyspace + '.' + layout.logicalName
+                   + (reverse ? " from buckets " + buckets : "") + " (" + state.phase + ", incarnation " + state.incarnation + ", generation " + state.generation + ')';
         }
     }
 
@@ -461,13 +504,26 @@ public final class BackfillTask
             for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
             {
                 KeyState state = e.getValue();
-                if (!state.backfillDue() || state.backfillDone.contains(self))
+                if (state.backfillDone.contains(self))
                     continue;
-                Pass pass = new Pass(layout, e.getKey(), state);
-                if (reported.contains(pass.identity()) || pastDeadline(pass, logical, false))
-                    continue;
-                if (env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(e.getKey())))
+                if (state.backfillDue())
+                {
+                    Pass pass = new Pass(layout, e.getKey(), state);
+                    if (reported.contains(pass.identity()) || pastDeadline(pass, cm, false))
+                        continue;
+                    if (env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(e.getKey())))
+                        owed.add(pass);
+                }
+                else if (state.reverseBackfillDue())
+                {
+                    TableMetadata physical = physicalOrNull(cm, layout);
+                    if (physical == null)
+                        continue;
+                    Pass pass = new Pass(layout, e.getKey(), state, true, replicatedBuckets(cm, logical, physical, layout, e.getKey(), state));
+                    if (pass.buckets.isEmpty() || reported.contains(pass.identity()) || pastDeadline(pass, cm, false))
+                        continue;
                     owed.add(pass);
+                }
             }
         }
         return owed;
@@ -479,12 +535,18 @@ public final class BackfillTask
         try
         {
             Set<String> current = new HashSet<>();
+            List<String> currentReverse = new ArrayList<>();
             for (TableLayout layout : LayoutRegistry.of(cm).byLogical.values())
                 for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
+                {
+                    Pass pass = new Pass(layout, e.getKey(), e.getValue());
                     if (e.getValue().backfillDue())
-                        current.add(new Pass(layout, e.getKey(), e.getValue()).stateKey());
+                        current.add(pass.stateKey());
+                    else if (e.getValue().reverseBackfillDue())
+                        currentReverse.add(pass.reverseStatePrefix());
+                }
             for (String key : env.scanState(STATE_PREFIX).keySet())
-                if (!current.contains(key))
+                if (!current.contains(key) && currentReverse.stream().noneMatch(key::startsWith))
                     env.deleteState(key);
         }
         catch (RuntimeException e)
@@ -510,36 +572,85 @@ public final class BackfillTask
         KeyState state = now.keyState(pass.key);
         if (logical == null || state == null)
             return false;
-        return state.phase == pass.state.phase && state.incarnation == pass.state.incarnation
-               && state.generation == pass.state.generation && state.generationEpoch.equals(pass.state.generationEpoch)
-               && env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(pass.key));
+        if (state.phase != pass.state.phase || state.incarnation != pass.state.incarnation
+            || state.generation != pass.state.generation || !state.generationEpoch.equals(pass.state.generationEpoch))
+            return false;
+        if (!pass.reverse)
+            return env.isNaturalReplica(cm, logical, logical.partitioner.decorateKey(pass.key));
+        // the owner restarts the generation on a placement change of a bucket token; this is the local view of it
+        TableMetadata physical = physicalOrNull(cm, now);
+        return physical != null && replicatedBuckets(cm, logical, physical, now, pass.key, state).equals(pass.buckets);
+    }
+
+    /** The buckets of the key's incarnation of which this node is a natural replica, ascending. */
+    private List<Integer> replicatedBuckets(ClusterMetadata cm, TableMetadata logical, TableMetadata physical, TableLayout layout, ByteBuffer key, KeyState state)
+    {
+        List<Integer> buckets = new ArrayList<>();
+        for (int bucket = 0; bucket < layout.buckets; bucket++)
+            if (env.isNaturalReplica(cm, physical, RowMapper.physicalKey(logical, physical, key, state.incarnation, bucket)))
+                buckets.add(bucket);
+        return buckets;
+    }
+
+    /** The overflow table of the layout, or null if the metadata has none. */
+    private static TableMetadata physicalOrNull(ClusterMetadata cm, TableLayout layout)
+    {
+        try
+        {
+            return RoutedKey.physical(cm, layout);
+        }
+        catch (IllegalStateException e)
+        {
+            return null;
+        }
     }
 
     /**
-     * True if this node's clock is past the time after which nothing may be copied for the key (ADR-031). The limit
-     * moves with {@code gc_grace_seconds} of the logical table as it is now.
+     * True if this node's clock is past the time after which nothing may be copied for the key: for a forward pass
+     * the tombstone deadline of ADR-031, for a reverse pass the replica limit of design 11.5. The limit moves with
+     * {@code gc_grace_seconds} as it is now: of the logical table, and for a reverse pass the smaller of the two
+     * tables' (they are kept equal, 2.5). A metadata without the logical table is past every limit.
      *
      * @param counted false for the look that decides whether a pass is owed at all, which is repeated
      */
-    private boolean pastDeadline(Pass pass, TableMetadata logical, boolean counted)
+    private boolean pastDeadline(Pass pass, ClusterMetadata cm, boolean counted)
     {
-        long limit = pass.state.backfillLimitMillis(logical.params.gcGraceSeconds);
-        if (limit != Long.MIN_VALUE)
-            limit -= env.writeTimeoutMillis();
+        TableMetadata logical = RoutedKey.logical(cm, pass.layout);
+        long limit;
+        if (logical == null)
+            limit = Long.MIN_VALUE;
+        else if (pass.reverse)
+        {
+            TableMetadata physical = physicalOrNull(cm, pass.layout);
+            int gcGrace = physical == null ? logical.params.gcGraceSeconds : Math.min(logical.params.gcGraceSeconds, physical.params.gcGraceSeconds);
+            limit = pass.state.reverseReplicaLimitMillis(gcGrace, env.writeTimeoutMillis());
+        }
+        else
+        {
+            limit = pass.state.backfillLimitMillis(logical.params.gcGraceSeconds);
+            if (limit != Long.MIN_VALUE)
+                limit -= env.writeTimeoutMillis();
+        }
         long now = env.nowMillis();
         if (now < limit)
             return false;
         if (counted)
             stats.refusedPastDeadline.incrementAndGet();
-        String key = pass.layout.layoutId + "/" + ByteBufferUtil.bytesToHex(pass.key) + '/' + pass.state.incarnation;
+        // a reverse attempt has its own limit: one that is aborted and begun again is logged again
+        String key = pass.layout.layoutId + "/" + ByteBufferUtil.bytesToHex(pass.key) + '/' + pass.state.incarnation
+                     + (pass.reverse ? "/r" + pass.state.reverseDualSinceMillis : "");
         if (pastDeadline.add(key))
         {
             if (!counted)
                 stats.refusedPastDeadline.incrementAndGet();
-            logger.warn("Not copying for the {}: {}. Nothing is written or reported for this key any more; it needs an operator",
-                        pass, limit == Long.MIN_VALUE
-                              ? "the registry does not say when dual write started"
-                              : "the clock (" + now + ") is past the tombstone deadline (" + limit + "), half of gc_grace_seconds after dual write started");
+            String why;
+            if (limit == Long.MIN_VALUE)
+                why = pass.reverse ? "the registry does not say when reverse dual write started" : "the registry does not say when dual write started";
+            else if (pass.reverse)
+                why = "the clock (" + now + ") is past the reverse replica limit (" + limit + "), half of gc_grace_seconds after the key was frozen or reverse dual write started, less the write timeout";
+            else
+                why = "the clock (" + now + ") is past the tombstone deadline (" + limit + "), half of gc_grace_seconds after dual write started";
+            logger.warn("Not copying for the {}: {}. Nothing is written or reported for this key any more; it needs an operator", pass, why);
         }
         return true;
     }
@@ -550,6 +661,8 @@ public final class BackfillTask
         ClusterMetadata cm = env.metadata();
         if (!current(cm, pass))
             return Outcome.NOTHING;
+        if (pass.reverse)
+            return runReverse(pass);
         TableMetadata base = RoutedKey.logical(cm, pass.layout);
 
         // where to start: the record of this very generation, or the beginning
@@ -593,7 +706,7 @@ public final class BackfillTask
                 for (PartitionUpdate update : RowMapper.toPhysical(chunk.update, physical, pass.layout, pass.state.incarnation).values())
                     mutations.add(new Mutation(update));
                 // judged here, with the chunk in hand: the read may have taken long
-                if (pastDeadline(pass, base, true))
+                if (pastDeadline(pass, cm, true))
                     return Outcome.NOTHING;
                 Runnable seam = beforeChunkWriteForTesting;
                 if (seam != null)
@@ -625,12 +738,105 @@ public final class BackfillTask
                 throttle(chunk.bytes);
         }
 
+        return report(pass, chunks, bytes);
+    }
+
+    /**
+     * The reverse pass (design 11.4): every bucket this node replicates, one after the other, each from its own
+     * record, into the base partition; then the report.
+     */
+    private Outcome runReverse(Pass pass)
+    {
+        logger.info("Running the {}", pass);
+        long chunks = 0;
+        long bytes = 0;
+        for (int i = 0; i < pass.buckets.size(); i++)
+        {
+            int bucket = pass.buckets.get(i);
+            boolean lastBucket = i == pass.buckets.size() - 1;
+            String stateKey = pass.bucketStateKey(bucket);
+            ClusterMetadata cm = env.metadata();
+            if (!current(cm, pass))
+                return abandoned(pass);
+
+            ClusteringBound<?> from = null;
+            boolean started = false;
+            boolean copied = false;
+            Optional<String> record = env.getState(stateKey);
+            if (record.isPresent())
+            {
+                Resume resume = Resume.parse(record.get(), pass.stateOwner(), RoutedKey.physical(cm, pass.layout));
+                if (resume != null)
+                {
+                    from = resume.from;
+                    started = true;
+                    copied = from == null;
+                    stats.passesResumed.incrementAndGet();
+                    stats.lastResumeRecord = record.get();
+                    if (!copied)
+                        logger.info("Resuming the {} in bucket {} at {}", pass, bucket, from.toString(RoutedKey.physical(cm, pass.layout)));
+                }
+            }
+
+            while (!copied)
+            {
+                if (Thread.currentThread().isInterrupted())
+                    return Outcome.INTERRUPTED;
+                cm = env.metadata();
+                if (!current(cm, pass))
+                    return abandoned(pass);
+                TableMetadata base = RoutedKey.logical(cm, pass.layout);
+                TableMetadata physical = RoutedKey.physical(cm, pass.layout);
+                DecoratedKey bucketKey = RowMapper.physicalKey(base, physical, pass.key, pass.state.incarnation, bucket);
+
+                // the bucket's partition deletion goes with its first chunk; it is the same in every bucket
+                Chunk chunk = readChunk(physical, bucketKey, from, !started, Math.max(1, env.chunkRows()), maxChunkBytes());
+                if (chunk.update != null)
+                {
+                    List<Mutation> mutations = List.of(new Mutation(RowMapper.toLogical(chunk.update, base)));
+                    if (pastDeadline(pass, cm, true))
+                        return Outcome.NOTHING;
+                    Runnable seam = beforeChunkWriteForTesting;
+                    if (seam != null)
+                        seam.run();
+                    try
+                    {
+                        env.write(mutations);
+                    }
+                    catch (RuntimeException e)
+                    {
+                        if (Thread.currentThread().isInterrupted())
+                            return Outcome.INTERRUPTED;
+                        stats.writeFailures.incrementAndGet();
+                        logger.info("A write of the {} was not acknowledged by every replica and will be repeated: {}", pass, e.toString());
+                        return Outcome.RETRY;
+                    }
+                    chunks++;
+                    bytes += chunk.bytes;
+                    stats.chunksWritten.incrementAndGet();
+                    stats.bytesWritten.addAndGet(chunk.bytes);
+                }
+                from = chunk.next;
+                started = true;
+                copied = from == null;
+                env.putState(stateKey, new Resume(pass.stateOwner(), from).format());
+                if (!copied || !lastBucket)
+                    throttle(chunk.bytes);
+            }
+            stats.bucketsCopied.incrementAndGet();
+        }
+        return report(pass, chunks, bytes);
+    }
+
+    /** The report of a pass whose copy is complete; the records of the key go with it. */
+    private Outcome report(Pass pass, long chunks, long bytes)
+    {
         // the report is for the generation the copy was made for and nothing else
-        cm = env.metadata();
+        ClusterMetadata cm = env.metadata();
         if (!current(cm, pass))
             return abandoned(pass);
         // a pass that could not finish in time is not vouched for, even if its last chunk was written in time
-        if (pastDeadline(pass, RoutedKey.logical(cm, pass.layout), true))
+        if (pastDeadline(pass, cm, true))
             return Outcome.NOTHING;
         ReportBackfill report = new ReportBackfill(pass.layout.logical, pass.key, pass.state.generation, pass.state.generationEpoch,
                                                    env.self(cm));
