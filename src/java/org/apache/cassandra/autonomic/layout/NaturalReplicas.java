@@ -104,6 +104,23 @@ public final class NaturalReplicas
         return out;
     }
 
+    /**
+     * The latest epoch at which the replica group of any bucket token of the incarnation was modified (design 11.4, the
+     * reverse completion test); {@link Epoch#EMPTY} if there is none.
+     */
+    public static Epoch bucketsLastModified(ClusterMetadata cm, TableMetadata logical, TableMetadata physical, ByteBuffer key, int incarnation, int buckets)
+    {
+        Epoch latest = Epoch.EMPTY;
+        for (int bucket = 0; bucket < buckets; bucket++)
+        {
+            Token token = cm.partitioner.getToken(RowMapper.physicalKey(logical, physical, key, incarnation, bucket).getKey());
+            VersionedEndpoints.ForToken forToken = forToken(cm, physical, token);
+            if (forToken != null && forToken.lastModified().isAfter(latest))
+                latest = forToken.lastModified();
+        }
+        return latest;
+    }
+
     /** The epoch at which the key's replica group was last modified; {@link Epoch#EMPTY} if there is none. */
     public static Epoch lastModified(ClusterMetadata cm, TableMetadata logical, ByteBuffer key)
     {

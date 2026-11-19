@@ -69,6 +69,7 @@ import org.apache.cassandra.autonomic.execute.StepScheduler;
 import org.apache.cassandra.autonomic.execute.actuators.Actuators;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
+import org.apache.cassandra.autonomic.execute.actuators.PartitionUnsplitActuator;
 import org.apache.cassandra.autonomic.execute.actuators.ScaleOutActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
@@ -311,6 +312,7 @@ public class AutonomicService implements AutonomicServiceMBean
                                                          this::inNodeExhausted));
         out.add(new SplitOutcomeDetectors.VerifyFailed());
         out.add(new SplitOutcomeDetectors.SplitNotEffective());
+        out.add(new SplitOutcomeDetectors.UnsplitResidue());
         out.add(new SplitOutcomeDetectors.Orphaned(ClusterMetadata::currentNullable, () -> DatabaseDescriptor.getWriteRpcTimeout(TimeUnit.MILLISECONDS)));
         out.add(new SplitOutcomeDetectors.ReclaimDue(ClusterMetadata::currentNullable, () -> config.layout));
         return out;
@@ -1497,9 +1499,13 @@ public class AutonomicService implements AutonomicServiceMBean
         catch (IllegalArgumentException e)
         {
             // not a held proposal: perhaps the commit point of a partition split (T6.9)
-            if (!PartitionSplitActuator.approveCommit(coordinator, id))
+            // or the reverse commit point of a partition unsplit (T6.17f, owner answer 5)
+            if (PartitionSplitActuator.approveCommit(coordinator, id))
+                logger.info("Autonomic partition split {}: commit point approved by operator command", id);
+            else if (PartitionUnsplitActuator.approveCommit(coordinator, id))
+                logger.info("Autonomic partition unsplit {}: reverse commit point approved by operator command", id);
+            else
                 throw e;
-            logger.info("Autonomic partition split {}: commit point approved by operator command", id);
         }
     }
 

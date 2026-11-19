@@ -49,9 +49,12 @@ import org.apache.cassandra.db.rows.RangeTombstoneMarker;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
 import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.gms.ApplicationState;
+import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.Epoch;
@@ -206,6 +209,11 @@ public final class BasePurge
 
         /** Releases the thread; a later {@link #schedule} makes a new one. */
         void shutdown();
+
+        /** Makes {@link #published} visible to the other nodes (gossip in production). */
+        default void publish(String summary)
+        {
+        }
     }
 
     private static final class NodeEnv implements Env
@@ -312,6 +320,13 @@ public final class BasePurge
             executor = null;
         }
 
+        @Override
+        public void publish(String summary)
+        {
+            if (Gossiper.instance.isEnabled())
+                Gossiper.instance.addLocalApplicationState(PUBLISHED_STATE, StorageService.instance.valueFactory.indexStatus(summary));
+        }
+
         private static ColumnFamilyStore cfs(TableMetadata table)
         {
             return Keyspace.open(table.keyspace).getColumnFamilyStore(table.id);
@@ -330,6 +345,8 @@ public final class BasePurge
         boolean compacted;
         Reason reason;
         String detail = "";
+        /** The largest timestamp the last probe found, {@link Long#MIN_VALUE} if nothing. */
+        long maxTimestamp = Long.MIN_VALUE;
 
         Pending(TableId logical, ByteBuffer key)
         {
@@ -344,6 +361,8 @@ public final class BasePurge
     /** By {@link #id}; guarded by {@code this}. */
     private final Map<String, Pending> pending = new HashMap<>();
     private final AtomicBoolean scheduled = new AtomicBoolean();
+    /** What {@link Env#publish} was last given; guarded by {@code this}. */
+    private String lastPublished = "";
 
     @VisibleForTesting
     BasePurge(Env env, long minBackoffMillis, long maxBackoffMillis)
@@ -461,6 +480,12 @@ public final class BasePurge
         }
         pending.clear();
         pending.putAll(still);
+        String summary = summary();
+        if (!summary.equals(lastPublished))
+        {
+            env.publish(summary);
+            lastPublished = summary;
+        }
         if (!pending.isEmpty())
         {
             long next = Long.MAX_VALUE;
@@ -547,6 +572,7 @@ public final class BasePurge
         }
         long backoff = Math.min(maxBackoffMillis, minBackoffMillis << Math.min(20, p.attempts));
         p.attempts++;
+        p.maxTimestamp = after.maxTimestamp;
         wait(p, reason, detail, now + backoff);
         logger.warn("The base partition 0x{} of {}.{} is not clean on this node: {}: {}", ByteBufferUtil.bytesToHex(p.key), base.keyspace, base.name, reason, detail);
         return false;
@@ -557,6 +583,86 @@ public final class BasePurge
         p.reason = reason;
         p.detail = detail;
         p.dueMillis = dueMillis;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // what the other nodes see (T6.17f: the owner's diagnosis on purge_timeout)
+    // ---------------------------------------------------------------------------------------------------------
+
+    /** The gossip state that carries {@link #summary}; reserved for this use. */
+    public static final ApplicationState PUBLISHED_STATE = ApplicationState.X1;
+    static final int MAX_PUBLISHED_DETAIL = 200;
+    static final int MAX_PUBLISHED_BYTES = 4096;
+
+    /** One key a node is held for, as it published it. */
+    public static final class Published
+    {
+        public final TableId logical;
+        public final String keyHex;
+        public final Reason reason;
+        /** {@link Long#MIN_VALUE} if unknown. */
+        public final long maxTimestamp;
+        public final String detail;
+
+        public Published(TableId logical, String keyHex, Reason reason, long maxTimestamp, String detail)
+        {
+            this.logical = logical;
+            this.keyHex = keyHex;
+            this.reason = reason;
+            this.maxTimestamp = maxTimestamp;
+            this.detail = detail;
+        }
+
+        @Override
+        public String toString()
+        {
+            return reason + ": " + detail;
+        }
+    }
+
+    /**
+     * One line per key this node is held for, {@code <logical table id> <key hex> <REASON> <largest timestamp> <detail>},
+     * with the detail shortened and the whole bounded; the keys waiting for gc_grace are left out.
+     */
+    synchronized String summary()
+    {
+        StringBuilder sb = new StringBuilder();
+        for (Pending p : pending.values())
+        {
+            if (p.reason == null || p.reason == Reason.WAITING_GC_GRACE)
+                continue;
+            String detail = p.detail.replace('\n', ' ');
+            if (detail.length() > MAX_PUBLISHED_DETAIL)
+                detail = detail.substring(0, MAX_PUBLISHED_DETAIL);
+            String line = p.logical + " " + ByteBufferUtil.bytesToHex(p.key) + ' ' + p.reason + ' ' + p.maxTimestamp + ' ' + detail + '\n';
+            if (sb.length() + line.length() > MAX_PUBLISHED_BYTES)
+                break;
+            sb.append(line);
+        }
+        return sb.toString();
+    }
+
+    /** The lines of a published {@link #summary}; lines that cannot be read are skipped. */
+    public static List<Published> parsePublished(String summary)
+    {
+        List<Published> out = new ArrayList<>();
+        if (summary == null)
+            return out;
+        for (String line : summary.split("\n"))
+        {
+            String[] f = line.split(" ", 5);
+            if (f.length < 4)
+                continue;
+            try
+            {
+                out.add(new Published(TableId.fromString(f[0]), f[1], Reason.valueOf(f[2]), Long.parseLong(f[3]), f.length == 5 ? f[4] : ""));
+            }
+            catch (RuntimeException e)
+            {
+                // a line of another version, or truncated
+            }
+        }
+        return out;
     }
 
     /** The reasons keys are held for, as "keyHex: REASON: detail"; for operators and tests. */

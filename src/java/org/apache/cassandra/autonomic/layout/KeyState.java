@@ -276,6 +276,13 @@ public final class KeyState
                             dualWriteSinceMillis, ImmutableSortedSet.of(), baseState, frozenSinceMillis, baseTombstoneMicros, mode, 0);
     }
 
+    /** The base state {@code TOMBSTONED(tt)}, everything else unchanged (a stuck key's tombstone, owner answer 6). */
+    KeyState withBaseTombstone(long tombstoneMicros)
+    {
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear,
+                            BaseState.TOMBSTONED, frozenSinceMillis, tombstoneMicros, reverseMode, reverseDualSinceMillis);
+    }
+
     KeyState withBackfillDone(NodeId node)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch,

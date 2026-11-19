@@ -42,6 +42,10 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  * <p>Accepted from {@link Phase#STEADY} owned by nobody, and from {@link Phase#NEW_ONLY} and {@link Phase#CLEANUP}
  * owned by {@link #previousActionId}, a forward action that holds no claim any more (as for {@code AdoptKey}). The
  * first commit of format 2 values: the registry is upgraded here, if every node of the directory can read format 2.
+ *
+ * <p>{@link #baseTombstoneMicros} is non-zero only for a key stuck in {@code CLEANUP} at {@code RECONCILE_PAST_DEADLINE}
+ * (owner answer 6): the unsplit action wrote the base partition tombstone itself at that time, and the key begins a
+ * slow reverse with base state {@code TOMBSTONED(Tt)}.
  */
 public final class BeginUnsplit extends LayoutTransformation
 {
@@ -54,20 +58,31 @@ public final class BeginUnsplit extends LayoutTransformation
     public final KeyState.ReverseMode mode;
     /** The forward action that owns a {@code NEW_ONLY} or {@code CLEANUP} key; null for a {@code STEADY} key. */
     public final UUID previousActionId;
+    /** {@code Tt} of a base tombstone the action wrote for a stuck {@code CLEANUP} key; 0 otherwise. */
+    public final long baseTombstoneMicros;
 
     public BeginUnsplit(UUID actionId, NodeId owner, int expectedStep, TableId logical, ByteBuffer keyBytes, KeyState.ReverseMode mode,
                         UUID previousActionId, long nowMillis, long leaseMillis)
     {
-        this(new ClaimStep(actionId, owner, expectedStep, nowMillis, leaseMillis), logical, keyBytes, mode, previousActionId);
+        this(actionId, owner, expectedStep, logical, keyBytes, mode, previousActionId, 0, nowMillis, leaseMillis);
     }
 
-    private BeginUnsplit(ClaimStep claim, TableId logical, ByteBuffer keyBytes, KeyState.ReverseMode mode, UUID previousActionId)
+    public BeginUnsplit(UUID actionId, NodeId owner, int expectedStep, TableId logical, ByteBuffer keyBytes, KeyState.ReverseMode mode,
+                        UUID previousActionId, long baseTombstoneMicros, long nowMillis, long leaseMillis)
     {
+        this(new ClaimStep(actionId, owner, expectedStep, nowMillis, leaseMillis), logical, keyBytes, mode, previousActionId, baseTombstoneMicros);
+    }
+
+    private BeginUnsplit(ClaimStep claim, TableId logical, ByteBuffer keyBytes, KeyState.ReverseMode mode, UUID previousActionId, long baseTombstoneMicros)
+    {
+        if (baseTombstoneMicros < 0)
+            throw new IllegalArgumentException("base tombstone time " + baseTombstoneMicros + " is negative");
         this.claim = claim;
         this.logical = Objects.requireNonNull(logical);
         this.keyBytes = TableLayout.key(keyBytes);
         this.mode = Objects.requireNonNull(mode);
         this.previousActionId = previousActionId;
+        this.baseTombstoneMicros = baseTombstoneMicros;
     }
 
     public UUID actionId()
@@ -98,7 +113,7 @@ public final class BeginUnsplit extends LayoutTransformation
     {
         if (previousActionId != null && !previousActionId.equals(claim.actionId) && ClusterLedger.of(prev).claim(previousActionId) != null)
             return LayoutRegistry.rejected("action " + previousActionId + " still holds a claim");
-        return registry.withBegunReverse(logical, keyBytes, claim.actionId, previousActionId, mode, LayoutRegistry.formatGateRefusal(prev),
+        return registry.withBegunReverse(logical, keyBytes, claim.actionId, previousActionId, mode, baseTombstoneMicros, LayoutRegistry.formatGateRefusal(prev),
                                          prev.nextEpoch(), claim.nowMillis);
     }
 
@@ -109,21 +124,25 @@ public final class BeginUnsplit extends LayoutTransformation
             return false;
         BeginUnsplit b = (BeginUnsplit) o;
         return claim.equals(b.claim) && logical.equals(b.logical) && keyBytes.equals(b.keyBytes) && mode == b.mode
-               && Objects.equals(previousActionId, b.previousActionId);
+               && Objects.equals(previousActionId, b.previousActionId) && baseTombstoneMicros == b.baseTombstoneMicros;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(claim, logical, keyBytes, mode, previousActionId);
+        return Objects.hash(claim, logical, keyBytes, mode, previousActionId, baseTombstoneMicros);
     }
 
     @Override
     public String toString()
     {
         return "BeginUnsplit{" + claim + ' ' + logical + " key=" + ByteBufferUtil.bytesToHex(keyBytes) + ' ' + mode
-               + (previousActionId == null ? "" : " from " + previousActionId) + '}';
+               + (previousActionId == null ? "" : " from " + previousActionId)
+               + (baseTombstoneMicros == 0 ? "" : " base tombstone " + baseTombstoneMicros) + '}';
     }
+
+    private static final int FLAG_PREVIOUS = 1;
+    private static final int FLAG_TOMBSTONE = 2;
 
     public static final class Serializer implements AsymmetricMetadataSerializer<Transformation, BeginUnsplit>
     {
@@ -140,9 +159,12 @@ public final class BeginUnsplit extends LayoutTransformation
             b.logical.serialize(out);
             writeKey(b.keyBytes, out);
             out.writeByte(b.mode.id);
-            out.writeBoolean(b.previousActionId != null);
+            // bit 0: a previous action follows (the boolean of the first form); bit 1: a base tombstone time follows
+            out.writeByte((b.previousActionId != null ? FLAG_PREVIOUS : 0) | (b.baseTombstoneMicros != 0 ? FLAG_TOMBSTONE : 0));
             if (b.previousActionId != null)
                 writeUuid(b.previousActionId, out);
+            if (b.baseTombstoneMicros != 0)
+                out.writeLong(b.baseTombstoneMicros);
         }
 
         @Override
@@ -156,14 +178,20 @@ public final class BeginUnsplit extends LayoutTransformation
             KeyState.ReverseMode mode = KeyState.ReverseMode.fromId(id);
             if (mode == null)
                 throw new IOException("Unknown reverse mode " + id + " in autonomic transformation " + NAME);
-            return new BeginUnsplit(claim, logical, key, mode, in.readBoolean() ? readUuid(in) : null);
+            int flags = in.readByte();
+            if ((flags & ~(FLAG_PREVIOUS | FLAG_TOMBSTONE)) != 0)
+                throw new IOException("Unknown flags " + flags + " in autonomic transformation " + NAME);
+            UUID previous = (flags & FLAG_PREVIOUS) != 0 ? readUuid(in) : null;
+            long tombstone = (flags & FLAG_TOMBSTONE) != 0 ? in.readLong() : 0;
+            return new BeginUnsplit(claim, logical, key, mode, previous, tombstone);
         }
 
         @Override
         public long serializedSize(Transformation t, Version version)
         {
             BeginUnsplit b = (BeginUnsplit) t;
-            return 1 + ClaimStep.SERIALIZED_SIZE + b.logical.serializedSize() + keySize(b.keyBytes) + 1 + 1 + (b.previousActionId == null ? 0 : 2 * Long.BYTES);
+            return 1 + ClaimStep.SERIALIZED_SIZE + b.logical.serializedSize() + keySize(b.keyBytes) + 1 + 1 + (b.previousActionId == null ? 0 : 2 * Long.BYTES)
+                   + (b.baseTombstoneMicros == 0 ? 0 : Long.BYTES);
         }
     }
 }

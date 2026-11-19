@@ -163,6 +163,11 @@ public class AutonomicConfig
          * repeated with backoff). The forced compaction rewrites every sstable that may hold the key.
          */
         public boolean force_purge_compaction = true;
+        /**
+         * How long a slow reverse migration waits in REVERSE_ANNOUNCED, after every node acknowledged it, for every base
+         * replica's clean purge report; then it aborts with {@code layout.unsplit_residue} (design 11.4, T6.17f).
+         */
+        public DurationSpec.LongMillisecondsBound purge_timeout = new DurationSpec.LongMillisecondsBound("6h");
         /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
         public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
 
@@ -224,6 +229,7 @@ public class AutonomicConfig
         m.put("request_throttle", options("enabled", false, "min_requests_per_second", 1000));
         m.put("scale_out", options("enabled", false));
         m.put("partition_split", options("enabled", false));
+        m.put("partition_unsplit", options("enabled", false));
         return m;
     }
 

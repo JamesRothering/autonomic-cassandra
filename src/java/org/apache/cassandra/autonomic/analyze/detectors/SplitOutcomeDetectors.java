@@ -55,6 +55,8 @@ public final class SplitOutcomeDetectors
     public static final String SPLIT_NOT_EFFECTIVE = "layout.split_not_effective";
     public static final String ORPHANED = PartitionSplitActuator.ORPHANED;
     public static final String RECLAIM_DUE = PartitionSplitActuator.RECLAIM_DUE;
+    /** A slow reverse migration aborted on {@code purge_timeout}: a base replica's partition did not purge clean (T6.17f). */
+    public static final String UNSPLIT_RESIDUE = "layout.unsplit_residue";
     public static final long OPEN_MILLIS = 24L * 3_600_000;
 
     private SplitOutcomeDetectors()
@@ -98,6 +100,47 @@ public final class SplitOutcomeDetectors
                 out.add(new Diagnosis(id(VERIFY_FAILED, f.actionId), VERIFY_FAILED, Subject.partition(f.keyspace, f.table, f.keyHex), Severity.WARN, 1.0,
                                       f.atMillis, now, "The split of partition 0x" + f.keyHex + " of " + f.keyspace + '.' + f.table
                                                        + " was aborted: its overflow copy did not verify equal to the base copy", evidence, null));
+            }
+            return out;
+        }
+    }
+
+    /** {@value #UNSPLIT_RESIDUE}: each base replica's purge reason and what the operator can do (owner answer 3). */
+    public static final class UnsplitResidue implements Detector
+    {
+        @Override
+        public String name()
+        {
+            return UNSPLIT_RESIDUE;
+        }
+
+        @Override
+        public Set<SignalId> requires()
+        {
+            return Collections.emptySet();
+        }
+
+        @Override
+        public List<Diagnosis> analyze(KnowledgeView knowledge)
+        {
+            long now = knowledge.nowMillis();
+            List<Diagnosis> out = new ArrayList<>();
+            for (LayoutEvents.UnsplitResidue r : LayoutEvents.unsplitResidues())
+            {
+                if (now - r.atMillis > OPEN_MILLIS)
+                    continue;
+                Map<String, String> evidence = new LinkedHashMap<>();
+                evidence.put("key_hex", r.keyHex);
+                evidence.put("table", r.keyspace + '.' + r.table);
+                evidence.put("action", r.actionId.toString());
+                r.nodes.forEach((node, reason) -> evidence.put("node." + node, reason));
+                if (r.largestResidueTimestamp != Long.MIN_VALUE)
+                    evidence.put("largest_residue_timestamp", Long.toString(r.largestResidueTimestamp));
+                evidence.put("remedy", r.remedy);
+                out.add(new Diagnosis(id(UNSPLIT_RESIDUE, r.actionId), UNSPLIT_RESIDUE, Subject.partition(r.keyspace, r.table, r.keyHex), Severity.WARN, 1.0,
+                                      r.atMillis, now, "The slow unsplit of partition 0x" + r.keyHex + " of " + r.keyspace + '.' + r.table
+                                                       + " was aborted: the base partition did not purge clean on every replica. " + r.remedy,
+                                      evidence, null));
             }
             return out;
         }

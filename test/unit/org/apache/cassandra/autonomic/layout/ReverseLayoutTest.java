@@ -919,4 +919,39 @@ public class ReverseLayoutTest
         ClusterMetadata reverse = reverseIn(Phase.REVERSE_ANNOUNCED);
         assertTrue(registry(reverse).withAdoptedKey(LOGICAL, K1, Phase.REVERSE_ANNOUNCED, LayoutRegistry.NO_ACTION, B).rejection != null);
     }
+
+    @Test
+    public void aStuckCleanupKeysTombstoneComesWithBeginUnsplit() throws IOException
+    {
+        // T6.17f, owner answer 6: the unsplit wrote the base tombstone of a CLEANUP key itself
+        ClusterMetadata cleanup = forwardIn(Phase.CLEANUP, A, RESIDUE, 0, LayoutRegistry.FORMAT_VERSION_2);
+        LayoutRegistry.Result begun = registry(cleanup).withBegunReverse(LOGICAL, K1, B, A, SLOW, TT, null, cleanup.epoch.nextEpoch(), NOW);
+        assertFalse(begun.rejection, begun.isRejected());
+        KeyState k = begun.registry.layout(LOGICAL).keyState(K1);
+        assertEquals(Phase.REVERSE_ANNOUNCED, k.phase);
+        assertEquals(SLOW, k.reverseMode);
+        assertEquals(TOMBSTONED, k.baseState);
+        assertEquals(TT, k.baseTombstoneMicros);
+        assertEquals(B, k.actionId);
+        // only for CLEANUP, from RESIDUE, in slow mode
+        assertTrue(registry(cleanup).withBegunReverse(LOGICAL, K1, B, A, FAST, TT, null, cleanup.epoch.nextEpoch(), NOW).rejection.contains("accepted only"));
+        ClusterMetadata newOnly = forwardIn(Phase.NEW_ONLY, A, RESIDUE, 0, LayoutRegistry.FORMAT_VERSION_2);
+        assertTrue(registry(newOnly).withBegunReverse(LOGICAL, K1, B, A, SLOW, TT, null, newOnly.epoch.nextEpoch(), NOW).rejection.contains("accepted only"));
+        ClusterMetadata steady = forwardIn(Phase.STEADY, null, RESIDUE, 0, LayoutRegistry.FORMAT_VERSION_2);
+        assertTrue(registry(steady).withBegunReverse(LOGICAL, K1, B, null, SLOW, TT, null, steady.epoch.nextEpoch(), NOW).rejection.contains("accepted only"));
+        ClusterMetadata tombstoned = forwardIn(Phase.CLEANUP, A, TOMBSTONED, TT, LayoutRegistry.FORMAT_VERSION_2);
+        assertTrue(registry(tombstoned).withBegunReverse(LOGICAL, K1, B, A, SLOW, TT, null, tombstoned.epoch.nextEpoch(), NOW).rejection.contains("accepted only"));
+
+        // the flags byte reads the first form's boolean the same; the tombstone time follows only when set
+        for (BeginUnsplit b : List.of(new BeginUnsplit(A, N1, 0, LOGICAL, K1, SLOW, B, TT, NOW, LEASE), begin(FAST, null), begin(SLOW, B)))
+        {
+            CustomTransformation wrapped = b.wrap();
+            DataOutputBuffer out = new DataOutputBuffer();
+            CustomTransformation.serializer.serialize(wrapped, out, VERSION);
+            assertEquals(out.getLength(), CustomTransformation.serializer.serializedSize(wrapped, VERSION));
+            CustomTransformation read = CustomTransformation.serializer.deserialize(new DataInputBuffer(out.buffer(), false), VERSION);
+            assertEquals(b, read.child());
+            assertEquals(b.baseTombstoneMicros, ((BeginUnsplit) read.child()).baseTombstoneMicros);
+        }
+    }
 }

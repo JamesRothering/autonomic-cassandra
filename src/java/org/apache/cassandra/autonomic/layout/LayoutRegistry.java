@@ -428,9 +428,19 @@ public final class LayoutRegistry
      * owned by {@code previousActionId} (the forward action that handed it over, owner answer 2). {@code FAST} needs
      * base state {@code RESIDUE}, {@code SLOW} needs {@code TOMBSTONED}. Whether the windows of 11.5 still allow the
      * mode is for the action to decide: it has the clock, the configuration and the estimate.
+     *
+     * <p>A non-zero {@code baseTombstoneMicros} is the base tombstone that the action wrote for a key stuck in
+     * {@link Phase#CLEANUP} (owner answer 6): accepted only there, from {@code RESIDUE}, in {@code SLOW} mode; the key
+     * then begins with base state {@code TOMBSTONED} at that time.
      */
     public Result withBegunReverse(TableId logical, ByteBuffer key, UUID actionId, UUID previousActionId, KeyState.ReverseMode mode,
                                    String gateRefusal, Epoch epoch, long nowMillis)
+    {
+        return withBegunReverse(logical, key, actionId, previousActionId, mode, 0, gateRefusal, epoch, nowMillis);
+    }
+
+    public Result withBegunReverse(TableId logical, ByteBuffer key, UUID actionId, UUID previousActionId, KeyState.ReverseMode mode,
+                                   long baseTombstoneMicros, String gateRefusal, Epoch epoch, long nowMillis)
     {
         if (logical == null || key == null || actionId == null || mode == null)
             return reject("missing argument");
@@ -454,6 +464,15 @@ public final class LayoutRegistry
                 break;
             default:
                 return reject("key is in phase " + state.phase + ", BeginUnsplit needs " + Phase.STEADY + ", " + Phase.NEW_ONLY + " or " + Phase.CLEANUP);
+        }
+        if (baseTombstoneMicros < 0)
+            return reject("base tombstone time " + baseTombstoneMicros + " is negative");
+        if (baseTombstoneMicros > 0)
+        {
+            if (state.phase != Phase.CLEANUP || mode != KeyState.ReverseMode.SLOW || state.baseState != KeyState.BaseState.RESIDUE)
+                return reject("a base tombstone written by the unsplit is accepted only for a CLEANUP key in RESIDUE in slow mode, not "
+                              + state.phase + " in " + state.baseState + " in " + mode);
+            state = state.withBaseTombstone(baseTombstoneMicros);
         }
         if (mode == KeyState.ReverseMode.FAST && state.baseState != KeyState.BaseState.RESIDUE)
             return reject("fast mode needs the base partition in state RESIDUE, it is " + state.baseState);

@@ -40,6 +40,7 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -288,6 +289,30 @@ public class BasePurgeTest extends CQLTester
         assertEquals(0, purge.poll());
         assertEquals(compactions, env.compactions);
         assertTrue(purge.reasons().get(0).contains("RESIDUE_ABOVE_TT"));
+    }
+
+    @Test
+    public void theReasonIsPublishedForTheOwner() throws Exception
+    {
+        // T6.17f: what the other nodes read from gossip on purge_timeout
+        setUp("");
+        fill();
+        long future = 4_102_444_800_000_000L;
+        execute("INSERT INTO %s (p, c, v) VALUES (?, 9, 'late') USING TIMESTAMP " + future, K);
+        announce(KeyState.ReverseMode.SLOW, Phase.REVERSE_ANNOUNCED, 2000);
+        BasePurge purge = purge();
+        assertEquals(0, purge.poll());
+        assertEquals("a node waiting for gc_grace publishes nothing", "", purge.summary());
+        sleepPastGcGrace();
+        assertEquals(0, purge.poll());
+        List<BasePurge.Published> published = BasePurge.parsePublished(purge.summary());
+        assertEquals(1, published.size());
+        BasePurge.Published p = published.get(0);
+        assertEquals(BasePurge.Reason.RESIDUE_ABOVE_TT, p.reason);
+        assertEquals(future, p.maxTimestamp);
+        assertEquals(ByteBufferUtil.bytesToHex(Int32Type.instance.decompose(K)), p.keyHex);
+        assertTrue(p.detail, p.detail.contains("needs the operator") || p.detail.contains("residue above"));
+        assertTrue(BasePurge.parsePublished("garbage\nx y Z 1").isEmpty());
     }
 
     @Test

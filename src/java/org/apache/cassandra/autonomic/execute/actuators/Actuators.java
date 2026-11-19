@@ -57,6 +57,7 @@ public final class Actuators
         out.add(RepairPriorityActuator.create());
         out.add(ScaleOutActuator.create(config, knowledge));
         out.add(PartitionSplitActuator.create(() -> config));
+        out.add(PartitionUnsplitActuator.create(() -> config));
         return out;
     }
 
