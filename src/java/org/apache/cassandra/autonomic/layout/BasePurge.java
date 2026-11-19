@@ -510,6 +510,8 @@ public final class BasePurge
                     wait(p, Reason.WAITING_GC_GRACE, "the partition deletion at " + before.partitionDeletionTimestamp + " may be purged from "
                                                       + due + " (local deletion time " + before.partitionDeletionLocalTime + " plus gc_grace_seconds "
                                                       + base.params.gcGraceSeconds + ')', due);
+                    // published as the time the purge can start: the owner of a key whose Tt it does not know learns it here
+                    p.maxTimestamp = due;
                     return false;
                 }
             }
@@ -622,14 +624,15 @@ public final class BasePurge
 
     /**
      * One line per key this node is held for, {@code <logical table id> <key hex> <REASON> <largest timestamp> <detail>},
-     * with the detail shortened and the whole bounded; the keys waiting for gc_grace are left out.
+     * with the detail shortened and the whole bounded. For {@link Reason#WAITING_GC_GRACE} the timestamp field is the
+     * time (milliseconds) from which the local partition deletion may be purged.
      */
     synchronized String summary()
     {
         StringBuilder sb = new StringBuilder();
         for (Pending p : pending.values())
         {
-            if (p.reason == null || p.reason == Reason.WAITING_GC_GRACE)
+            if (p.reason == null)
                 continue;
             String detail = p.detail.replace('\n', ' ');
             if (detail.length() > MAX_PUBLISHED_DETAIL)

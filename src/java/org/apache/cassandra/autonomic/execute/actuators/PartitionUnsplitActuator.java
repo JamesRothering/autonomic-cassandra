@@ -922,6 +922,13 @@ public class PartitionUnsplitActuator implements ClusterActuator
             if (replicas.isEmpty() || !key.backfillDone.containsAll(replicas))
             {
                 long timeoutEnd = Math.max(ackedAt(v), slowFrom(key, v.logical)) + lc().purge_timeout.toMilliseconds();
+                // a replica that still waits for its deletion's gc_grace says until when (11.5: an unknown Tt is learned from
+                // the replicas): the timeout counts from then
+                Set<NodeId> missing = new java.util.TreeSet<>(replicas);
+                missing.removeAll(key.backfillDone);
+                for (BasePurge.Published p : env.purgeReasons(v.cm, v.logical.id, v.target.key, missing).values())
+                    if (p.reason == BasePurge.Reason.WAITING_GC_GRACE && p.maxTimestamp != Long.MIN_VALUE)
+                        timeoutEnd = Math.max(timeoutEnd, p.maxTimestamp + lc().purge_timeout.toMilliseconds());
                 if (now >= timeoutEnd)
                     return abortStep(v, ctx, residue(v, replicas, now));
                 return StepResult.stay(Math.min(pollMillis(), timeoutEnd - now));

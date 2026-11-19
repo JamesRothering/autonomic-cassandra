@@ -1081,6 +1081,30 @@ public class PartitionUnsplitActuatorTest
     }
 
     @Test
+    public void aTombstoneOfUnknownTimeIsLearnedFromTheReplicasForThePurgeTimeout() throws Exception
+    {
+        // T6.17k: a key of the old forward cleanup is TOMBSTONED with Tt unknown; slow mode is allowed at once and each
+        // replica waits for its own deletion's gc_grace, which it publishes; purge_timeout counts from then
+        long now = cluster.now.get();
+        splitKey(Phase.STEADY, null, TOMBSTONED, now - 3_600_000, 0, now - 3_700_000, false);
+        assertEquals(Optional.empty(), validate(PartitionUnsplitActuator.MODE_AUTO));
+        long due = now + 10 * 60_000;
+        for (int node : new int[]{ 1, 2 })
+            env.published.put(cluster.id(node), reason(BasePurge.Reason.WAITING_GC_GRACE, due, "the partition deletion may be purged from " + due));
+        reportPurge = false;
+        Owner owner = owner(PartitionUnsplitActuator.MODE_AUTO).reach(Phase.REVERSE_ANNOUNCED);
+        long until = cluster.now.get() + 2 * config.layout.purge_timeout.toMilliseconds();
+        owner.until(o -> cluster.now.get() > until);
+        assertEquals("not aborted while the replicas wait for gc_grace", Phase.REVERSE_ANNOUNCED, key(cluster.log).phase);
+        assertFalse(owner.claim().state.containsKey(PartitionUnsplitActuator.S_ABORT));
+        // the replicas purge and report (before the owner's next step, which would otherwise find the time up)
+        reportPurge = true;
+        report();
+        env.published.clear();
+        assertEquals(StepResult.Kind.COMMITTED, owner.toEnd().kind);
+    }
+
+    @Test
     public void purgeTimeoutAbortsWithEachNodesReasonAndRemedy() throws Exception
     {
         LayoutEvents.UnsplitResidue shadowed = purgeTimesOut(Map.of(1, reason(BasePurge.Reason.STILL_SHADOWED, 5, "the partition deletion was not purged (0 repaired, 1 unrepaired, 0 pending repair sstables)"),

@@ -302,7 +302,11 @@ public class BasePurgeTest extends CQLTester
         announce(KeyState.ReverseMode.SLOW, Phase.REVERSE_ANNOUNCED, 2000);
         BasePurge purge = purge();
         assertEquals(0, purge.poll());
-        assertEquals("a node waiting for gc_grace publishes nothing", "", purge.summary());
+        // a node waiting for gc_grace publishes when the purge can start (the owner learns an unknown Tt from it)
+        List<BasePurge.Published> waiting = BasePurge.parsePublished(purge.summary());
+        assertEquals(1, waiting.size());
+        assertEquals(BasePurge.Reason.WAITING_GC_GRACE, waiting.get(0).reason);
+        assertTrue(waiting.get(0).detail, waiting.get(0).detail.contains("may be purged from " + waiting.get(0).maxTimestamp));
         sleepPastGcGrace();
         assertEquals(0, purge.poll());
         List<BasePurge.Published> published = BasePurge.parsePublished(purge.summary());
