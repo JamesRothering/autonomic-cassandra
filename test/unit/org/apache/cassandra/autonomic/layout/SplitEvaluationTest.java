@@ -139,6 +139,23 @@ public class SplitEvaluationTest
         assertTrue(SplitEvaluation.guardC1(new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, false), window(1000, 500, 0.0, 500, 500), 99999, List.of(), lc).ok);
     }
 
+    /** An idle node: a baseline table latency of 0, or too few operations in its baseline, cannot fail the guard on latency (both directions share it). */
+    @Test
+    public void c1GuardDoesNotJudgeLatencyWithoutData()
+    {
+        // a zero baseline: any latency is "above 3 x 0"
+        Baseline zero = new Baseline(0, 0, 0.0, 1000, 1000, 0.6, false, 0);
+        SplitEvaluation.Result r = SplitEvaluation.guardC1(zero, window(1000, 500, 0.0, 500, 500), 800, List.of(), lc);
+        assertTrue(r.detail, r.ok);
+        assertFalse(r.detail, r.detail.contains("table write latency"));
+        // too few writes in the baseline
+        Baseline thin = new Baseline(1000, 500, 0.0, 1000, 10, 0.6, false, 2000);
+        assertTrue(SplitEvaluation.guardC1(thin, window(1000, 500, 0.0, 500, 500), 99999, List.of(), lc).ok);
+        Baseline b = new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, false, 2000);
+        // and it still fails where it is judged
+        assertFalse(SplitEvaluation.guardC1(b, window(1000, 500, 0.0, 500, 500), 99999, List.of(), lc).ok);
+    }
+
     @Test
     public void theMeanOfASignalCountsOnlyItsWindow()
     {

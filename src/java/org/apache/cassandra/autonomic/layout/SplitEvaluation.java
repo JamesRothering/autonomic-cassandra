@@ -309,7 +309,9 @@ public final class SplitEvaluation
         if (baseline != null)
         {
             failed |= errorCheck(baseline, window, lc, detail);
-            if (!Double.isNaN(baseline.tableWriteMicros) && !Double.isNaN(tableWriteMicros))
+            // not judged against a baseline without data: an idle table reports a latency of 0 (a limit of 0 would fail any write),
+            // and a baseline of fewer than min_samples operations says nothing (design 7.3: a check without min_samples is not judged)
+            if (baseline.writes >= lc.min_samples && !Double.isNaN(baseline.tableWriteMicros) && baseline.tableWriteMicros > 0 && !Double.isNaN(tableWriteMicros))
             {
                 double limit = baseline.tableWriteMicros * TABLE_WRITE_FACTOR;
                 boolean over = tableWriteMicros > limit;
