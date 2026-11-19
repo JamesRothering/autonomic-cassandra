@@ -20,7 +20,7 @@
 
 # Adaptive schema: partition split, operator guide
 
-This guide is for operators of a fork node that runs the autonomic layer. It covers what a partition split does, what clients can and cannot rely on while a split exists, how to turn the feature on, the `nodetool autonomic layout` commands, and how to read `system_views.autonomic_layouts`.
+This guide is for operators of a fork node that runs the autonomic layer. It covers what a partition split does, what clients can and cannot rely on while a split exists, how to turn the feature on, the `nodetool autonomic layout` commands, and how to read `system_views.autonomic_layouts`. Section 9 covers the reverse, `layout unsplit`.
 
 The design is in [adaptive-schema.md](../architecture/adaptive-schema.md). The decisions are in [DECISIONS.md](../DECISIONS.md) (ADR-024 to ADR-034 are the ones that shape this guide).
 
@@ -350,7 +350,7 @@ A few things to know:
 
 - An abort is a request. Read the result with `layout status` and `autonomic history`.
 - An abort can stall on an unreachable node. Each abort step needs every node (rule O1). The migration then stays in its current phase until the node returns or the `backfill_deadline` aborts it.
-- The abort path is the only way back before the commit point. There is no way back after it yet (section 6).
+- The abort path is the only way back before the commit point. After it, the only way back is the reverse migration in section 9.
 
 Past the commit point (here `CLEANUP`):
 
@@ -358,6 +358,8 @@ Past the commit point (here `CLEANUP`):
 $ nodetool autonomic layout abort ks1 t 00000002
 nodetool: The split of PARTITION:ks1.t:00000002 is past its commit point (phase CLEANUP): it cannot be aborted. The way back is a reverse migration, `nodetool autonomic layout unsplit`, which is not built yet (T6.17)
 ```
+
+The text of this message is out of date: the reverse migration is built (section 9). It is printed by the code as it stands, so the message is what the build says until the code changes.
 
 ### 5.4 `layout resume`
 
@@ -436,6 +438,8 @@ Empty result (`(0 rows)`) means no key is split.
 | `STEADY` | The split is done. The claim is released. |
 | `ROLLBACK_DUAL`, `ABORTING` | Abort in progress. The key is removed from the table when the abort finishes. |
 
+The reverse phases (`REVERSE_ANNOUNCED` to `REVERSE_ROLLBACK`) are in section 9.2.
+
 On the test node the migration of key 1 went from `ANNOUNCED` to `CUTOVER` in about 30 seconds (the baseline and `cas_drain` were short on a quiet node). The migration of key 2 used a `cutover_soak` of 30 seconds, not the default 10 minutes. Expect the defaults to take at least `cutover_soak` plus `straggler_window` (3 hours by default) on a real cluster. The test did not reach `STEADY`.
 
 ## 7. Verification notes
@@ -453,6 +457,188 @@ On the test node the migration of key 1 went from `ANNOUNCED` to `CUTOVER` in ab
 
 ## 8. What is not built yet
 
-- **Reverse migration** (`layout unsplit`, T6.17). Until it exists, a split that is past the commit point is permanent. A split that verification finds ineffective stays split and raises `layout.split_not_effective` (ADR-025).
+- **Reverse migration** is built (T6.17, section 9). Not observed on a running node: slow mode, the residue reasons, `--when-ready` and `layout.split_not_effective` (section 9.12). A split that verification finds ineffective stays split and raises `layout.split_not_effective` (ADR-025) until it is unsplit.
 - **Registry export and import** for backup restores (R5). Until it exists, restore the keyspace and the layout registry together, and check the result with `autonomic_layouts` and the overflow tables.
 - **Whole-table re-partitioning.** Only one partition is split at a time (ADR-024, question 6).
+
+## 9. Unsplit: the reverse migration
+
+An unsplit moves a split key back into the base table and then drops the overflow copy of that key. It is always proposed and approved by hand, and it has its own commit point. The design is in [adaptive-schema.md section 11](../architecture/adaptive-schema.md), decided in ADR-036 and ADR-037.
+
+- Two approvals: the proposal, and the reverse commit point `BASE_ONLY` (with `commit_approval: manual`, the default).
+- Two modes, chosen automatically: fast, which merges into the base residue, and slow, which needs the base tombstone to be purged first.
+- Before `BASE_ONLY` an abort returns the key to `STEADY`, and the key stays split. After `BASE_ONLY` the unsplit runs to the end.
+- The layer never approves an unsplit itself, whatever `cluster_approval` says.
+
+### 9.1 When an unsplit is proposed
+
+- By hand, with `nodetool autonomic layout unsplit` (section 9.3).
+- Automatically, when stage B of a split raises `layout.split_not_effective` (WARN, ADR-025). The policy then proposes an unsplit of that key with manual approval. This was not observed on the test node (section 9.12).
+- From a `--when-ready` request, once its time has come (diagnosis `layout.unsplit_pending`).
+- For a key in a reverse phase whose action holds no claim (`layout.unsplit_orphaned`: WARN before `BASE_ONLY`, CRITICAL after). The policy proposes `mode resume`.
+
+### 9.2 The phases
+
+| Phase | What it means | Abort before `BASE_ONLY` |
+|-------|---------------|--------------------------|
+| `REVERSE_ANNOUNCED` | Every node has the reverse. A slow reverse waits here for every base replica to purge clean (9.5). | Returns to `STEADY` |
+| `REVERSE_DUAL_WRITE`, `REVERSE_BACKFILL`, `REVERSE_VERIFY` | Writes go to both copies, the bucket partitions are copied into base, and the two copies are compared. | Returns to `STEADY` |
+| `CUTBACK` | Reads move back to base; writes go to both copies, overflow first. After `cutover_soak` a latency and error guard is checked, and the commit-point approval is asked for. | Returns to `STEADY` (`REVERSE_ROLLBACK`) |
+| `BASE_ONLY` | The reverse commit point. Base holds every acknowledged write. | Refused |
+| `REVERSE_CLEANUP` | `straggler_window`, then a reconcile pass that copies late writes into base. | Refused |
+| `KEY_REMOVED` | The key is removed from the layout. Once every node has acknowledged the removal and the write timeout has passed, the bucket partitions are deleted (or the overflow table is dropped if the layout went with its last key). | Refused |
+
+`nodetool autonomic layout status` shows the phase. A proposal's history is in `nodetool autonomic events <id>`. Here is the event trail of an unsplit that the guard rolled back in `CUTBACK` on the test node (section 9.10), with the ids and times shortened:
+
+```
+$ nodetool autonomic events 680d22d0-e41a-11f1-9390-857e887a9d30
+at=1795093749139 from_state=null to_state=PROPOSED detail=plan ... by operator: nodetool autonomic layout unsplit
+at=1795093758530 from_state=PROPOSED to_state=APPROVED detail=operator
+at=1795093758652 from_state=APPROVED to_state=APPLYING detail=claimed lane SCHEMA_LAYOUT
+at=1795093758758 from_state=APPLYING to_state=APPLYING detail=phase BEGINNING (step 1)
+at=1795093758978 from_state=APPLYING to_state=APPLYING detail=phase REVERSE_ANNOUNCED (step 2)
+...
+at=1795093771489 from_state=APPLYING to_state=APPLYING detail=phase CUTBACK (step 10)
+at=1795093781714 from_state=APPLYING to_state=APPLYING detail=phase REVERSE_ROLLBACK (step 13)
+at=1795093782075 from_state=APPLYING to_state=ROLLED_BACK detail=ks1.t key 0x00000002 stays split: C1 guard failed in CUTBACK: table write latency 1.60e+03 above 0.00us; ; the base partition is RESIDUE
+```
+
+### 9.3 The command
+
+```
+nodetool [connection options] autonomic layout unsplit [--when-ready] [--] <keyspace> <table> <key-hex>
+```
+
+`<key-hex>` is the raw partition key bytes, as for `layout split`. The command has no mode option: the mode is chosen when the action is validated (9.4). The proposal is held for approval:
+
+```
+$ nodetool autonomic layout unsplit ks1 t 00000002
+id=680d22d0-e41a-11f1-9390-857e887a9d30 state=PROPOSED state_reason= actuator=partition_unsplit scope=CLUSTER target=PARTITION:ks1.t:00000002 params={mode=auto} policy=operator diagnosis_id=1054eb97-1714-4480-9401-c36359698e51 dry_run=false verdict= baseline={} result={} proposed_at=1795093749131 updated_at=1795093749131
+
+$ nodetool autonomic approve 680d22d0-e41a-11f1-9390-857e887a9d30
+Approved action 680d22d0-e41a-11f1-9390-857e887a9d30
+```
+
+Then `nodetool autonomic layout status` shows the phase. When the action reaches `CUTBACK` it waits for the second approval, the same `nodetool autonomic approve <id>` (the code requires it with `commit_approval: manual`; the status text while it waits was not captured). Approving it is what starts `BASE_ONLY`. The guard of `CUTBACK` is checked too: an approval does not skip it (9.10).
+
+Rejections. A rejected proposal is printed as a record with `state=REJECTED`, and its reason is in `nodetool autonomic events <id>`. These were observed:
+
+| Case | Output |
+|------|--------|
+| The key is not in a layout | `state=REJECTED state_reason=VALIDATION`; the event says `the key is not split: it is not in the layout of ks1.t` |
+| The same rejection again, with `--when-ready` | `nodetool: The proposal was rejected for the same reason as an identical one just before; see 'autonomic history'` (exit 1) |
+| The key rolled back less than `safety.cooldown_after_rollback` ago (30 minutes by default) | `state_reason=COOLDOWN`; the event says `until <ms>`, the time the cooldown ends |
+| The key is in `STEADY` and `layout resume` is run on it | `state_reason=VALIDATION`; the event says `the key is split and released; nothing to resume (a base residue is reclaimed by mode reclaim)` |
+| Too many actions in the window | `state_reason=RATE`, with the limit named in the event (`cluster`, `actuator` or `node`); defaults 2 per hour for the cluster and for each actuator |
+
+A cooldown that is already recorded is not shortened by changing `cooldown_after_rollback`. It runs to the time it was set for.
+
+With a time in it, a rejection names the earliest time a mode becomes allowed: `slow mode from <ms>: the base tombstone at <Tt> plus gc_grace_seconds <n>`. This follows the code, and was not observed on the test node, because a slow mode needs a tombstone that was ten days old. Without `--when-ready`, the command fails with that text and `(earliest <ms> ms; --when-ready proposes it then)`. With `--when-ready`, the request is stored on the node where the command ran, under `layout.unsplit_pending/<keyspace.table>/<key-hex>`, and the command prints a `state=PENDING` record with `due_millis`. A rejection that names no time is not stored: the action is proposed and rejected at once.
+
+### 9.4 Fast mode and slow mode
+
+| | Fast | Slow |
+|--|------|------|
+| Base state needed | `RESIDUE`: the base residue is still there and no tombstone was written | `TOMBSTONED`: the reclaim wrote the base partition tombstone at `Tt` |
+| Allowed when | the copy and `cutover_soak` end before the reverse commit window closes | `Tt + gc_grace_seconds` has passed (at once if `Tt` is unknown) |
+| Window by default | The base residue is kept for up to about `gc_grace_seconds / 2` after the split (5 days for `gc_grace_seconds` of 864000), less the margins for `straggler_window`, `reconcile_budget` and `cutover_soak` | Ten days after the tombstone by default |
+| Extra work | None | Every base replica waits for its tombstone to pass `gc_grace`, forces a compaction of the key (`force_purge_compaction`), and reports a clean probe (9.5) |
+| Typical time | Hours | Ten days or more |
+
+**Reclaim.** When fast mode can no longer finish before its window closes, and no reverse owns the key, an automatic continuation of the split writes the base partition tombstone at every node (`ALL`). It is not a command. The key's status shows the due time (`reclaim due at <ms>`). `layout.reclaim_window` sets the time after the split instead. Observed: `status=split; base residue kept, reclaim due at 1795523961716` about 4.98 days after the split on the test node, with the default settings.
+
+**Disk.** The base residue is one partition times the replication factor. It is kept until the reclaim, at most about 5 days after the commit by default. Its bytes go only when compaction purges them, which is after the tombstone's `gc_grace` (10 days by default). Plan disk for the residue of every split key until then.
+
+From the commit on, the residue is unreachable: reads of the key go to the overflow copy, and range scans skip the key in base. The residue does not change what clients see.
+
+### 9.5 Residue: `layout.unsplit_residue`, its reasons, and the purge
+
+A slow reverse waits in `REVERSE_ANNOUNCED` until every natural base replica of the key has purged clean. Each replica waits until its partition deletion has passed `gc_grace_seconds`, forces a compaction of the key, and runs a probe: a local read with nothing purged, which must find no row, no range tombstone and no partition deletion. A replica that is not clean publishes its reason in gossip application state `X1`, reserved for the autonomic layer (ADR-037). After `layout.purge_timeout` (6 hours by default, counted from the acknowledgement, or from `Tt + gc_grace` if that is later), the reverse aborts to `STEADY` and raises `layout.unsplit_residue`. The event names each node and its reason, and gives the remedy:
+
+| Reason | Meaning | Remedy |
+|--------|---------|--------|
+| `WAITING_GC_GRACE` | The replica's clock has not passed the deletion's local deletion time plus `gc_grace_seconds` | Check the replica's clock, then try again later |
+| `STILL_SHADOWED` | The partition deletion, or data at or below it, was not purged. Often the deletion and the data it shadows are in sstables of different repair states, which compact apart | Run a repair of the key's token range, so both reach one repair state, then start the unsplit again. Or set `layout.force_purge_compaction: false` and wait for natural compaction |
+| `ONLY_PURGE_REPAIRED_TOMBSTONES` | `only_purge_repaired_tombstones` is set and the key's sstables are not repaired, or are pending repair | The same as above: repair the range, or wait for natural compaction |
+| `RESIDUE_ABOVE_TT` | Cells newer than the base tombstone survive the purge (client timestamps in the future, or stragglers from a coordinator whose clock runs ahead). They are never purged automatically | An operator decision. Name the largest timestamp in the event. Delete the cells with a higher timestamp, or keep the key split. Nothing is fixed automatically |
+
+Two more settings:
+
+- `never_purge_tombstones` is a system property, `-Dcassandra.never_purge_tombstones=true`, not a table option. While it is set, a node does not purge tombstones at all, so no probe can come clean there and a slow unsplit aborts at `purge_timeout`. Clear it and restart the node to continue.
+- `layout.purge_timeout` (default `6h`) is the time a slow reverse waits in `REVERSE_ANNOUNCED` for every replica to report clean.
+
+### 9.6 Keys stuck at `RECONCILE_PAST_DEADLINE`
+
+A split key stuck in `CLEANUP` at `RECONCILE_PAST_DEADLINE` (ADR-031) has no fast window. It can be unsplit in slow mode. The unsplit action writes the base tombstone itself once the forward replicas' limit plus `straggler_window` has passed (owner answer 6, ADR-037), then starts the slow reverse. The rejection names that time (`slow mode from <ms>: the key is stuck in CLEANUP ...`). This follows the code and was not run on the test node.
+
+### 9.7 Contract D6: unacknowledged writes after an unsplit
+
+D6 said that a write whose outcome the client never learned may appear only at cutover, or be discarded, and that this settles by the end of `CLEANUP`. Amended (ADR-036): **such a write may also become visible after an unsplit.** An unacknowledged write that reached the base residue after the forward reconcile is visible again after a fast unsplit, days after the forward cleanup. Acknowledged writes are not affected (P3). Treat a write as unknown until you check it.
+
+### 9.8 Bulk load into a split key
+
+Data loaded directly into the base table of a split key (for example with `sstableloader`) is not read while the key is split, because reads go to the overflow copy. It becomes visible after an unsplit, subject to last-write-wins against the residue. Do not bulk load into a split key's base partition. Unsplit the key first, or load through the logical table.
+
+### 9.9 Known limitations
+
+- A `--when-ready` request is stored only on the node that ran the command, in that node's local state. It is lost if that state is wiped, and only that node proposes it. Check `nodetool autonomic history --diagnoses` for `layout.unsplit_pending`.
+- Gossip application state `X1` is reserved for the autonomic layer. Do not write to it from other tooling.
+- A key rolled back in a reverse gets a cooldown of `safety.cooldown_after_rollback` (30 minutes by default) before the next proposal (9.3).
+- The `CUTBACK` guard compares the table's write latency and the key's error rate with a baseline taken over `layout.baseline_window`. On a node with no write traffic in that window, the baseline is zero and the guard rolls the reverse back. Section 9.10 has the observed case.
+
+### 9.10 A reverse rolled back by the guard (observed)
+
+On the test node, which had little traffic, three reverse attempts on two keys each rolled back in `CUTBACK`:
+
+```
+ROLLED_BACK detail=ks1.t key 0x00000002 stays split: C1 guard failed in CUTBACK: table write latency 1.60e+03 above 0.00us; ; the base partition is RESIDUE
+ROLLED_BACK detail=ks1.t key 0x00000003 stays split: C1 guard failed in CUTBACK: error rate ok 0.00 within 0.0100; table write latency 3.53e+03 above 0.00us; ; the base partition is RESIDUE
+```
+
+The first attempt had read traffic only. The later attempts had reads and writes, and a `layout.baseline_window` of 60 seconds with a 5-second analyze interval. The baseline stayed at `0.00us` in every attempt, so the cause is most likely that no write-latency sample fell in the baseline window on an idle single node. That was not resolved. The key stayed split: `layout status` showed `STEADY`, base `RESIDUE`, and a reclaim due time. Approving the commit point while the action sat in `CUTBACK` was accepted (`Approved action ...`), but the guard still rolled the action back. Once the action has rolled back, `approve` reports `No action awaiting approval with id <id>`.
+
+On a production node, `layout.baseline_window` defaults to 3 minutes and the guard has a baseline of real traffic. Watch `nodetool autonomic events <id>` for the guard's reason before you approve the commit point.
+
+### 9.11 Configuration
+
+```yaml
+autonomic:
+  actuators:
+    partition_split: { enabled: true }
+    partition_unsplit: { enabled: true }   # off by default; approval is still manual
+  layout:
+    commit_approval: manual                # the second approval, before BASE_ONLY (also for a split)
+    # reclaim_window: 10d                  # time after a split before the base tombstone; default gc_grace/2 minus the margins
+    # force_purge_compaction: true         # false: probe only, wait for natural compaction
+    # purge_timeout: 6h                    # slow mode: wait for every base replica to purge clean
+```
+
+`partition_unsplit` is off by default. `partition_unsplit` and `purge_timeout` are not in `conf/cassandra.yaml`; their defaults are in code (`AutonomicConfig`). `reclaim_window` and `force_purge_compaction` are in `conf/cassandra.yaml`, commented out.
+
+A reverse, like a split, needs cluster actions enabled: `nodetool autonomic cluster enable --yes` (4.2).
+
+### 9.12 Verification notes for section 9
+
+Run on one node, RF 1, one token range, from a `.build/build-jars.sh -s` build of this branch, with `autonomic.enabled: true`, `dry_run: false`, `partition_split` and `partition_unsplit` enabled, and the timing windows shortened for the test (`straggler_window: 10s`, `cutover_soak: 10s`, `verify_window: 20s`, `baseline_window: 10s` then `60s`, `default_buckets: 4`). The safety limits were raised for the test (`max_actions_per_hour`, `max_cluster_actions_per_hour`, `max_actions_per_actuator_per_hour`) and the rollback cooldown shortened to 1 minute. Those are test settings, not defaults.
+
+Observed on the node:
+- `nodetool autonomic layout unsplit` on a key that is not split, with and without `--when-ready`, and its events (9.3).
+- `nodetool autonomic layout unsplit` on a split key in `STEADY` (proposal, `approve`), with the reverse run to `ROLLED_BACK` (9.2, 9.10).
+- `nodetool autonomic layout resume` and `nodetool autonomic layout abort` on a key in `STEADY`.
+- `nodetool autonomic layout status`, `nodetool autonomic history`, `nodetool autonomic history --diagnoses`, `nodetool autonomic events`, `nodetool autonomic approve`, `nodetool autonomic cluster enable --yes`.
+- `nodetool help` for `autonomic layout unsplit`, `autonomic layout`, `autonomic layout abort`, `autonomic layout split` and `autonomic approve`: the output matches the help fixtures in `test/resources/nodetool/help/`.
+- The reclaim due time in `layout status`, and the split with `layout split` and its approvals (the split is covered by section 5).
+
+Not observed, and why:
+- A reverse that reaches `BASE_ONLY` and `KEY_REMOVED`. Every attempt was rolled back in `CUTBACK` (9.10). Covered by `UnsplitEndToEndTest` (fast mode, the second approval and removal).
+- The `--when-ready` `PENDING` record and `layout.unsplit_pending`, and rejections that name an earliest time. A slow mode needs a tombstone ten days old (gc_grace and the reclaim). Covered by `UnsplitTriggerTest`.
+- Slow mode, `layout.unsplit_residue`, and every reason in the table of 9.5. Covered by `UnsplitSlowTest` and `UnsplitFailureTest`.
+- `layout.split_not_effective` and the automatic unsplit proposal. Not raised within the test window. Covered by `UnsplitTriggerTest`.
+- `layout.unsplit_orphaned` and `mode resume` of a reverse. Needs a second node.
+- The `never_purge_tombstones` and `RECONCILE_PAST_DEADLINE` cases: code only (9.5, 9.6).
+
+Disagreements between the design and the code (the code is what is described above):
+- `layout abort` on a key past its commit point still prints `... which is not built yet (T6.17)`, although the reverse migration is built. The text is in `PartitionSplitActuator.java` (line 1512) and needs a change in code.
+- `never_purge_tombstones`: the architecture (11.5) names a table option or a system property. The code reads only the system property `cassandra.never_purge_tombstones`.
+- `partition_unsplit` and `purge_timeout` are absent from `conf/cassandra.yaml`, although the design lists them as configuration (their defaults are in code).
+- The rejection text names an earliest time only for some cases. Other rejections (a key in another phase, a key not split) name no time, and `--when-ready` for them proposes the action at once.
