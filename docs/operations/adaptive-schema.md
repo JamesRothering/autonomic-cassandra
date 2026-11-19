@@ -638,7 +638,4 @@ Not observed, and why:
 - The `never_purge_tombstones` and `RECONCILE_PAST_DEADLINE` cases: code only (9.5, 9.6).
 
 Disagreements between the design and the code (the code is what is described above):
-- `layout abort` on a key past its commit point still prints `... which is not built yet (T6.17)`, although the reverse migration is built. The text is in `PartitionSplitActuator.java` (line 1512) and needs a change in code.
-- `never_purge_tombstones`: the architecture (11.5) names a table option or a system property. The code reads only the system property `cassandra.never_purge_tombstones`.
-- `partition_unsplit` and `purge_timeout` are absent from `conf/cassandra.yaml`, although the design lists them as configuration (their defaults are in code).
 - The rejection text names an earliest time only for some cases. Other rejections (a key in another phase, a key not split) name no time, and `--when-ready` for them proposes the action at once.

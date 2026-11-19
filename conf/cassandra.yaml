@@ -3169,6 +3169,10 @@ storage_compatibility_mode: NONE
 #     # cluster): splits one hot partition into buckets of a companion table (adaptive schema). Proposed by
 #     # `nodetool autonomic layout split`; has a commit point after which it is not rolled back
 #     partition_split: { enabled: false }
+#     # cluster action, always held for manual approval whatever cluster_approval says: returns a split partition to the
+#     # base table (reverse migration). Proposed by `nodetool autonomic layout unsplit` and, for a split that did not
+#     # help, by the layer
+#     partition_unsplit: { enabled: false }
 #   scale_out:
 #     # class implementing org.apache.cassandra.autonomic.elastic.ScaleOutProvider, built when the layer starts with
 #     # `parameters` (a public constructor taking a Map<String, String>, or a no-argument one). The default cannot
@@ -3222,6 +3226,9 @@ storage_compatibility_mode: NONE
 #     # slow reverse: replicas force a compaction of the key to purge the base partition deletion; false only probes and
 #     # waits for natural compaction
 #     # force_purge_compaction: true
+#     # slow reverse: how long the replicas have, counted from the later of the all-node acknowledgement and the base
+#     # tombstone plus gc_grace_seconds, to purge the base partition deletion before the unsplit aborts
+#     # purge_timeout: 6h
 #     # the commit point is taken only while straggler_window plus reconcile_budget (the reconcile pass, its
 #     # acknowledgement and FinishKey) still end before the replicas stop copying, half of gc_grace_seconds after
 #     # DUAL_WRITE started; otherwise the split rolls back from CUTOVER. A table whose gc_grace_seconds cannot fit one

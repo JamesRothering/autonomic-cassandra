@@ -1509,7 +1509,7 @@ public class PartitionSplitActuator implements ClusterActuator
                 throw new IllegalStateException("The split of " + target.asString() + " is past its commit point (phase "
                                                 + (key != null && !PRE_COMMIT.contains(key.phase) ? key.phase : claim.phase)
                                                 + "): it cannot be aborted. The way back is a reverse migration, `nodetool autonomic layout unsplit`, "
-                                                + "which is not built yet (T6.17)");
+                                                + "which is proposed under manual approval");
             if (claim == null)
             {
                 if (key == null)

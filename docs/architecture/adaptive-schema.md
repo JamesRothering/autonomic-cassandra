@@ -814,7 +814,7 @@ So (a) also needs a **residue probe**: after the purge, a local unfiltered read 
 - the deletion and the data it shadows in sstables of **different repair states** (typically the data repaired, the reclaim tombstone written later, unrepaired): both stay until repair has put them in one state. Reason `STILL_SHADOWED`, with the repair states counted;
 - `only_purge_repaired_tombstones` with the deletion in an unrepaired sstable: it stays until repaired. Reason `ONLY_PURGE_REPAIRED_TOMBSTONES`;
 - sstables in a **pending incremental repair** are a third holder and block the purge the same way;
-- `never_purge_tombstones` (table option or system property) blocks it for good.
+- `never_purge_tombstones` (a system property, `-Dcassandra.never_purge_tombstones=true`; it is not a table option) blocks it for good.
 In each case the probe is not clean and the replica retries with backoff (1 s doubling to 5 min) without forcing another compaction when the deletion is gone; the owner's `purge_timeout` then ends the attempt. Nothing is fixed automatically: running a repair, or waiting for natural compaction (`layout.force_purge_compaction: false`, owner answer 7), is the operator's remedy. Cells above `Tt` are reported as `RESIDUE_ABOVE_TT` with their largest timestamp and are never auto-fixed (owner answer 3).
 
 Time to unsplit: at least `Tt + gc_grace_seconds` plus compaction, that is 10 days after forward cleanup by default. Throughout, the key keeps the costs of a split (D1 to D5, N1) that may have been judged not effective.
