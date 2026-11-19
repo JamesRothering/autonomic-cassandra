@@ -182,6 +182,7 @@ autonomic:
     cutover_soak: 10m              # CUTOVER is held this long before the commit point
     straggler_window: 3h           # CLEANUP waits this long for late writes
     # reclaim_window: 10d          # time after a split before the base residue is deleted (default: gc_grace/2 - straggler_window - reconcile_budget - cutover_soak)
+    # force_purge_compaction: true  # slow reverse: replicas force a compaction of the key to purge the base partition deletion; false = only probe, wait for natural compaction
     max_migration_duration: 24h    # the longest time before the commit point
     backfill_throughput: 1MiB/s    # per node, 0 is unlimited
     cas_drain: 15s                 # ANNOUNCED waits at least this, and the longest request timeout

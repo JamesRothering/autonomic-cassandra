@@ -157,6 +157,12 @@ public class AutonomicConfig
          * back sooner; a shorter window closes the fast reverse sooner.
          */
         public DurationSpec.LongMillisecondsBound reclaim_window = null;
+        /**
+         * In a slow reverse migration the replicas force a compaction of the key's sstables to purge the base partition
+         * deletion once its gc_grace has passed. False: only probe, and wait for natural compaction (the probe is
+         * repeated with backoff). The forced compaction rewrites every sstable that may hold the key.
+         */
+        public boolean force_purge_compaction = true;
         /** Longest a migration may spend before the commit point, counted from DUAL_WRITE (and in ANNOUNCED from registration). */
         public DurationSpec.LongMillisecondsBound max_migration_duration = new DurationSpec.LongMillisecondsBound("24h");
 

@@ -20,6 +20,8 @@ package org.apache.cassandra.autonomic.layout;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.SchemaConstants;
@@ -42,6 +44,19 @@ public final class Eligibility
      * straggler window of 3 hours (design 4.5, section 6). A constant, not configuration, so that replay is deterministic.
      */
     public static final int MIN_GC_GRACE_SECONDS = 2 * (3 + 1) * 3600;
+
+    /**
+     * Test seam (T6.17d): the minimum in force, so that a test of a slow reverse can use a table whose gc_grace is a
+     * few seconds. Set on every node before any layout is registered; never set in production, where replay must be
+     * deterministic.
+     */
+    private static volatile int minGcGraceSeconds = MIN_GC_GRACE_SECONDS;
+
+    @VisibleForTesting
+    public static void setMinGcGraceSecondsForTesting(int seconds)
+    {
+        minGcGraceSeconds = seconds;
+    }
 
     /** A feature that blocks a split. The names are stable: they are reported to operators. */
     public enum Blocker
@@ -111,7 +126,7 @@ public final class Eligibility
                 blockers.add(Blocker.RESERVED_COLUMN);
                 break;
             }
-        if (table.params.gcGraceSeconds < MIN_GC_GRACE_SECONDS)
+        if (table.params.gcGraceSeconds < minGcGraceSeconds)
             blockers.add(Blocker.GC_GRACE_TOO_SMALL);
         return blockers;
     }

@@ -41,7 +41,7 @@ import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFac
  *
  * <p>It registers one {@link ChangeListener} and reacts to changes of the registry only. It creates no thread while
  * the registry holds no key in a phase that needs backfill (BACKFILL or CLEANUP); the {@code LayoutBackfill} thread
- * is created lazily when one appears and released when none is left. What the thread does is a hook (T6.7). While a key
+ * is created lazily when one appears and released when none is left. What the thread does is a hook (T6.7). In REVERSE_ANNOUNCED of a slow reverse it also has {@link BasePurge} purge and probe this node's base partition of the key (T6.17d), on its own executor. While a key
  * is in ANNOUNCED it also has {@link HintReport} report this node's hints (ADR-035), on the shared optional-tasks executor.
  */
 public final class LayoutService implements ChangeListener
@@ -58,6 +58,7 @@ public final class LayoutService implements ChangeListener
     private final List<ExecutorService> released = new ArrayList<>();
     private volatile Consumer<LayoutRegistry> backfillHook = BackfillTask::onRegistryChange;
     private volatile Consumer<ClusterMetadata> hintHook = HintReport.instance::onRegistryChange;
+    private volatile Consumer<ClusterMetadata> purgeHook = BasePurge.instance::onRegistryChange;
 
     private volatile boolean active;
 
@@ -90,6 +91,7 @@ public final class LayoutService implements ChangeListener
         registered = null;
         active = false;
         stopBackfill(true);
+        BasePurge.instance.shutdownBlocking();
     }
 
     /**
@@ -110,6 +112,13 @@ public final class LayoutService implements ChangeListener
         hintHook = hook == null ? metadata -> {} : hook;
     }
 
+    /** What is called on every registry change for the base purge of a slow reverse (T6.17d); {@link BasePurge} unless replaced. */
+    @VisibleForTesting
+    public void setPurgeHook(Consumer<ClusterMetadata> hook)
+    {
+        purgeHook = hook == null ? metadata -> {} : hook;
+    }
+
     private void hints(ClusterMetadata metadata)
     {
         try
@@ -119,6 +128,14 @@ public final class LayoutService implements ChangeListener
         catch (Throwable t)
         {
             logger.error("Layout hint report hook failed", t);
+        }
+        try
+        {
+            purgeHook.accept(metadata);
+        }
+        catch (Throwable t)
+        {
+            logger.error("Layout base purge hook failed", t);
         }
     }
 

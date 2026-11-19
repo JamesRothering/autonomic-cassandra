@@ -3219,6 +3219,9 @@ storage_compatibility_mode: NONE
 #     # time after a split completes before the base residue is deleted by the reclaim action; default: half of gc_grace_seconds
 #     # less straggler_window, reconcile_budget and cutover_soak
 #     # reclaim_window: 10d
+#     # slow reverse: replicas force a compaction of the key to purge the base partition deletion; false only probes and
+#     # waits for natural compaction
+#     # force_purge_compaction: true
 #     # the commit point is taken only while straggler_window plus reconcile_budget (the reconcile pass, its
 #     # acknowledgement and FinishKey) still end before the replicas stop copying, half of gc_grace_seconds after
 #     # DUAL_WRITE started; otherwise the split rolls back from CUTOVER. A table whose gc_grace_seconds cannot fit one
