@@ -59,6 +59,9 @@ import io.netty.util.concurrent.FastThreadLocal;
  * generation restarts do not change it and do not cause a re-execution. A write that routes nothing takes the stock
  * path and is not checked.
  *
+ * <p>A lightweight transaction on a key that is in the registry is rejected in every phase, the reverse phases and
+ * {@code STEADY} included, and is accepted again once the key is absent (design 11.10, T6.17h).
+ *
  * <p>Order of the copies (design 3.2): the copy that reads use is written last, after the other copy acknowledged at
  * the client's consistency level. Every send goes through the stock tail of {@code StorageProxy.mutateWithTriggers}
  * under the re-entrancy flag: not atomic it is {@code StorageProxy.mutate} with the stock retry on a coordinator that
@@ -410,7 +413,8 @@ public final class LayoutWrites
     }
 
     /**
-     * Hook H20 (design 3.6). A table with a key in a phase other than {@code STEADY} cannot be truncated. Otherwise
+     * Hook H20 (design 3.6). A table with a key in a phase other than {@code STEADY} cannot be truncated; the reverse
+     * phases (design 11.4) are phases other than {@code STEADY}, as the forward ones are (T6.17h). Otherwise
      * the overflow table is truncated here, before the stock truncate of the base table that follows. An overflow
      * table cannot be truncated directly.
      */

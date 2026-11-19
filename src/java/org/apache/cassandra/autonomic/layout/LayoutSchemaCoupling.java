@@ -40,6 +40,10 @@ import org.apache.cassandra.tcm.ClusterMetadata;
  * making it ineligible is rejected; added and dropped regular columns and {@code gc_grace_seconds} are mirrored (T6.14); everything else is left alone. A rejection is an
  * {@link InvalidRequestException}, which {@code AlterSchema} turns into a rejected transformation.
  *
+ * <p>The rules do not depend on the phase of any key: they hold in the forward and in the reverse phases (design 11.4,
+ * T6.17h), column mirroring included. They end with the layout, which {@code RemoveKey} removes with its last key; from
+ * then on renames, type changes, indexes, views and CDC are no longer restricted for the table.
+ *
  * <p>The owner creates the overflow table before {@code RegisterKey} (design 2.5); at that point the registry does not
  * yet name it, so that creation is not a change this class can see. Registry entries whose logical table is gone are
  * orphans: this class never touches the registry, see {@link #orphans}.

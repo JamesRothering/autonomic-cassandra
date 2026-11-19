@@ -818,6 +818,31 @@ public class LayoutWritesTest extends CQLTester
 
     // ---- H19 ----
 
+    /** T6.17h: when the last key is removed (the layout is gone) a lightweight transaction on the key works again, and truncate is stock. */
+    @Test
+    public void lightweightTransactionsAndTruncateAreFreeOnceTheLastKeyIsRemoved() throws Exception
+    {
+        for (Phase phase : Phase.values())
+        {
+            if (!phase.isReverse())
+                continue;
+            metadata.set(keyIn(phase));
+            try
+            {
+                LayoutWrites.checkCas(keyspace(), logical.name, logical.partitioner.decorateKey(key(K)));
+                fail("expected a rejection in " + phase);
+            }
+            catch (InvalidRequestException e)
+            {
+                assertTrue(e.getMessage(), e.getMessage().contains("while it is adapted"));
+            }
+        }
+        metadata.set(emptyRegistry());
+        LayoutWrites.checkCas(keyspace(), logical.name, logical.partitioner.decorateKey(key(K)));
+        LayoutWrites.beforeTruncate(keyspace(), logical.name);
+        assertCalls();
+    }
+
     @Test
     public void lightweightTransactionsAreRejectedOnAdaptedKeys()
     {

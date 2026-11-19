@@ -257,6 +257,104 @@ public class LayoutSchemaCouplingTest
         assertEquals(next, LayoutSchemaCoupling.apply(prev(), next));
     }
 
+    // ---- reverse phases (T6.17h, design 11.10) ----
+
+    /** Metadata with K1 in the given phase (reverse phases with a mode and the dual-write time), owned by A, over the given schema. */
+    private static ClusterMetadata prevIn(Phase phase, Keyspaces schema)
+    {
+        ClusterMetadata md = LayoutTransformationTest.start();
+        org.apache.cassandra.tcm.Epoch e = md.epoch.nextEpoch();
+        KeyState state = new KeyState(phase, e, LayoutTransformationTest.NOW, 1, 1, e, com.google.common.collect.ImmutableSet.of(), LayoutTransformationTest.A, 400,
+                                      com.google.common.collect.ImmutableSet.of(), KeyState.BaseState.RESIDUE, 500, 0,
+                                      phase.isReverse() ? KeyState.ReverseMode.FAST : null, phase.isReverse() && phase != Phase.REVERSE_ANNOUNCED ? 900 : 0);
+        TableLayout layout = new TableLayout(LayoutTransformationTest.header(), 2, ImmutableMap.of(LayoutTransformationTest.K1, state), 5);
+        LayoutRegistry registry = new LayoutRegistry(LayoutRegistry.FORMAT_VERSION_2, ImmutableMap.of(LayoutTransformationTest.LOGICAL, layout));
+        return md.transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(registry)).with(new DistributedSchema(schema)).build().metadata;
+    }
+
+    /** Every row of design 4.8, in every reverse phase: the result is the one of a forward phase. */
+    @Test
+    public void everyRowOfTheTableHoldsInEveryReversePhase()
+    {
+        int checked = 0;
+        for (Phase phase : Phase.values())
+        {
+            if (!phase.isReverse())
+                continue;
+            checked++;
+            ClusterMetadata prev = prevIn(phase, keyspaces(logical(), physical(), other()));
+            String at = phase.name();
+
+            // the logical table dropped takes the overflow table with it
+            Keyspaces dropped = LayoutSchemaCoupling.apply(prev, keyspaces(other()));
+            assertNull(at, dropped.getNullable("ks").tables.getNullable("t_al_00000001"));
+            assertNotNull(at, dropped.getNullable("ks").tables.getNullable("other"));
+
+            // the overflow table is managed
+            assertInvalid("ks.t_al_00000001 is managed", prev, keyspaces(logical(), other()));
+            assertInvalid("ks.t_al_00000001 is managed", prev,
+                          keyspaces(logical(), physical().withSwapped(TableParams.builder().gcGraceSeconds(90_000).build()), other()));
+
+            // regular columns are mirrored, in both directions of change
+            Keyspaces added = LayoutSchemaCoupling.apply(prev, keyspaces(logicalBuilder().addRegularColumn("w", UTF8Type.instance).build(), physical(), other()));
+            assertNotNull(at, table(added, "t_al_00000001").getColumn(ColumnIdentifier.getInterned("w", false)));
+            assertTrue(at, PhysicalTables.matches(table(added, "t"), table(added, "t_al_00000001")));
+            TableMetadata logicalDropped = logicalBuilder().build().unbuild().removeRegularOrStaticColumn(ColumnIdentifier.getInterned("v", false))
+                                                          .recordColumnDrop(logical().getColumn(ColumnIdentifier.getInterned("v", false)), 1234L).build();
+            Keyspaces removed = LayoutSchemaCoupling.apply(prev, keyspaces(logicalDropped, physical(), other()));
+            assertNull(at, table(removed, "t_al_00000001").getColumn(ColumnIdentifier.getInterned("v", false)));
+            assertEquals(at, 1234L, table(removed, "t_al_00000001").droppedColumns.get(ByteBufferUtil.bytes("v")).droppedTime);
+
+            // renames and type changes, and what makes the table ineligible, are rejected
+            TableMetadata retyped = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
+                                                 .addPartitionKeyColumn("p", Int32Type.instance)
+                                                 .addClusteringColumn("c1", Int32Type.instance)
+                                                 .addClusteringColumn("c2", UTF8Type.instance)
+                                                 .addRegularColumn("v", BytesType.instance).build();
+            assertInvalid(ADAPTED, prev, keyspaces(retyped, physical(), other()));
+            assertInvalid("STATIC_COLUMN", prev, keyspaces(logicalBuilder().addStaticColumn("s", Int32Type.instance).build(), physical(), other()));
+            assertInvalid("CDC", prev, keyspaces(logicalBuilder().params(TableParams.builder().cdc(true).build()).build(), physical(), other()));
+
+            // gc_grace_seconds is mirrored, other parameters and the replication are not restricted
+            Keyspaces gc = LayoutSchemaCoupling.apply(prev, keyspaces(logicalBuilder().params(TableParams.builder().gcGraceSeconds(50_000).build()).build(), physical(), other()));
+            assertEquals(at, 50_000, table(gc, "t_al_00000001").params.gcGraceSeconds);
+            Keyspaces comment = keyspaces(logicalBuilder().params(TableParams.builder().comment("c").build()).build(), physical(), other());
+            assertEquals(at, comment, LayoutSchemaCoupling.apply(prev, comment));
+            Keyspaces replication = keyspaces(KeyspaceParams.simple(3), logical(), physical(), other());
+            assertEquals(at, replication, LayoutSchemaCoupling.apply(prev, replication));
+        }
+        assertTrue("there are reverse phases", checked >= 4);
+    }
+
+    /** RemoveKey of the last key removes the layout: H21 no longer restricts the table, and renames and the like are accepted. */
+    @Test
+    public void removingTheLastKeyFreesTheRestrictions()
+    {
+        ClusterMetadata withKey = prevIn(Phase.REVERSE_CLEANUP, keyspaces(logical(), physical(), other()));
+        TableMetadata renamed = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
+                                             .addPartitionKeyColumn("p", Int32Type.instance)
+                                             .addClusteringColumn("c1", Int32Type.instance)
+                                             .addClusteringColumn("c2", UTF8Type.instance)
+                                             .addRegularColumn("v2", UTF8Type.instance).build();
+        TableMetadata retyped = TableMetadata.builder("ks", "t").id(LayoutTransformationTest.LOGICAL)
+                                             .addPartitionKeyColumn("p", Int32Type.instance)
+                                             .addClusteringColumn("c1", Int32Type.instance)
+                                             .addClusteringColumn("c2", UTF8Type.instance)
+                                             .addRegularColumn("v", BytesType.instance).build();
+        assertInvalid(ADAPTED, withKey, keyspaces(retyped, physical(), other()));
+
+        // the removal of the last key of an ABORTING key and of a REVERSE_CLEANUP key (LayoutTransformationTest, ReverseLayoutTest) both drop the layout
+        ClusterMetadata aborting = prevIn(Phase.ABORTING, keyspaces(logical(), physical(), other()));
+        LayoutRegistry.Result removed = LayoutRegistry.of(aborting).withoutKey(LayoutTransformationTest.LOGICAL, LayoutTransformationTest.K1, LayoutTransformationTest.A);
+        assertNull(removed.rejection, removed.rejection);
+        assertNull("the layout goes with its last key", removed.registry.layout(LayoutTransformationTest.LOGICAL));
+        ClusterMetadata after = aborting.transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(removed.registry)).build().metadata;
+        Keyspaces next = keyspaces(retyped, other());
+        assertSame("nothing is restricted any more", next, LayoutSchemaCoupling.apply(after, next));
+        Keyspaces renamedNext = keyspaces(renamed, physical(), other());
+        assertSame(renamedNext, LayoutSchemaCoupling.apply(after, renamedNext));
+    }
+
     // ---- unaffected ----
 
     @Test
