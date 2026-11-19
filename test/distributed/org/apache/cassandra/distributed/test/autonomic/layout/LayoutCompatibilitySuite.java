@@ -28,30 +28,41 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 
+import com.google.common.collect.ImmutableMap;
+
 import org.apache.cassandra.autonomic.coord.Claim;
 import org.apache.cassandra.autonomic.coord.ClusterCoordinator;
+import org.apache.cassandra.autonomic.coord.Lane;
 import org.apache.cassandra.autonomic.coord.TcmEnvironment;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
+import org.apache.cassandra.autonomic.layout.BeginUnsplit;
+import org.apache.cassandra.autonomic.layout.Eligibility;
 import org.apache.cassandra.autonomic.layout.EpochWatermarks;
 import org.apache.cassandra.autonomic.layout.FinishKey;
+import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutRegistry;
+import org.apache.cassandra.autonomic.layout.NaturalReplicas;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.PhysicalTables;
+import org.apache.cassandra.autonomic.layout.ReleaseKey;
 import org.apache.cassandra.autonomic.layout.RemoveKey;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
+import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.shared.ClusterUtils;
 import org.apache.cassandra.distributed.test.TestBaseImpl;
 import org.apache.cassandra.net.Verb;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.utils.Clock;
+import org.apache.cassandra.utils.TimeUUID;
 
 import static org.apache.cassandra.distributed.api.Feature.GOSSIP;
 import static org.apache.cassandra.distributed.api.Feature.NETWORK;
@@ -122,6 +133,7 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
         boolean hold;
         boolean behind;
         boolean quiet;
+        boolean release;
 
         private Step(Phase target, boolean move)
         {
@@ -158,6 +170,14 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
         {
             Step s = new Step(target, true);
             s.quiet = true;
+            return s;
+        }
+
+        /** Quietly release the forward action's key (STEADY, base state RESIDUE or, in slow mode, TOMBSTONED) so that an unsplit may begin. */
+        static Step release()
+        {
+            Step s = new Step(null, false);
+            s.release = true;
             return s;
         }
 
@@ -218,17 +238,35 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
         return new ClusterCoordinator(new TcmEnvironment(Clock.Global::currentTimeMillis, DatabaseDescriptor::getAutonomicConfig));
     }
 
+    /** Extra configuration of every node; the reverse suites shorten the cooldowns between two actions of the lane. */
+    void configure(IInstanceConfig cfg)
+    {
+    }
+
+    /** The mode of the unsplit these scripts begin. */
+    KeyState.ReverseMode reverseMode()
+    {
+        return KeyState.ReverseMode.FAST;
+    }
+
     /** Runs the script on a fresh two-node cluster. */
     void run(Step... script) throws Throwable
     {
+        boolean slow = reverseMode() == KeyState.ReverseMode.SLOW;
         try (Cluster c = init(Cluster.build(2)
-                                     .withConfig(cfg -> cfg.with(NETWORK, GOSSIP)
-                                                           .set("autonomic.enabled", cfg.num() == 1)
-                                                           .set("hinted_handoff_enabled", false))
+                                     .withConfig(cfg -> {
+                                         cfg.with(NETWORK, GOSSIP)
+                                            .set("autonomic.enabled", cfg.num() == 1)
+                                            .set("hinted_handoff_enabled", false);
+                                         configure(cfg);
+                                     })
                                      .start()))
         {
             cluster = c;
             IInvokableInstance n1 = c.get(1);
+            if (slow)
+                // the eligibility minimum of gc_grace_seconds is a constant of the replayed state: lower it on every node
+                c.forEach(node -> node.runOnInstance(() -> Eligibility.setMinGcGraceSecondsForTesting(1)));
             c.schemaChange("CREATE TABLE " + KEYSPACE + ".t" + COLUMNS);
             c.schemaChange("CREATE TABLE " + KEYSPACE + ".twin" + COLUMNS);
             String derived = n1.callOnInstance(() -> PhysicalTables.derive(Schema.instance.getTableMetadata(KEYSPACE, "t"), LAYOUT_ID, TableId.generate()));
@@ -251,6 +289,11 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
     {
         Phase from = current;
         Phase[] seen = { null, current, current };
+        if (s.release)
+        {
+            release();
+            return;
+        }
         if (s.move)
         {
             WorkloadHandle workload = null;
@@ -307,6 +350,7 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
                 BackfillTest.awaitBackfill(cluster, 1, replicas, 120);
             if (current == Phase.CLEANUP)
                 reconcile();
+            afterReverseCommit();
             if (paging != null)
                 resumePagingState(paging, from + " -> " + current);
             if (s.hold)
@@ -328,6 +372,11 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
             actionId = register(cluster.get(1), 1);
             return;
         }
+        if (to == Phase.REVERSE_ANNOUNCED)
+        {
+            beginReverse();
+            return;
+        }
         String id = actionId;
         String fromName = from.name();
         String toName = to == null ? null : to.name();
@@ -341,18 +390,151 @@ public abstract class LayoutCompatibilitySuite extends TestBaseImpl
                 RemoveKey r = new RemoveKey(now.actionId, now.owner, now.step, logical, key, Clock.Global.currentTimeMillis(), 600_000);
                 assertTrue(c.commitInstead(now, r.wrap(), "KEY_REMOVED", now.state).ok());
             }
-            else if (Phase.valueOf(toName) == Phase.STEADY)
+            else if (Phase.valueOf(toName) == Phase.STEADY && !Phase.valueOf(fromName).isReverse())
             {
                 FinishKey f = new FinishKey(now.actionId, now.owner, now.step, logical, key, Clock.Global.currentTimeMillis(), 600_000);
                 assertTrue(c.commitInstead(now, f.wrap(), toName, now.state).ok());
             }
             else
             {
-                AdvanceLayout a = new AdvanceLayout(now.actionId, now.owner, now.step, logical, key, Phase.valueOf(fromName), Phase.valueOf(toName), 1,
+                Phase f = Phase.valueOf(fromName);
+                Phase t = Phase.valueOf(toName);
+                // the reverse keeps the generation of BeginUnsplit (and of its purge reports) except where a pass restarts it
+                int generation = f.isReverse() || t.isReverse()
+                                 ? LayoutRegistry.of(ClusterMetadata.current()).layout(logical).keyState(key).generation + (f == Phase.REVERSE_VERIFY && t == Phase.REVERSE_BACKFILL ? 1 : 0)
+                                 : 1;
+                AdvanceLayout a = new AdvanceLayout(now.actionId, now.owner, now.step, logical, key, f, t, generation,
                                                     Clock.Global.currentTimeMillis(), 600_000);
                 assertTrue(c.commitInstead(now, a.wrap(), toName, now.state).ok());
             }
         });
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // the reverse (T6.17j): the key is released, then moved through the reverse phases by hand like the forward ones
+    // ---------------------------------------------------------------------------------------------------------
+
+    /**
+     * Releases the STEADY key of the forward action: base state RESIDUE (fast), or, in slow mode, a base partition
+     * deletion at {@code Tt = now} on both nodes and TOMBSTONED(Tt). Waits out the cooldown of the forward action.
+     */
+    private void release() throws Exception
+    {
+        String forward = actionId;
+        boolean slow = reverseMode() == KeyState.ReverseMode.SLOW;
+        long tt = slow ? System.currentTimeMillis() * 1000 : 0;
+        if (slow)
+            for (int node = 1; node <= 2; node++)
+                cluster.get(node).executeInternal("DELETE FROM " + KEYSPACE + ".t USING TIMESTAMP " + tt + " WHERE p = ?", K);
+        cluster.get(1).runOnInstance(() -> {
+            ClusterCoordinator c = coordinator();
+            Claim now = c.ownClaim(UUID.fromString(forward));
+            TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
+            ReleaseKey release = new ReleaseKey(now.actionId, now.owner, now.step, logical, key(K),
+                                                slow ? KeyState.BaseState.TOMBSTONED : KeyState.BaseState.RESIDUE, tt, Clock.Global.currentTimeMillis(), 600_000);
+            assertTrue(c.commitInstead(now, release.wrap(), "KEY_RELEASED", now.state).ok());
+            assertTrue(c.release(c.ownClaim(UUID.fromString(forward)), "COMMITTED").ok());
+        });
+        // the forward passes need the grace of the table; only the purge of the slow reverse needs it short
+        if (slow)
+            cluster.schemaChange("ALTER TABLE " + KEYSPACE + ".t WITH gc_grace_seconds = 2");
+        ClusterUtils.waitForCMSToQuiesce(cluster, cluster.get(1));
+        sleep(2500); // the cooldown of the forward action, configured to 1 s
+    }
+
+    /** A new action claims the lane and begins the unsplit of the released key in the mode of the suite. */
+    private void beginReverse()
+    {
+        String id = cluster.get(1).callOnInstance(() -> TimeUUID.Generator.nextTimeUUID().asUUID().toString());
+        String mode = reverseMode().name();
+        cluster.get(1).runOnInstance(() -> {
+            ClusterCoordinator c = coordinator();
+            ClusterCoordinator.Outcome outcome = c.claim(Lane.SCHEMA_LAYOUT, UUID.fromString(id), "partition_split", "TABLE:t", "CLAIMED", ImmutableMap.of());
+            assertTrue(String.valueOf(outcome.detail), outcome.ok());
+            Claim own = c.ownClaim(UUID.fromString(id));
+            TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
+            BeginUnsplit begin = new BeginUnsplit(own.actionId, own.owner, own.step, logical, key(K), KeyState.ReverseMode.valueOf(mode), null,
+                                                  Clock.Global.currentTimeMillis(), 600_000);
+            assertTrue(c.commitInstead(own, begin.wrap(), Phase.REVERSE_ANNOUNCED.name(), own.state).ok());
+        });
+        actionId = id;
+    }
+
+    /** What the real passes and purges of the reverse need before the catalogue runs in the phase just entered. */
+    private void afterReverseCommit() throws InterruptedException
+    {
+        if (current == null || !current.isReverse())
+            return;
+        boolean slow = reverseMode() == KeyState.ReverseMode.SLOW;
+        switch (current)
+        {
+            case REVERSE_ANNOUNCED:
+                if (slow)
+                {
+                    // every base replica purges its partition deletion (gc_grace 2 s) and reports; then the grace is restored, as the
+                    // replica limit of the reverse passes is counted from it
+                    awaitReports(baseReplicas());
+                    cluster.schemaChange("ALTER TABLE " + KEYSPACE + ".t WITH gc_grace_seconds = 864000");
+                }
+                break;
+            case REVERSE_BACKFILL:
+                restartGeneration(Phase.REVERSE_BACKFILL);
+                awaitReports(bucketReplicas());
+                break;
+            case REVERSE_CLEANUP:
+                restartGeneration(Phase.REVERSE_CLEANUP);
+                awaitReports(bucketReplicas());
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** {@code X -> X} with the next generation: starts the pass of the phase. */
+    private void restartGeneration(Phase phase) throws InterruptedException
+    {
+        String id = actionId;
+        String name = phase.name();
+        cluster.get(1).runOnInstance(() -> {
+            ClusterCoordinator c = coordinator();
+            Claim now = c.ownClaim(UUID.fromString(id));
+            TableId logical = Schema.instance.getTableMetadata(KEYSPACE, "t").id;
+            KeyState state = LayoutRegistry.of(ClusterMetadata.current()).layout(logical).keyState(key(K));
+            AdvanceLayout a = new AdvanceLayout(now.actionId, now.owner, now.step, logical, key(K), Phase.valueOf(name), Phase.valueOf(name), state.generation + 1,
+                                                Clock.Global.currentTimeMillis(), 600_000);
+            assertTrue(c.commitInstead(now, a.wrap(), name, now.state).ok());
+        });
+        ClusterUtils.waitForCMSToQuiesce(cluster, cluster.get(1));
+    }
+
+    private int baseReplicas()
+    {
+        return cluster.get(1).callOnInstance(() -> NaturalReplicas.of(ClusterMetadata.current(), Schema.instance.getTableMetadata(KEYSPACE, "t"), key(K)).size());
+    }
+
+    private int bucketReplicas()
+    {
+        return cluster.get(1).callOnInstance(() -> {
+            ClusterMetadata cm = ClusterMetadata.current();
+            TableMetadata logical = Schema.instance.getTableMetadata(KEYSPACE, "t");
+            return NaturalReplicas.ofBuckets(cm, logical, Schema.instance.getTableMetadata(KEYSPACE, PHYSICAL), key(K), 1,
+                                             LayoutRegistry.of(cm).layout(logical.id).buckets).size();
+        });
+    }
+
+    /** Waits until {@code nodes} nodes have reported the current generation of the key. */
+    private void awaitReports(int nodes) throws InterruptedException
+    {
+        long deadline = System.nanoTime() + 180_000_000_000L;
+        while (true)
+        {
+            int reported = cluster.get(1).callOnInstance(() -> LayoutRegistry.of(ClusterMetadata.current()).byLogical.values().iterator().next().keyState(key(K)).backfillDone.size());
+            if (reported >= nodes)
+                return;
+            if (System.nanoTime() > deadline)
+                throw new AssertionError("in " + current + " " + reported + " of " + nodes + " nodes reported");
+            Thread.sleep(200);
+        }
     }
 
     /**
