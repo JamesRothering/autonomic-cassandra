@@ -631,7 +631,7 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 ## ADR-037: Unsplit actuator decisions beyond the T6.17 design note
 
 - **Date:** 2026-11-19
-- **Status:** Accepted (orchestrator decision on T6.17c and T6.17f; within ADR-036)
+- **Status:** Accepted (orchestrator decision on T6.17c and T6.17f; within ADR-036). Accepted by the owner on 2026-11-19.
 - **Deliverable:** D6 follow-up (T6.17)
 
 **Context.** Building the replica copy (T6.17c) and the unsplit actuator (T6.17f) exposed four points that section 11 did not settle.
