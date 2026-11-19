@@ -19,6 +19,7 @@ package org.apache.cassandra.autonomic.coord;
 
 import org.apache.cassandra.autonomic.layout.AdoptKey;
 import org.apache.cassandra.autonomic.layout.AdvanceLayout;
+import org.apache.cassandra.autonomic.layout.BeginUnsplit;
 import org.apache.cassandra.autonomic.layout.FinishKey;
 import org.apache.cassandra.autonomic.layout.RegisterKey;
 import org.apache.cassandra.autonomic.layout.ReleaseKey;
@@ -60,5 +61,7 @@ public final class AutonomicTransformations
         CustomTransformation.registerExtension(ReleaseKey.NAME, ReleaseKey.serializer);
         // ADR-035
         CustomTransformation.registerExtension(ReportHints.NAME, ReportHints.serializer);
+        // ADR-036: the reverse path
+        CustomTransformation.registerExtension(BeginUnsplit.NAME, BeginUnsplit.serializer);
     }
 }

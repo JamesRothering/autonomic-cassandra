@@ -113,6 +113,14 @@ public abstract class LayoutTransformation implements Transformation
             throw new IOException("Unknown format " + format + " of autonomic transformation " + what + "; this node reads format " + FORMAT);
     }
 
+    /** For a transformation whose serializer has grown a second format; returns the format read. */
+    static int checkFormat(int format, int newest, String what) throws IOException
+    {
+        if (format < FORMAT || format > newest)
+            throw new IOException("Unknown format " + format + " of autonomic transformation " + what + "; this node reads formats " + FORMAT + " to " + newest);
+        return format;
+    }
+
     // ---- field codecs shared by the serializers ----
 
     static void writeUuid(UUID id, DataOutputPlus out) throws IOException

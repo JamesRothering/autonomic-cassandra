@@ -467,6 +467,10 @@ public class LayoutTransformationTest
 
     private static final Set<Phase> NOWHERE = EnumSet.noneOf(Phase.class);
 
+    /** The phases of the forward path, the ones design 4.2 knows; the reverse path has its own tests (ReverseLayoutTest). */
+    static final Phase[] FORWARD = { Phase.ANNOUNCED, Phase.DUAL_WRITE, Phase.BACKFILL, Phase.VERIFY, Phase.CUTOVER, Phase.NEW_ONLY, Phase.CLEANUP,
+                                     Phase.STEADY, Phase.ROLLBACK_DUAL, Phase.ABORTING };
+
     /** The allowed pairs of design 4.2, written out independently of {@link Phase}. */
     private static Set<Phase> legalTargets(Phase from)
     {
@@ -486,7 +490,7 @@ public class LayoutTransformationTest
     @Test
     public void everyPairOfPhasesIsAcceptedOrRejectedAsTheTable()
     {
-        for (Phase from : Phase.values())
+        for (Phase from : FORWARD)
         {
             ClusterMetadata md = keyIn(from);
             for (Phase to : Phase.values())
@@ -641,7 +645,7 @@ public class LayoutTransformationTest
     @Test
     public void reportBackfillRejections()
     {
-        for (Phase phase : Phase.values())
+        for (Phase phase : FORWARD)
         {
             if (phase == Phase.BACKFILL || phase == Phase.CLEANUP)
                 continue;
@@ -745,7 +749,7 @@ public class LayoutTransformationTest
         assertTrue(key(md, K1).backfillDone.isEmpty());
         assertEquals(ImmutableSet.of(N2), key(execute(md, report(md, LOGICAL, K1, 3, N2)), K1).backfillDone);
         assertTrue(key(keyIn(Phase.BACKFILL), K1).backfillDue());
-        for (Phase phase : Phase.values())
+        for (Phase phase : FORWARD)
             if (phase != Phase.BACKFILL && phase != Phase.CLEANUP)
                 assertFalse(phase.name(), key(keyIn(phase), K1).backfillDue());
     }
@@ -817,7 +821,7 @@ public class LayoutTransformationTest
     @Test
     public void removeKeyOnlyInAbortingAndTheLayoutGoesWithItsLastKey()
     {
-        for (Phase phase : Phase.values())
+        for (Phase phase : FORWARD)
             if (phase != Phase.ABORTING)
                 assertRejected("not ABORTING", keyIn(phase), new RemoveKey(A, N1, 0, LOGICAL, K1, NOW, LEASE));
 
@@ -1050,7 +1054,7 @@ public class LayoutTransformationTest
     public void replayedCodeDoesNotReadClocksOrConfiguration() throws IOException
     {
         String[] sources = { "Phase", "KeyState", "TableLayout", "LayoutHeader", "LayoutRegistry", "LayoutRegistryValue", "LayoutTransformation", "ClaimStep", "LayoutValueBase", "Eligibility", "PhysicalTables",
-                             "RegisterKey", "AdvanceLayout", "ReportBackfill", "ReportHints", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey", "ReleaseKey", "NaturalReplicas" };
+                             "RegisterKey", "AdvanceLayout", "BeginUnsplit", "ReportBackfill", "ReportHints", "RemoveKey", "FinishKey", "RemoveOrphanLayout", "AdoptKey", "ReleaseKey", "NaturalReplicas" };
         String[] forbidden = { "Clock", "currentTimeMillis", "nanoTime", "DatabaseDescriptor", "AutonomicService", "AutonomicConfig",
                                "FBUtilities", "Random", "randomUUID", "TimeUUID", "System.", "ClusterMetadata.current", "ClusterMetadataService",
                                "StorageService", "Schema.instance", "Instant", "new Date" };
@@ -1065,7 +1069,7 @@ public class LayoutTransformationTest
                     assertTrue(source + ".java: unexpected dependency " + line,
                                line.matches("import org\\.apache\\.cassandra\\.(tcm|io\\.util|db\\.TypeSizes|db\\.marshal\\.Int32Type|exceptions\\.ExceptionCode"
                                             + "|schema\\.(TableId|TableMetadata|ColumnMetadata|KeyspaceMetadata|SchemaConstants)|cql3\\.ColumnIdentifier|locator\\.InetAddressAndPort"
-                                            + "|service\\.consensus\\.(TransactionalMode|migration\\.TransactionalMigrationFromMode)|utils\\.ByteBufferUtil|autonomic\\.(coord|layout))[.;].*"));
+                                            + "|service\\.consensus\\.(TransactionalMode|migration\\.TransactionalMigrationFromMode)|utils\\.(ByteBufferUtil|CassandraVersion)|dht\\.Token|autonomic\\.(coord|layout))[.;].*"));
         }
     }
 
@@ -1108,7 +1112,7 @@ public class LayoutTransformationTest
         new LayoutRegistryValue(LayoutRegistry.EMPTY).serialize(out, VERSION);
         ByteBuffer bytes = out.buffer();
         assertEquals(LayoutRegistry.FORMAT_VERSION, bytes.get(0));
-        bytes.put(0, (byte) (LayoutRegistry.FORMAT_VERSION + 1));
+        bytes.put(0, (byte) (LayoutRegistry.LATEST_FORMAT_VERSION + 1));
         try
         {
             new LayoutRegistryValue().deserialize(new DataInputBuffer(bytes, false), VERSION);
@@ -1120,9 +1124,8 @@ public class LayoutTransformationTest
         }
         try
         {
-            new LayoutRegistry(2, ImmutableMap.of());
             DataOutputBuffer unwritable = new DataOutputBuffer();
-            new LayoutRegistryValue(new LayoutRegistry(2, ImmutableMap.of())).serialize(unwritable, VERSION);
+            new LayoutRegistryValue(new LayoutRegistry(LayoutRegistry.LATEST_FORMAT_VERSION + 1, ImmutableMap.of())).serialize(unwritable, VERSION);
             fail("an unknown format must not be written");
         }
         catch (IOException expected)
@@ -1210,7 +1213,7 @@ public class LayoutTransformationTest
                              Phase.STEADY, Phase.ROLLBACK_DUAL, Phase.ABORTING };
         for (int i = 0; i < ids.length; i++)
             assertSame(expected[i], Phase.fromId(ids[i]));
-        assertNull(Phase.fromId(10));
+        assertNull(Phase.fromId(18));
         assertEquals(0, TableLayout.Transform.HASH_SPLIT.id);
     }
 

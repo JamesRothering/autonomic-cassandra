@@ -19,12 +19,15 @@ package org.apache.cassandra.autonomic.layout;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Transformation;
 import org.apache.cassandra.tcm.membership.NodeId;
@@ -32,7 +35,11 @@ import org.apache.cassandra.tcm.serialization.AsymmetricMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
-/** Removes a key in {@link Phase#ABORTING}, and its layout with the last key (design 2.4), and advances the claim in the same commit. */
+/**
+ * Removes a key in {@link Phase#ABORTING}, and its layout with the last key (design 2.4), and advances the claim in the
+ * same commit. A key in {@link Phase#REVERSE_CLEANUP} is removed too (design 11.4), but only once every natural replica
+ * of every bucket partition of its incarnation has reported the reconcile generation.
+ */
 public final class RemoveKey extends LayoutTransformation
 {
     public static final String NAME = "org.apache.cassandra.autonomic.layout.RemoveKey";
@@ -80,7 +87,17 @@ public final class RemoveKey extends LayoutTransformation
     @Override
     LayoutRegistry.Result apply(LayoutRegistry registry, ClusterMetadata prev)
     {
-        return registry.withoutKey(logical, keyBytes, claim.actionId);
+        TableLayout layout = registry.layout(logical);
+        KeyState state = layout == null ? null : layout.keyState(keyBytes);
+        Set<NodeId> replicas = null;
+        if (state != null && state.phase == Phase.REVERSE_CLEANUP)
+        {
+            TableMetadata table = prev.schema.getTableMetadata(logical);
+            TableMetadata physical = prev.schema.getTableMetadata(layout.physical);
+            replicas = table == null || physical == null ? Collections.emptySet()
+                                                         : NaturalReplicas.ofBuckets(prev, table, physical, keyBytes, state.incarnation, layout.buckets);
+        }
+        return registry.withoutKey(logical, keyBytes, claim.actionId, replicas);
     }
 
     @Override

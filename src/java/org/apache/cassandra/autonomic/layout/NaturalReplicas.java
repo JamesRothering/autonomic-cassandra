@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -42,13 +43,18 @@ public final class NaturalReplicas
     /** Null if the keyspace is gone or its placement has no replica group for the key's token. */
     private static VersionedEndpoints.ForToken forToken(ClusterMetadata cm, TableMetadata logical, ByteBuffer key)
     {
-        KeyspaceMetadata keyspace = cm.schema.getKeyspaces().getNullable(logical.keyspace);
+        // the token in the metadata's partitioner, the one its placements are in
+        return forToken(cm, logical, cm.partitioner.getToken(key));
+    }
+
+    private static VersionedEndpoints.ForToken forToken(ClusterMetadata cm, TableMetadata table, Token token)
+    {
+        KeyspaceMetadata keyspace = cm.schema.getKeyspaces().getNullable(table.keyspace);
         if (keyspace == null)
             return null;
         try
         {
-            // the token in the metadata's partitioner, the one its placements are in
-            return cm.placement(keyspace.params.replication).reads.forToken(cm.partitioner.getToken(key));
+            return cm.placement(keyspace.params.replication).reads.forToken(token);
         }
         catch (IllegalStateException e)
         {
@@ -69,6 +75,31 @@ public final class NaturalReplicas
             NodeId id = cm.directory.peerId(endpoint);
             if (id != null)
                 out.add(id);
+        }
+        return out;
+    }
+
+    /**
+     * The natural replicas of every bucket partition of incarnation {@code incarnation} of the key in the overflow table
+     * (design 11.4, the reverse): the union over the {@code buckets} bucket tokens. Empty if the keyspace is gone or any
+     * bucket token has no replica group, so that a caller never mistakes a partial answer for a complete one.
+     */
+    public static Set<NodeId> ofBuckets(ClusterMetadata cm, TableMetadata logical, TableMetadata physical, ByteBuffer key, int incarnation, int buckets)
+    {
+        Set<NodeId> out = new TreeSet<>();
+        for (int bucket = 0; bucket < buckets; bucket++)
+        {
+            // the token in the metadata's partitioner, as for the key itself
+            Token token = cm.partitioner.getToken(RowMapper.physicalKey(logical, physical, key, incarnation, bucket).getKey());
+            VersionedEndpoints.ForToken forToken = forToken(cm, physical, token);
+            if (forToken == null)
+                return new TreeSet<>();
+            for (InetAddressAndPort endpoint : forToken.get().endpoints())
+            {
+                NodeId id = cm.directory.peerId(endpoint);
+                if (id != null)
+                    out.add(id);
+            }
         }
         return out;
     }

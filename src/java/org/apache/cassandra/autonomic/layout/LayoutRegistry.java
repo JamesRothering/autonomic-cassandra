@@ -36,8 +36,10 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.extensions.ExtensionValue;
 import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.membership.NodeVersion;
 import org.apache.cassandra.tcm.serialization.Version;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CassandraVersion;
 
 /**
  * The layout registry of design 2.3: the {@link TableLayout} of every logical table that has one. Immutable.
@@ -49,7 +51,21 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public final class LayoutRegistry
 {
+    /**
+     * The legacy format: no base state, no reverse path. A format 1 value decodes with the rules of design 11.5, and a
+     * registry of this format is written as format 1 (so that a node that cannot read format 2 can still read it).
+     */
     public static final int FORMAT_VERSION = 1;
+    /** Adds the base state fields of {@link KeyState} and the reverse phases (design 11.5). */
+    public static final int FORMAT_VERSION_2 = 2;
+    /** The newest format this code reads and writes. */
+    public static final int LATEST_FORMAT_VERSION = FORMAT_VERSION_2;
+    /**
+     * The upgrade gate of format 2: the first release whose nodes read it. A registry is upgraded from format 1 to
+     * format 2 only by a transformation that needs it, and only if every node of the directory runs this release or a
+     * later one; until then such a transformation is rejected and no format 2 value exists in the log.
+     */
+    public static final CassandraVersion FORMAT_2_MIN_RELEASE = new CassandraVersion("7.0").familyLowerBound.get();
     public static final int HASH_ALGO = 1;
     public static final int MAX_LAYOUTS = 8;
     public static final int MAX_KEYS = 8;
@@ -65,6 +81,30 @@ public final class LayoutRegistry
     public static final int MAX_NAME_LENGTH = 48;
 
     public static final LayoutRegistry EMPTY = new LayoutRegistry(FORMAT_VERSION, ImmutableMap.of());
+
+    /**
+     * The most nodes {@link KeyState#backfillDone} holds in the phase: {@link #MAX_BACKFILL_NODES}, and in the reverse
+     * phases {@link #MAX_HINT_REPORTS}, because reverse reports come from the replicas of every bucket partition,
+     * up to {@code N x RF} nodes (design 11.8, owner answer 4).
+     */
+    public static int maxBackfillReports(Phase phase)
+    {
+        return phase.isReverse() ? MAX_HINT_REPORTS : MAX_BACKFILL_NODES;
+    }
+
+    /**
+     * Why a registry may not be upgraded to format 2 at this metadata, or null if it may: some node of the directory
+     * runs a release older than {@link #FORMAT_2_MIN_RELEASE}.
+     */
+    public static String formatGateRefusal(ClusterMetadata metadata)
+    {
+        NodeVersion min = metadata == null ? null : metadata.directory.clusterMinVersion;
+        if (min == null)
+            return "the cluster's minimum node version is unknown";
+        if (min.cassandraVersion.compareTo(FORMAT_2_MIN_RELEASE) < 0)
+            return "layout registry format 2 needs every node at " + FORMAT_2_MIN_RELEASE + " or later, the oldest is " + min.cassandraVersion;
+        return null;
+    }
 
     public final int formatVersion;
     /** By logical table id, in id order. */
@@ -137,8 +177,21 @@ public final class LayoutRegistry
                 map.put(id, l);
         });
         if (layout != null)
-            map.put(logical, layout);
+            map.put(logical, formatVersion < FORMAT_VERSION_2 ? layout.asLegacy() : layout);
         return new Result(new LayoutRegistry(formatVersion, map.build()), null, false);
+    }
+
+    /**
+     * This registry in format 2, or the reason it may not be: {@code gateRefusal} is the answer of
+     * {@link #formatGateRefusal}, evaluated by the transformation, which alone sees the metadata.
+     */
+    private LayoutRegistry upgraded(String gateRefusal)
+    {
+        if (formatVersion >= FORMAT_VERSION_2)
+            return this;
+        if (gateRefusal != null)
+            throw new IllegalStateException(gateRefusal);
+        return new LayoutRegistry(FORMAT_VERSION_2, byLogical);
     }
 
     private static Result reject(String reason)
@@ -217,7 +270,7 @@ public final class LayoutRegistry
         boolean restart = from == to;
         if (restart ? !from.restartable() : !Phase.isTransition(from, to))
             return reject("illegal transition " + from + " -> " + to);
-        boolean newGeneration = restart || (from == Phase.VERIFY && to == Phase.BACKFILL);
+        boolean newGeneration = restart || (from == Phase.VERIFY && to == Phase.BACKFILL) || (from == Phase.REVERSE_VERIFY && to == Phase.REVERSE_BACKFILL);
         int expected = newGeneration ? state.generation + 1 : state.generation;
         if (generation != expected)
             return reject("transition " + from + " -> " + to + " requires generation " + expected + ", not " + generation + " (current " + state.generation + ')');
@@ -240,7 +293,7 @@ public final class LayoutRegistry
         KeyState state = layout.keyState(key);
         if (!state.phase.acceptsBackfillReports())
             return reject("key is in phase " + state.phase + ", which takes no backfill reports");
-        if (!state.backfillDue())
+        if (!state.reportsDue())
             return reject("key is in phase " + state.phase + " with the generation of its backfill; the reconcile generation has not started");
         if (state.generation != generation)
             return reject("key is at generation " + state.generation + ", not " + generation);
@@ -248,8 +301,8 @@ public final class LayoutRegistry
             return reject("generation " + generation + " of the key started at epoch " + state.generationEpoch.getEpoch() + ", not " + generationEpoch.getEpoch());
         if (state.backfillDone.contains(node))
             return new Result(this, null, true);
-        if (state.backfillDone.size() >= MAX_BACKFILL_NODES)
-            return reject("backfill_done already has " + MAX_BACKFILL_NODES + " nodes");
+        if (state.backfillDone.size() >= maxBackfillReports(state.phase))
+            return reject("backfill_done already has " + maxBackfillReports(state.phase) + " nodes");
         return changed(logical, layout.withKey(key, state.withBackfillDone(node)));
     }
 
@@ -303,8 +356,19 @@ public final class LayoutRegistry
         return changed(logical, layout.withKey(key, state.withAction(actionId)));
     }
 
-    /** {@code RemoveKey}: the key must be {@link Phase#ABORTING} and owned by {@code actionId}; the layout goes with its last key. */
+    /** {@code RemoveKey} of an aborted forward migration: the key must be {@link Phase#ABORTING}. */
     public Result withoutKey(TableId logical, ByteBuffer key, UUID actionId)
+    {
+        return withoutKey(logical, key, actionId, null);
+    }
+
+    /**
+     * {@code RemoveKey}: the key must be {@link Phase#ABORTING}, or {@link Phase#REVERSE_CLEANUP} with its reconcile
+     * generation reported by every one of {@code bucketReplicas}, the natural replicas of every bucket token of its
+     * incarnation at this epoch (design 11.4, ADR-033 mirrored); it must be owned by {@code actionId}. The layout goes
+     * with its last key.
+     */
+    public Result withoutKey(TableId logical, ByteBuffer key, UUID actionId, Set<NodeId> bucketReplicas)
     {
         if (logical == null || key == null || actionId == null)
             return reject("missing argument");
@@ -313,12 +377,87 @@ public final class LayoutRegistry
             return reject(missing);
         TableLayout layout = byLogical.get(logical);
         KeyState state = layout.keyState(key);
-        if (state.phase != Phase.ABORTING)
-            return reject("key is in phase " + state.phase + ", not " + Phase.ABORTING);
+        if (state.phase != Phase.ABORTING && state.phase != Phase.REVERSE_CLEANUP)
+            return reject("key is in phase " + state.phase + ", not " + Phase.ABORTING + " or " + Phase.REVERSE_CLEANUP);
         if (!actionId.equals(state.actionId))
             return reject("key is owned by action " + state.actionId + ", not " + actionId);
+        if (state.phase == Phase.REVERSE_CLEANUP)
+        {
+            if (!state.reportsDue())
+                return reject("the reconcile generation of the key has not started");
+            if (bucketReplicas == null || bucketReplicas.isEmpty())
+                return reject("the buckets of the key have no natural replica in the placement");
+            String unreported = unreported(bucketReplicas, state);
+            if (unreported != null)
+                return reject(unreported);
+        }
         TableLayout remaining = layout.withoutKey(key);
         return changed(logical, remaining.keys.isEmpty() ? null : remaining);
+    }
+
+    /** The rejection for replicas that have not reported the current generation of the key, or null if all have. */
+    private static String unreported(Set<NodeId> replicas, KeyState state)
+    {
+        Set<NodeId> unreported = new TreeSet<>(replicas);
+        unreported.removeAll(state.backfillDone);
+        if (unreported.isEmpty())
+            return null;
+        StringBuilder ids = new StringBuilder();
+        for (NodeId node : unreported)
+            ids.append(ids.length() == 0 ? "" : ", ").append(node.id());
+        return "natural replicas [" + ids + "] have not reported reconcile generation " + state.generation;
+    }
+
+    /**
+     * {@code BeginUnsplit} (design 11.4): moves a key to {@link Phase#REVERSE_ANNOUNCED} in {@code mode}, owned by
+     * {@code actionId}, in a new generation; upgrades the registry to format 2 if it is not (see
+     * {@link #formatGateRefusal}; {@code gateRefusal} is its answer).
+     *
+     * <p>Accepted from {@link Phase#STEADY} owned by nobody, and from {@link Phase#NEW_ONLY} or {@link Phase#CLEANUP}
+     * owned by {@code previousActionId} (the forward action that handed it over, owner answer 2). {@code FAST} needs
+     * base state {@code RESIDUE}, {@code SLOW} needs {@code TOMBSTONED}. Whether the windows of 11.5 still allow the
+     * mode is for the action to decide: it has the clock, the configuration and the estimate.
+     */
+    public Result withBegunReverse(TableId logical, ByteBuffer key, UUID actionId, UUID previousActionId, KeyState.ReverseMode mode,
+                                   String gateRefusal, Epoch epoch, long nowMillis)
+    {
+        if (logical == null || key == null || actionId == null || mode == null)
+            return reject("missing argument");
+        String missing = lookup(logical, key);
+        if (missing != null)
+            return reject(missing);
+        TableLayout layout = byLogical.get(logical);
+        KeyState state = layout.keyState(key);
+        switch (state.phase)
+        {
+            case STEADY:
+                if (state.actionId != null)
+                    return reject("key is in " + Phase.STEADY + " and still owned by action " + state.actionId + ", its base tombstone is not yet written");
+                if (previousActionId != null)
+                    return reject("key is in " + Phase.STEADY + " and owned by no action, not by " + previousActionId);
+                break;
+            case NEW_ONLY:
+            case CLEANUP:
+                if (state.actionId == null || !state.actionId.equals(previousActionId))
+                    return reject("key is in phase " + state.phase + " and owned by action " + state.actionId + ", not " + previousActionId);
+                break;
+            default:
+                return reject("key is in phase " + state.phase + ", BeginUnsplit needs " + Phase.STEADY + ", " + Phase.NEW_ONLY + " or " + Phase.CLEANUP);
+        }
+        if (mode == KeyState.ReverseMode.FAST && state.baseState != KeyState.BaseState.RESIDUE)
+            return reject("fast mode needs the base partition in state RESIDUE, it is " + state.baseState);
+        if (mode == KeyState.ReverseMode.SLOW && state.baseState != KeyState.BaseState.TOMBSTONED)
+            return reject("slow mode needs the base partition in state TOMBSTONED, it is " + state.baseState);
+        LayoutRegistry target;
+        try
+        {
+            target = upgraded(gateRefusal);
+        }
+        catch (IllegalStateException e)
+        {
+            return reject(e.getMessage());
+        }
+        return target.changed(logical, layout.withKey(key, state.reverseBegun(mode, actionId, epoch, nowMillis)));
     }
 
     /**
@@ -344,26 +483,31 @@ public final class LayoutRegistry
             return reject("the reconcile generation of the key has not started");
         if (replicas.isEmpty())
             return reject("the key has no natural replica in the placement");
-        Set<NodeId> unreported = new TreeSet<>(replicas);
-        unreported.removeAll(state.backfillDone);
-        if (!unreported.isEmpty())
-        {
-            StringBuilder ids = new StringBuilder();
-            for (NodeId node : unreported)
-                ids.append(ids.length() == 0 ? "" : ", ").append(node.id());
-            return reject("natural replicas [" + ids + "] have not reported reconcile generation " + state.generation);
-        }
+        String unreported = unreported(replicas, state);
+        if (unreported != null)
+            return reject(unreported);
         return changed(logical, layout.withKey(key, state.finished(epoch, nowMillis)));
     }
 
-    /**
-     * {@code ReleaseKey}: the key must be {@link Phase#STEADY} and owned by {@code actionId}, whose base partition
-     * tombstone is written; it becomes owned by nobody. Already owned by nobody: unchanged.
-     */
+    /** {@code ReleaseKey} of a key whose base partition tombstone was written at an unknown time (the format 1 form). */
     public Result withReleasedKey(TableId logical, ByteBuffer key, UUID actionId)
     {
-        if (logical == null || key == null || actionId == null)
+        return withReleasedKey(logical, key, actionId, KeyState.BaseState.TOMBSTONED, 0, null);
+    }
+
+    /**
+     * {@code ReleaseKey}: the key must be {@link Phase#STEADY} and owned by {@code actionId}; it becomes owned by
+     * nobody, with the base state the owner reports: {@code TOMBSTONED} (its base partition tombstone is written, at
+     * {@code tombstoneMicros}, 0 if unknown) or {@code RESIDUE} (none is, {@code tombstoneMicros} must be 0). Already
+     * owned by nobody: unchanged. Anything but {@code TOMBSTONED} with an unknown time is not a format 1 value, and
+     * upgrades the registry to format 2 ({@code gateRefusal} as in {@link #withBegunReverse}).
+     */
+    public Result withReleasedKey(TableId logical, ByteBuffer key, UUID actionId, KeyState.BaseState baseState, long tombstoneMicros, String gateRefusal)
+    {
+        if (logical == null || key == null || actionId == null || baseState == null)
             return reject("missing argument");
+        if (tombstoneMicros < 0 || (baseState == KeyState.BaseState.RESIDUE && tombstoneMicros != 0))
+            return reject("base state " + baseState + " cannot have a tombstone time of " + tombstoneMicros);
         String missing = lookup(logical, key);
         if (missing != null)
             return reject(missing);
@@ -375,12 +519,24 @@ public final class LayoutRegistry
             return new Result(this, null, true);
         if (!actionId.equals(state.actionId))
             return reject("key is owned by action " + state.actionId + ", not " + actionId);
-        return changed(logical, layout.withKey(key, state.withoutAction()));
+        LayoutRegistry target = this;
+        if (baseState != KeyState.BaseState.TOMBSTONED || tombstoneMicros != 0)
+        {
+            try
+            {
+                target = upgraded(gateRefusal);
+            }
+            catch (IllegalStateException e)
+            {
+                return reject(e.getMessage());
+            }
+        }
+        return target.changed(logical, layout.withKey(key, state.released(baseState, tombstoneMicros)));
     }
 
     /**
-     * A key past its commit point ({@link Phase#NEW_ONLY}, {@link Phase#CLEANUP}, or {@link Phase#STEADY} without
-     * its base partition tombstone) owned by the action, as {@code ks.table key 0x..}; null if there is none.
+     * A key past its commit point ({@link Phase#NEW_ONLY}, {@link Phase#CLEANUP}, {@link Phase#BASE_ONLY},
+     * {@link Phase#REVERSE_CLEANUP}, or {@link Phase#STEADY} without its base partition tombstone) owned by the action, as {@code ks.table key 0x..}; null if there is none.
      */
     public String postCommitKeyOwnedBy(UUID actionId)
     {
@@ -390,7 +546,8 @@ public final class LayoutRegistry
             for (Map.Entry<ByteBuffer, KeyState> e : layout.keys.entrySet())
             {
                 KeyState state = e.getValue();
-                if (actionId.equals(state.actionId) && state.phase.coordinatorClass == 3)
+                if (actionId.equals(state.actionId) && (state.phase == Phase.NEW_ONLY || state.phase == Phase.CLEANUP || state.phase == Phase.STEADY
+                                                        || state.phase == Phase.BASE_ONLY || state.phase == Phase.REVERSE_CLEANUP))
                     return layout.keyspace + '.' + layout.logicalName + " key 0x" + ByteBufferUtil.bytesToHex(e.getKey()) + " in " + state.phase;
             }
         return null;
@@ -434,26 +591,26 @@ public final class LayoutRegistry
 
     static void serialize(LayoutRegistry r, DataOutputPlus out, Version version) throws IOException
     {
-        if (r.formatVersion != FORMAT_VERSION)
+        if (r.formatVersion != FORMAT_VERSION && r.formatVersion != FORMAT_VERSION_2)
             throw new IOException("Cannot write autonomic layout registry format " + r.formatVersion);
         out.writeUnsignedVInt32(r.formatVersion);
         out.writeUnsignedVInt32(r.byLogical.size());
         for (TableLayout layout : r.byLogical.values())
-            TableLayout.serialize(layout, out, version);
+            TableLayout.serialize(layout, out, version, r.formatVersion);
     }
 
     static LayoutRegistry deserialize(DataInputPlus in, Version version) throws IOException
     {
         int format = in.readUnsignedVInt32();
-        if (format != FORMAT_VERSION)
-            throw new IOException("Unknown autonomic layout registry format " + format + "; this node reads format " + FORMAT_VERSION);
+        if (format != FORMAT_VERSION && format != FORMAT_VERSION_2)
+            throw new IOException("Unknown autonomic layout registry format " + format + "; this node reads formats " + FORMAT_VERSION + " and " + FORMAT_VERSION_2);
         int count = in.readUnsignedVInt32();
         if (count < 0 || count > MAX_LAYOUTS)
             throw new IOException("Corrupt autonomic layout registry: " + count + " layouts");
         ImmutableMap.Builder<TableId, TableLayout> layouts = ImmutableMap.builder();
         for (int i = 0; i < count; i++)
         {
-            TableLayout layout = TableLayout.deserialize(in, version);
+            TableLayout layout = TableLayout.deserialize(in, version, format);
             layouts.put(layout.logical, layout);
         }
         return new LayoutRegistry(format, layouts.build());
@@ -463,7 +620,7 @@ public final class LayoutRegistry
     {
         long size = TypeSizes.sizeofUnsignedVInt(r.formatVersion) + TypeSizes.sizeofUnsignedVInt(r.byLogical.size());
         for (TableLayout layout : r.byLogical.values())
-            size += TableLayout.serializedSize(layout, version);
+            size += TableLayout.serializedSize(layout, version, r.formatVersion);
         return size;
     }
 }

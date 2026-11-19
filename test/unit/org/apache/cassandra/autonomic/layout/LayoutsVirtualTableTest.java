@@ -92,6 +92,29 @@ public class LayoutsVirtualTableTest extends CQLTester
     }
 
     @Test
+    public void baseStateFrozenSinceAndReverseModeAreShown() throws Throwable
+    {
+        // a legacy key: the base state decodes from the phase, nothing is frozen or reversed
+        METADATA.set(LayoutTransformationTest.keyIn(Phase.STEADY));
+        assertRows(execute("SELECT phase, base_state, frozen_since, reverse_mode FROM " + KS + ".autonomic_layouts"),
+                   row("STEADY", "TOMBSTONED", null, null));
+        METADATA.set(LayoutTransformationTest.keyIn(Phase.BACKFILL));
+        assertRows(execute("SELECT phase, base_state, frozen_since, reverse_mode FROM " + KS + ".autonomic_layouts"),
+                   row("BACKFILL", "RESIDUE", null, null));
+
+        // a key in a reverse phase of format 2
+        ClusterMetadata md = LayoutTransformationTest.start();
+        org.apache.cassandra.tcm.Epoch e = md.epoch.nextEpoch();
+        KeyState state = new KeyState(Phase.REVERSE_BACKFILL, e, 1000, 1, 2, e, ImmutableSet.of(), LayoutTransformationTest.A, 400, ImmutableSet.of(),
+                                      KeyState.BaseState.TOMBSTONED, 9000, 77, KeyState.ReverseMode.SLOW, 500);
+        TableLayout layout = new TableLayout(LayoutTransformationTest.header(), 2, com.google.common.collect.ImmutableMap.of(LayoutTransformationTest.K1, state), 5);
+        METADATA.set(md.transformer().with(LayoutRegistryValue.KEY, new LayoutRegistryValue(
+            new LayoutRegistry(LayoutRegistry.FORMAT_VERSION_2, com.google.common.collect.ImmutableMap.of(LayoutTransformationTest.LOGICAL, layout)))).build().metadata);
+        assertRows(execute("SELECT phase, base_state, frozen_since, reverse_mode FROM " + KS + ".autonomic_layouts"),
+                   row("REVERSE_BACKFILL", "TOMBSTONED", new Date(9000), "SLOW"));
+    }
+
+    @Test
     public void orphanWhenTheLogicalTableIsGone() throws Throwable
     {
         ClusterMetadata md = LayoutTransformationTest.keyIn(Phase.STEADY);

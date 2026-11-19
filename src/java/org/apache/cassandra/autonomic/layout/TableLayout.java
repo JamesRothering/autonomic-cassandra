@@ -150,6 +150,14 @@ public final class TableLayout
         return new TableLayout(added.header(), nextIncarnation + 1, added.keys, added.version);
     }
 
+    /** This layout with every key as a format 1 value would decode it (see {@link KeyState#asLegacy}). */
+    TableLayout asLegacy()
+    {
+        ImmutableSortedMap.Builder<ByteBuffer, KeyState> map = ImmutableSortedMap.naturalOrder();
+        keys.forEach((k, s) -> map.put(k, s.asLegacy()));
+        return new TableLayout(header(), nextIncarnation, map.build(), version);
+    }
+
     /** This layout without the key; the version grows by one. The result may have no keys. */
     TableLayout withoutKey(ByteBuffer key)
     {
@@ -195,7 +203,7 @@ public final class TableLayout
         return sb.append("}}").toString();
     }
 
-    static void serialize(TableLayout l, DataOutputPlus out, Version version) throws IOException
+    static void serialize(TableLayout l, DataOutputPlus out, Version version, int format) throws IOException
     {
         LayoutHeader.serialize(l.header(), out);
         out.writeUnsignedVInt32(l.nextIncarnation);
@@ -205,11 +213,11 @@ public final class TableLayout
         {
             out.writeUnsignedVInt32(e.getKey().remaining());
             out.write(e.getKey().duplicate());
-            KeyState.serialize(e.getValue(), out, version);
+            KeyState.serialize(e.getValue(), out, version, format);
         }
     }
 
-    static TableLayout deserialize(DataInputPlus in, Version version) throws IOException
+    static TableLayout deserialize(DataInputPlus in, Version version, int format) throws IOException
     {
         LayoutHeader header = LayoutHeader.deserialize(in);
         int nextIncarnation = in.readUnsignedVInt32();
@@ -225,7 +233,7 @@ public final class TableLayout
                 throw new IOException("Corrupt autonomic layout registry: partition key of " + length + " bytes");
             byte[] bytes = new byte[length];
             in.readFully(bytes);
-            keys.put(ByteBuffer.wrap(bytes), KeyState.deserialize(in, version));
+            keys.put(ByteBuffer.wrap(bytes), KeyState.deserialize(in, version, format));
         }
         try
         {
@@ -237,12 +245,12 @@ public final class TableLayout
         }
     }
 
-    static long serializedSize(TableLayout l, Version version)
+    static long serializedSize(TableLayout l, Version version, int format)
     {
         long size = LayoutHeader.serializedSize(l.header()) + TypeSizes.sizeofUnsignedVInt(l.nextIncarnation)
                     + TypeSizes.sizeofUnsignedVInt(l.version) + TypeSizes.sizeofUnsignedVInt(l.keys.size());
         for (Map.Entry<ByteBuffer, KeyState> e : l.keys.entrySet())
-            size += TypeSizes.sizeofUnsignedVInt(e.getKey().remaining()) + e.getKey().remaining() + KeyState.serializedSize(e.getValue(), version);
+            size += TypeSizes.sizeofUnsignedVInt(e.getKey().remaining()) + e.getKey().remaining() + KeyState.serializedSize(e.getValue(), version, format);
         return size;
     }
 }

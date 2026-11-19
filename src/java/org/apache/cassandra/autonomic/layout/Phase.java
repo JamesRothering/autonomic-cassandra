@@ -37,7 +37,16 @@ public enum Phase
     CLEANUP(6, 3),
     STEADY(7, 3),
     ROLLBACK_DUAL(8, 1),
-    ABORTING(9, 0);
+    ABORTING(9, 0),
+    // the reverse path (adaptive-schema 11.4); the classes are those of the forward phase each one mirrors
+    REVERSE_ANNOUNCED(10, 3),
+    REVERSE_DUAL_WRITE(11, 2),
+    REVERSE_BACKFILL(12, 2),
+    REVERSE_VERIFY(13, 2),
+    CUTBACK(14, 1),
+    BASE_ONLY(15, 0),
+    REVERSE_CLEANUP(16, 0),
+    REVERSE_ROLLBACK(17, 2);
 
     public final int id;
     /** 0 to 3: C0 to C3 of design 3.2. */
@@ -68,6 +77,16 @@ public enum Phase
         TRANSITIONS.put(STEADY, EnumSet.noneOf(Phase.class));
         TRANSITIONS.put(ROLLBACK_DUAL, EnumSet.of(ABORTING));
         TRANSITIONS.put(ABORTING, EnumSet.noneOf(Phase.class));
+        // 11.4. {@code STEADY -> REVERSE_ANNOUNCED} (also from NEW_ONLY and CLEANUP) is BeginUnsplit, and
+        // REVERSE_CLEANUP -> absent is RemoveKey; neither is an AdvanceLayout transition.
+        TRANSITIONS.put(REVERSE_ANNOUNCED, EnumSet.of(REVERSE_DUAL_WRITE, STEADY));
+        TRANSITIONS.put(REVERSE_DUAL_WRITE, EnumSet.of(REVERSE_BACKFILL, STEADY));
+        TRANSITIONS.put(REVERSE_BACKFILL, EnumSet.of(REVERSE_VERIFY, STEADY));
+        TRANSITIONS.put(REVERSE_VERIFY, EnumSet.of(CUTBACK, REVERSE_BACKFILL, STEADY));
+        TRANSITIONS.put(CUTBACK, EnumSet.of(BASE_ONLY, REVERSE_ROLLBACK));
+        TRANSITIONS.put(BASE_ONLY, EnumSet.of(REVERSE_CLEANUP));
+        TRANSITIONS.put(REVERSE_CLEANUP, EnumSet.noneOf(Phase.class));
+        TRANSITIONS.put(REVERSE_ROLLBACK, EnumSet.of(STEADY));
     }
 
     /** True if {@code from -> to} (different phases) is a transition of the table. */
@@ -79,13 +98,28 @@ public enum Phase
     /** True if a phase may be re-entered with the next generation ({@code X -> X}, a backfill restart). */
     public boolean restartable()
     {
-        return this == BACKFILL || this == CLEANUP;
+        return this == BACKFILL || this == CLEANUP || this == REVERSE_ANNOUNCED || this == REVERSE_BACKFILL || this == REVERSE_CLEANUP;
     }
 
     /** True if {@code ReportBackfill} is accepted in this phase. */
     public boolean acceptsBackfillReports()
     {
-        return this == BACKFILL || this == CLEANUP;
+        return restartable();
+    }
+
+    /** True for the phases of the reverse path (design 11.4), {@code STEADY} excluded. */
+    public boolean isReverse()
+    {
+        return id >= REVERSE_ANNOUNCED.id;
+    }
+
+    /**
+     * True if the key is past its commit point, so that the owning action no longer aborts: forward {@code NEW_ONLY}
+     * and {@code CLEANUP}, and {@code BASE_ONLY} and {@code REVERSE_CLEANUP}, the reverse commit and its cleanup.
+     */
+    public boolean pastCommit()
+    {
+        return this == NEW_ONLY || this == CLEANUP || this == BASE_ONLY || this == REVERSE_CLEANUP;
     }
 
     /** Null if the id is unknown. */

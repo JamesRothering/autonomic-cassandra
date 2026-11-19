@@ -37,6 +37,60 @@ import org.apache.cassandra.tcm.serialization.Version;
  */
 public final class KeyState
 {
+    /** What the base partition of the key holds (design 11.5). The {@link #id} is the serialized form. */
+    public enum BaseState
+    {
+        /** No base tombstone since the last freeze: the base partition still holds the pre-split data. */
+        RESIDUE(0),
+        /** The reclaim tombstone was written; see {@link KeyState#baseTombstoneMicros}. */
+        TOMBSTONED(1);
+
+        public final int id;
+
+        BaseState(int id)
+        {
+            this.id = id;
+        }
+
+        /** Null if the id is unknown. */
+        static BaseState fromId(int id)
+        {
+            for (BaseState s : values())
+                if (s.id == id)
+                    return s;
+            return null;
+        }
+    }
+
+    /** How a reverse migration treats the base residue (design 11.4). The {@link #id} is the serialized form. */
+    public enum ReverseMode
+    {
+        FAST(1),
+        SLOW(2);
+
+        public final int id;
+
+        ReverseMode(int id)
+        {
+            this.id = id;
+        }
+
+        /** Null if the id is unknown. */
+        static ReverseMode fromId(int id)
+        {
+            for (ReverseMode m : values())
+                if (m.id == id)
+                    return m;
+            return null;
+        }
+    }
+
+    /**
+     * {@link #frozenSinceMillis} of a key whose residue window has already closed: a time so long past that every
+     * limit derived from it has ended (design 11.4, abort of a slow reverse from a partial copy).
+     */
+    public static final long WINDOW_CLOSED_MILLIS = 1;
+
     public final Phase phase;
     /** Epoch at which this phase was committed. */
     public final Epoch phaseEpoch;
@@ -64,6 +118,16 @@ public final class KeyState
      * {@link LayoutRegistry#MAX_HINT_REPORTS}. Empty in every other phase: any transition clears it.
      */
     public final ImmutableSortedSet<NodeId> hintsClear;
+    /** Registry format 2 (design 11.5); a format 1 value decodes through {@link #legacyBaseState}. */
+    public final BaseState baseState;
+    /** Proposer time of the commit at which the key last entered C3 from a lower class; 0 if it never did. */
+    public final long frozenSinceMillis;
+    /** {@code Tt} of the reclaim tombstone, in microseconds; 0 if unknown or {@link BaseState#RESIDUE}. */
+    public final long baseTombstoneMicros;
+    /** Fixed by {@code BeginUnsplit}; null outside the reverse path. */
+    public final ReverseMode reverseMode;
+    /** Proposer time of {@link Phase#REVERSE_DUAL_WRITE}; 0 before it. */
+    public final long reverseDualSinceMillis;
 
     /** A state that never entered {@link Phase#DUAL_WRITE}, or a hand-built one for which that does not matter. */
     public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
@@ -82,6 +146,21 @@ public final class KeyState
     public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
                     Collection<NodeId> backfillDone, UUID actionId, long dualWriteSinceMillis, Collection<NodeId> hintsClear)
     {
+        this(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear,
+             legacyBaseState(phase, actionId), legacyFrozenSince(phase, actionId, dualWriteSinceMillis), 0, null, 0);
+    }
+
+    public KeyState(Phase phase, Epoch phaseEpoch, long phaseSinceMillis, int incarnation, int generation, Epoch generationEpoch,
+                    Collection<NodeId> backfillDone, UUID actionId, long dualWriteSinceMillis, Collection<NodeId> hintsClear,
+                    BaseState baseState, long frozenSinceMillis, long baseTombstoneMicros, ReverseMode reverseMode, long reverseDualSinceMillis)
+    {
+        if (frozenSinceMillis < 0 || baseTombstoneMicros < 0 || reverseDualSinceMillis < 0)
+            throw new IllegalArgumentException("frozen since, base tombstone or reverse dual write time is negative");
+        this.baseState = Objects.requireNonNull(baseState);
+        this.frozenSinceMillis = frozenSinceMillis;
+        this.baseTombstoneMicros = baseTombstoneMicros;
+        this.reverseMode = reverseMode;
+        this.reverseDualSinceMillis = reverseDualSinceMillis;
         if (dualWriteSinceMillis < 0)
             throw new IllegalArgumentException("dual write start " + dualWriteSinceMillis + " is negative");
         this.dualWriteSinceMillis = dualWriteSinceMillis;
@@ -89,8 +168,8 @@ public final class KeyState
             throw new IllegalArgumentException("incarnation " + incarnation + " is out of range");
         if (generation < 1)
             throw new IllegalArgumentException("generation " + generation + " is not positive");
-        if (backfillDone.size() > LayoutRegistry.MAX_BACKFILL_NODES)
-            throw new IllegalArgumentException("backfill_done has " + backfillDone.size() + " nodes, the limit is " + LayoutRegistry.MAX_BACKFILL_NODES);
+        if (backfillDone.size() > LayoutRegistry.maxBackfillReports(phase))
+            throw new IllegalArgumentException("backfill_done has " + backfillDone.size() + " nodes, the limit is " + LayoutRegistry.maxBackfillReports(phase) + " in " + phase);
         this.phase = Objects.requireNonNull(phase);
         this.phaseEpoch = Objects.requireNonNull(phaseEpoch);
         this.phaseSinceMillis = phaseSinceMillis;
@@ -113,47 +192,125 @@ public final class KeyState
     }
 
     /**
+     * Format 1 carried no base state (design 11.5). A released {@code STEADY} key decodes as {@code TOMBSTONED}: today
+     * {@code ReleaseKey} follows the tombstone. Any other key has not written one.
+     */
+    static BaseState legacyBaseState(Phase phase, UUID actionId)
+    {
+        return phase == Phase.STEADY && actionId == null ? BaseState.TOMBSTONED : BaseState.RESIDUE;
+    }
+
+    /**
+     * An owned {@code STEADY}, {@code NEW_ONLY} or {@code CLEANUP} key decodes with {@code frozenSince} = its dual write
+     * start, earlier than the real freeze and therefore conservative. A released {@code STEADY} key has no use for it,
+     * and gets the same. Keys that never reached C3 are not frozen.
+     */
+    static long legacyFrozenSince(Phase phase, UUID actionId, long dualWriteSinceMillis)
+    {
+        return phase == Phase.NEW_ONLY || phase == Phase.CLEANUP || phase == Phase.STEADY ? dualWriteSinceMillis : 0;
+    }
+
+    /** This state as a format 1 value would decode it: nothing a format 1 value cannot carry is kept. */
+    KeyState asLegacy()
+    {
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear);
+    }
+
+    /**
      * The state after moving to {@code to}; a different {@code generation} clears {@link #backfillDone}, and every
-     * transition clears {@link #hintsClear}.
+     * transition clears {@link #hintsClear}. Leaving the reverse path clears {@link #backfillDone} too (the report set
+     * is larger there, 11.8).
+     *
+     * <p>Base state (design 11.5): entering C3 from a lower class sets {@link #frozenSinceMillis}; entering
+     * {@link Phase#REVERSE_DUAL_WRITE} sets {@link #reverseDualSinceMillis}; and an abort of the reverse to
+     * {@link Phase#STEADY} sets the base state by the abort rules of 11.4:
+     * <ul>
+     * <li>from {@code REVERSE_ANNOUNCED}: unchanged (nothing was copied);
+     * <li>from {@code REVERSE_VERIFY} or {@code REVERSE_ROLLBACK} (the generation was complete): {@code RESIDUE} frozen now;
+     * <li>from {@code REVERSE_DUAL_WRITE} or {@code REVERSE_BACKFILL}: {@code RESIDUE}, in fast mode with the old
+     * {@code frozenSince}, in slow mode with the window closed.
+     * </ul>
      */
     KeyState advanced(Phase to, int toGeneration, Epoch epoch, long nowMillis)
     {
         boolean restarted = toGeneration != generation;
+        boolean clearDone = restarted || (phase.isReverse() && !to.isReverse());
+        BaseState base = baseState;
+        long frozen = frozenSinceMillis;
+        long tombstone = baseTombstoneMicros;
+        if (to.coordinatorClass == 3 && phase.coordinatorClass < 3)
+            frozen = nowMillis;
+        ReverseMode mode = reverseMode;
+        long dual = reverseDualSinceMillis;
+        if (to == Phase.REVERSE_DUAL_WRITE && phase == Phase.REVERSE_ANNOUNCED)
+            dual = nowMillis;
+        if (to == Phase.STEADY && phase.isReverse())
+        {
+            if (phase != Phase.REVERSE_ANNOUNCED)
+            {
+                base = BaseState.RESIDUE;
+                tombstone = 0;
+                if (phase == Phase.REVERSE_VERIFY || phase == Phase.REVERSE_ROLLBACK)
+                    frozen = nowMillis;
+                else if (reverseMode == ReverseMode.SLOW)
+                    frozen = WINDOW_CLOSED_MILLIS;
+                else
+                    frozen = frozenSinceMillis;
+            }
+            mode = null;
+            dual = 0;
+        }
         return new KeyState(to, epoch, nowMillis, incarnation, toGeneration, restarted ? epoch : generationEpoch,
-                            restarted ? ImmutableSortedSet.<NodeId>of() : backfillDone, actionId,
-                            to == Phase.DUAL_WRITE && phase == Phase.ANNOUNCED ? nowMillis : dualWriteSinceMillis);
+                            clearDone ? ImmutableSortedSet.<NodeId>of() : backfillDone, actionId,
+                            to == Phase.DUAL_WRITE && phase == Phase.ANNOUNCED ? nowMillis : dualWriteSinceMillis, ImmutableSortedSet.of(),
+                            base, frozen, tombstone, mode, dual);
+    }
+
+    /**
+     * {@code BeginUnsplit} (design 11.4): {@link Phase#REVERSE_ANNOUNCED} owned by {@code newActionId}, in a new
+     * generation (a slow reverse collects its purge reports in it), with {@code mode}. The base state is kept.
+     */
+    KeyState reverseBegun(ReverseMode mode, UUID newActionId, Epoch epoch, long nowMillis)
+    {
+        return new KeyState(Phase.REVERSE_ANNOUNCED, epoch, nowMillis, incarnation, generation + 1, epoch, ImmutableSortedSet.of(), newActionId,
+                            dualWriteSinceMillis, ImmutableSortedSet.of(), baseState, frozenSinceMillis, baseTombstoneMicros, mode, 0);
     }
 
     KeyState withBackfillDone(NodeId node)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch,
-                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis, hintsClear);
+                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(backfillDone).add(node).build(), actionId, dualWriteSinceMillis, hintsClear,
+                            baseState, frozenSinceMillis, baseTombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
     /** {@code ReportHints} (ADR-035): the node holds no hint created before the split for the key's replicas. */
     KeyState withHintsClear(NodeId node)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis,
-                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(hintsClear).add(node).build());
+                            ImmutableSortedSet.<NodeId>naturalOrder().addAll(hintsClear).add(node).build(),
+                            baseState, frozenSinceMillis, baseTombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
     /** The same state owned by another action ({@code AdoptKey}). */
     KeyState withAction(UUID newActionId)
     {
         return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone,
-                            Objects.requireNonNull(newActionId), dualWriteSinceMillis, hintsClear);
+                            Objects.requireNonNull(newActionId), dualWriteSinceMillis, hintsClear,
+                            baseState, frozenSinceMillis, baseTombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
     /** {@link Phase#STEADY}, still owned by the action until its base partition tombstone is written. */
     KeyState finished(Epoch epoch, long nowMillis)
     {
-        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis);
+        return new KeyState(Phase.STEADY, epoch, nowMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis,
+                            ImmutableSortedSet.of(), baseState, frozenSinceMillis, baseTombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
-    /** The same state owned by no action ({@code ReleaseKey}). */
-    KeyState withoutAction()
+    /** The same state owned by no action ({@code ReleaseKey}), with the base state the owner reports. */
+    KeyState released(BaseState base, long tombstoneMicros)
     {
-        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis);
+        return new KeyState(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, null, dualWriteSinceMillis,
+                            hintsClear, base, frozenSinceMillis, tombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
     /**
@@ -164,6 +321,33 @@ public final class KeyState
     public boolean backfillDue()
     {
         return phase == Phase.BACKFILL || (phase == Phase.CLEANUP && generationEpoch.equals(phaseEpoch));
+    }
+
+    /**
+     * True if {@code ReportBackfill} counts for the current generation: {@link #backfillDue()} in the forward phases;
+     * in {@link Phase#REVERSE_ANNOUNCED} (the purge reports of a slow reverse) and {@link Phase#REVERSE_BACKFILL}
+     * always; in {@link Phase#REVERSE_CLEANUP} only for a generation that was started there, the reconcile pass.
+     * Deliberately not {@link #backfillDue()}: that is the replicas' forward pass, which must never run in a reverse
+     * phase (the reverse pass is a different task).
+     */
+    public boolean reportsDue()
+    {
+        return backfillDue() || phase == Phase.REVERSE_BACKFILL || phase == Phase.REVERSE_ANNOUNCED
+               || (phase == Phase.REVERSE_CLEANUP && generationEpoch.equals(phaseEpoch));
+    }
+
+    /**
+     * The time after which no replica writes a reverse backfill or reconcile chunk into base (invariants I16, I18;
+     * design 11.5), with {@code G = gc_grace_seconds / 2} and {@code wt} the write timeout. Fast mode:
+     * {@code min(frozenSince, reverseDualSince) + G - wt}; slow mode: {@code reverseDualSince + G - wt}.
+     * {@code Long.MIN_VALUE} before {@code REVERSE_DUAL_WRITE}: nothing may be written.
+     */
+    public long reverseReplicaLimitMillis(int gcGraceSeconds, long writeTimeoutMillis)
+    {
+        if (reverseDualSinceMillis <= 0)
+            return Long.MIN_VALUE;
+        long start = reverseMode == ReverseMode.SLOW || frozenSinceMillis <= 0 ? reverseDualSinceMillis : Math.min(frozenSinceMillis, reverseDualSinceMillis);
+        return start + gcGraceSeconds * 1000L / 2 - writeTimeoutMillis;
     }
 
     /**
@@ -187,13 +371,15 @@ public final class KeyState
         return phase == k.phase && phaseEpoch.equals(k.phaseEpoch) && phaseSinceMillis == k.phaseSinceMillis
                && incarnation == k.incarnation && generation == k.generation && generationEpoch.equals(k.generationEpoch)
                && backfillDone.equals(k.backfillDone) && Objects.equals(actionId, k.actionId) && dualWriteSinceMillis == k.dualWriteSinceMillis
-               && hintsClear.equals(k.hintsClear);
+               && hintsClear.equals(k.hintsClear) && baseState == k.baseState && frozenSinceMillis == k.frozenSinceMillis
+               && baseTombstoneMicros == k.baseTombstoneMicros && reverseMode == k.reverseMode && reverseDualSinceMillis == k.reverseDualSinceMillis;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear);
+        return Objects.hash(phase, phaseEpoch, phaseSinceMillis, incarnation, generation, generationEpoch, backfillDone, actionId, dualWriteSinceMillis, hintsClear,
+                            baseState, frozenSinceMillis, baseTombstoneMicros, reverseMode, reverseDualSinceMillis);
     }
 
     @Override
@@ -201,10 +387,12 @@ public final class KeyState
     {
         return "KeyState{" + phase + " phaseEpoch=" + phaseEpoch.getEpoch() + " since=" + phaseSinceMillis + " incarnation=" + incarnation
                + " generation=" + generation + " generationEpoch=" + generationEpoch.getEpoch() + " backfillDone=" + backfillDone
-               + " action=" + actionId + " dualWriteSince=" + dualWriteSinceMillis + (hintsClear.isEmpty() ? "" : " hintsClear=" + hintsClear) + '}';
+               + " action=" + actionId + " dualWriteSince=" + dualWriteSinceMillis + (hintsClear.isEmpty() ? "" : " hintsClear=" + hintsClear)
+               + " base=" + baseState + " frozenSince=" + frozenSinceMillis + " tt=" + baseTombstoneMicros
+               + (reverseMode == null ? "" : " reverse=" + reverseMode + " reverseDualSince=" + reverseDualSinceMillis) + '}';
     }
 
-    static void serialize(KeyState k, DataOutputPlus out, Version version) throws IOException
+    static void serialize(KeyState k, DataOutputPlus out, Version version, int format) throws IOException
     {
         out.writeByte(k.phase.id);
         Epoch.serializer.serialize(k.phaseEpoch, out, version);
@@ -225,9 +413,17 @@ public final class KeyState
         out.writeUnsignedVInt32(k.hintsClear.size());
         for (NodeId node : k.hintsClear)
             NodeId.serializer.serialize(node, out, version);
+        if (format >= 2)
+        {
+            out.writeByte(k.baseState.id);
+            out.writeLong(k.frozenSinceMillis);
+            out.writeLong(k.baseTombstoneMicros);
+            out.writeByte(k.reverseMode == null ? 0 : k.reverseMode.id);
+            out.writeLong(k.reverseDualSinceMillis);
+        }
     }
 
-    static KeyState deserialize(DataInputPlus in, Version version) throws IOException
+    static KeyState deserialize(DataInputPlus in, Version version, int format) throws IOException
     {
         int phaseId = in.readByte();
         Phase phase = Phase.fromId(phaseId);
@@ -239,7 +435,7 @@ public final class KeyState
         int generation = in.readUnsignedVInt32();
         Epoch generationEpoch = Epoch.serializer.deserialize(in, version);
         int nodes = in.readUnsignedVInt32();
-        if (nodes < 0 || nodes > LayoutRegistry.MAX_BACKFILL_NODES)
+        if (nodes < 0 || nodes > LayoutRegistry.maxBackfillReports(phase))
             throw new IOException("Corrupt autonomic layout registry: " + nodes + " backfill nodes");
         ImmutableSortedSet.Builder<NodeId> done = ImmutableSortedSet.naturalOrder();
         for (int i = 0; i < nodes; i++)
@@ -254,7 +450,17 @@ public final class KeyState
             hintsClear.add(NodeId.serializer.deserialize(in, version));
         try
         {
-            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince, hintsClear.build());
+            if (format < 2)
+                return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince, hintsClear.build());
+            BaseState base = BaseState.fromId(in.readByte());
+            long frozenSince = in.readLong();
+            long tombstone = in.readLong();
+            int modeId = in.readByte();
+            ReverseMode mode = modeId == 0 ? null : ReverseMode.fromId(modeId);
+            if (base == null || (modeId != 0 && mode == null))
+                throw new IOException("Corrupt autonomic layout registry: unknown base state or reverse mode");
+            return new KeyState(phase, phaseEpoch, since, incarnation, generation, generationEpoch, done.build(), actionId, dualWriteSince, hintsClear.build(),
+                                base, frozenSince, tombstone, mode, in.readLong());
         }
         catch (IllegalArgumentException e)
         {
@@ -262,7 +468,7 @@ public final class KeyState
         }
     }
 
-    static long serializedSize(KeyState k, Version version)
+    static long serializedSize(KeyState k, Version version, int format)
     {
         long size = 1 + Epoch.serializer.serializedSize(k.phaseEpoch, version) + Long.BYTES
                     + TypeSizes.sizeofUnsignedVInt(k.incarnation) + TypeSizes.sizeofUnsignedVInt(k.generation)
@@ -272,6 +478,6 @@ public final class KeyState
         size += 1 + (k.actionId == null ? 0 : 2 * Long.BYTES) + Long.BYTES + TypeSizes.sizeofUnsignedVInt(k.hintsClear.size());
         for (NodeId node : k.hintsClear)
             size += NodeId.serializer.serializedSize(node, version);
-        return size;
+        return format >= 2 ? size + 1 + Long.BYTES + Long.BYTES + 1 + Long.BYTES : size;
     }
 }

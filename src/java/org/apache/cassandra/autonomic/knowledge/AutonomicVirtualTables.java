@@ -439,6 +439,9 @@ public final class AutonomicVirtualTables
                                .addRegularColumn("backfill_done", SetType.getInstance(UUIDType.instance, false))
                                .addRegularColumn("action_id", UUIDType.instance)
                                .addRegularColumn("orphan", BooleanType.instance)
+                               .addRegularColumn("base_state", UTF8Type.instance)
+                               .addRegularColumn("frozen_since", TimestampType.instance)
+                               .addRegularColumn("reverse_mode", UTF8Type.instance)
                                .build());
             this.source = source;
         }
@@ -474,7 +477,10 @@ public final class AutonomicVirtualTables
                           .column("generation_epoch", key.generationEpoch.getEpoch())
                           .column("backfill_done", done)
                           .column("action_id", key.actionId)
-                          .column("orphan", orphan);
+                          .column("orphan", orphan)
+                          .column("base_state", key.baseState.name())
+                          .column("frozen_since", key.frozenSinceMillis > 0 ? new Date(key.frozenSinceMillis) : null)
+                          .column("reverse_mode", key.reverseMode == null ? null : key.reverseMode.name());
                 }
             }
             return result;

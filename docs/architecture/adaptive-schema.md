@@ -974,6 +974,15 @@ Legacy values (format 1) decode as follows:
 - A released `STEADY` key decodes as `TOMBSTONED` with `Tt` unknown. Today `ReleaseKey` follows the tombstone, so the tombstone exists. Its time is learned by the probe, which reads each replica's partition deletion. `STEADY.phaseSinceMillis` is not a safe bound: an adopted key gets a later `Tt` (11.9).
 - An owned `STEADY`, `NEW_ONLY` or `CLEANUP` key decodes as `RESIDUE` with `frozenSince = dualWriteSinceMillis`, which is earlier than the real freeze and therefore conservative.
 
+**As built in T6.17a.**
+- Format. `LayoutRegistry.FORMAT_VERSION` (1) stays the legacy format, `FORMAT_VERSION_2` adds the five fields after `hintsClear`. A registry is written in the format it holds. A format 1 registry never holds more than a format 1 value can: every change to it is normalised to the legacy decoding above, so a node that replays the log and a node that restores a snapshot agree. The forward path therefore keeps its behaviour; `frozenSince` is recorded only in a format 2 registry.
+- Upgrade gate. The registry becomes format 2 only in a transformation that needs it: `BeginUnsplit`, or a `ReleaseKey` that carries more than a format 1 release means (`RESIDUE`, or a known `Tt`). It is rejected, with no registry change, unless `directory.clusterMinVersion` is at least `LayoutRegistry.FORMAT_2_MIN_RELEASE` (the lower bound of the 7.0 family; to be set to the first release that contains T6.17a when it is cut). A `ReleaseKey` that means what it always meant is still written in its format 1 form, so an old node reads it.
+- `BeginUnsplit(actionId, owner, step, logical, key, mode, previousActionId)`: from an unowned `STEADY` (`previousActionId` null), or from `NEW_ONLY`/`CLEANUP` owned by `previousActionId`, which must hold no claim (as `AdoptKey`). `FAST` needs `RESIDUE`, `SLOW` needs `TOMBSTONED`. It starts generation + 1 (the generation of the purge reports) and keeps the base state. Whether the windows of 11.5 still allow the mode is the action's check: the registry has no clock or configuration.
+- Abort to `STEADY` (the rules of 11.4) is computed in `KeyState.advanced`. A closed window is `frozenSince = WINDOW_CLOSED_MILLIS` (1). Leaving the reverse path clears `backfillDone`.
+- `ReportBackfill` counts in `REVERSE_ANNOUNCED` and `REVERSE_BACKFILL` for the current generation and in `REVERSE_CLEANUP` for the reconcile generation (`KeyState.reportsDue`). `backfillDue`, which drives the replicas' forward pass, is unchanged and is false in every reverse phase. In reverse phases `backfillDone` is bounded by `MAX_HINT_REPORTS`, in the others by `MAX_BACKFILL_NODES`.
+- `RemoveKey` also accepts `REVERSE_CLEANUP`, when every natural replica of every bucket token of the incarnation (`NaturalReplicas.ofBuckets`) has reported the reconcile generation.
+- `KeyState.reverseReplicaLimitMillis` implements the replica limits of the table below; the owner's windows are T6.17f.
+
 **Limits.** `G = gc_grace_seconds * 1000 / 2`, `wt` = write timeout.
 
 | Limit | Value |
