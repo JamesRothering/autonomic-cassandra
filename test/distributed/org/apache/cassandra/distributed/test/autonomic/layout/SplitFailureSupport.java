@@ -171,6 +171,17 @@ public abstract class SplitFailureSupport extends TestBaseImpl
         };
     }
 
+    /** As {@link #config}, with the partition_unsplit actuator enabled too (T6.17k). */
+    static Consumer<IInstanceConfig> unsplitConfig(Set<Integer> enabled, Map<String, Object> layout, Map<String, Object> extra)
+    {
+        Consumer<IInstanceConfig> base = config(enabled, layout, extra);
+        return c -> {
+            base.accept(c);
+            if (enabled.contains(c.num()))
+                c.set("autonomic.actuators", Map.of("partition_split", Map.of("enabled", true), "partition_unsplit", Map.of("enabled", true)));
+        };
+    }
+
     /** For tests that drive the registry by hand: the layer runs on node 1 only, without actuators (LayoutWritesTest). */
     static Consumer<IInstanceConfig> handConfig(Map<String, Object> layout)
     {
@@ -409,6 +420,32 @@ public abstract class SplitFailureSupport extends TestBaseImpl
         return id;
     }
 
+    /** {@code nodetool autonomic layout unsplit} on the node, approved there: the node is the owner. Returns the action id. */
+    static String unsplit(IInvokableInstance owner, String table, int key)
+    {
+        org.apache.cassandra.distributed.api.NodeToolResult unsplit = owner.nodetoolResult("autonomic", "layout", "unsplit", KS, table, hex(key));
+        String out = unsplit.getStdout() + unsplit.getStderr();
+        assertTrue(out, unsplit.getRc() == 0 && out.contains("state=PROPOSED"));
+        return approveProposal(owner, out);
+    }
+
+    /** The id of the action of {@code actuator} proposed on the node whose params contain {@code param}, once there is one. */
+    static String proposed(IInvokableInstance node, String actuator, String param) throws InterruptedException
+    {
+        String[] id = new String[1];
+        await("a proposal of " + actuator + " with " + param, () -> {
+            List<Map<String, String>> history = node.callOnInstance(() -> AutonomicService.instance.getHistory(50));
+            for (Map<String, String> r : history)
+                if ("PROPOSED".equals(r.get("state")) && actuator.equals(r.get("actuator")) && String.valueOf(r.get("params")).contains(param))
+                {
+                    id[0] = r.get("id");
+                    return true;
+                }
+            return false;
+        });
+        return id[0];
+    }
+
     /** {@code nodetool autonomic layout resume} on the node, approved there. Returns the action id. */
     static String resume(IInvokableInstance node, String table, int key)
     {
@@ -508,6 +545,11 @@ public abstract class SplitFailureSupport extends TestBaseImpl
         final List<String> mismatches = new CopyOnWriteArrayList<>();
         /** Coordinators that are up; the twin is written and read through them. */
         volatile int[] live;
+        /**
+         * False: no base-only probe row in STEADY. The probe leaves a tombstone with a timestamp a day ahead in the base
+         * residue, which a slow unsplit must never find there (it is a residue above {@code Tt}, T6.17k).
+         */
+        volatile boolean poisonProbe = true;
         private final PhaseRecorder phases;
 
         Model(Cluster cluster, String table, int key, int... live)
@@ -796,7 +838,7 @@ public abstract class SplitFailureSupport extends TestBaseImpl
             boolean steady = true;
             for (int node : nodes)
                 steady &= Phase.STEADY.name().equals(phaseOf(cluster.get(node), table, key));
-            if (steady)
+            if (steady && poisonProbe)
                 failures.addAll(poisonProbe(label));
             if (!failures.isEmpty())
                 throw new AssertionError(failures.size() + " invariant violations at " + label + ":\n" + String.join("\n", failures.subList(0, Math.min(40, failures.size()))));
@@ -972,16 +1014,41 @@ public abstract class SplitFailureSupport extends TestBaseImpl
             }
         }
 
-        /** I10: once a node was seen in NEW_ONLY or later, it is never seen in an earlier class, or absent, or going back. */
+        /**
+         * I10 (amended by 11.6): once a node was seen in NEW_ONLY or later, it is never seen in an earlier class, or
+         * absent, or going back, until it is seen in a reverse phase ({@code BeginUnsplit}); a reverse that aborts
+         * returns to STEADY, from where the rule holds again. I21: once seen in BASE_ONLY or REVERSE_CLEANUP, the node is
+         * only seen in those or with the key absent.
+         */
         List<String> violations(String label)
         {
             List<String> out = new ArrayList<>();
             for (Map.Entry<Integer, List<String>> e : seen.entrySet())
             {
                 int highest = -1;
+                boolean reverse = false;
+                boolean baseOnly = false;
                 for (String phase : e.getValue())
                 {
                     Phase p = "absent".equals(phase) ? null : Phase.valueOf(phase);
+                    if (baseOnly && p != null && p.coordinatorClass > 0)
+                        out.add(label + ": I21: node " + e.getKey() + " was seen in " + phase + " after BASE_ONLY: " + e.getValue());
+                    if (p == Phase.BASE_ONLY || p == Phase.REVERSE_CLEANUP)
+                        baseOnly = true;
+                    if (p != null && p.isReverse())
+                    {
+                        reverse = true;
+                        continue;
+                    }
+                    if (reverse && p == Phase.STEADY)
+                    {
+                        // an aborted reverse: STEADY again, the forward rule from here on
+                        reverse = false;
+                        highest = Phase.STEADY.id;
+                        continue;
+                    }
+                    if (reverse || baseOnly)
+                        continue;
                     if (highest >= Phase.NEW_ONLY.id && (p == null || p.coordinatorClass < 3 || p.id < highest))
                         out.add(label + ": I10: node " + e.getKey() + " was seen in " + phase + " after a C3 phase: " + e.getValue());
                     if (p != null && p.coordinatorClass == 3)
