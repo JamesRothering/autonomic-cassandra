@@ -492,6 +492,10 @@ Every fault tested ends fail-static. These three are not fail-static violations,
 
 None of the three can be shown on a healthy single node, so none was run live. Findings 1 and 2 were found by the T7.2 fault dtests (`test/distributed/.../autonomic/fault/`). Finding 3 has no test; it was found by reading the code.
 
+### cqlsh cannot read `system_autonomic` (T7.5)
+
+`SELECT` on `system_autonomic.*` in `cqlsh` fails with `Keyspace 'system_autonomic' not found.`, although `DESCRIBE KEYSPACES` lists it. This is not specific to the layer. `cqlsh` formats results with table metadata that the python driver loads from `system_schema`, and Cassandra writes only `system` and `system_schema` of its local (`LocalStrategy`) keyspaces to `system_schema`. `system_autonomic` is registered as a local system keyspace like the others (`SchemaConstants.LOCAL_SYSTEM_KEYSPACE_NAMES`), so the server reads and writes it, but the driver never sees it. `select keyspace_name from system_schema.keyspaces` does not list it, while `DESCRIBE` is answered by the server and does. Changing this needs a change to core schema handling, not to the layer, and was not made. Read the same data with `nodetool autonomic history` (add `--diagnoses`, or `events <id>`), or with `SELECT` on the `system_views.autonomic_*` virtual tables, which `cqlsh` can read. `DESCRIBE KEYSPACE system_autonomic` shows the table definitions.
+
 ### From reverse migration (T6.17)
 
 Details are in section 9 of the [adaptive-schema guide](adaptive-schema.md#99-known-limitations).

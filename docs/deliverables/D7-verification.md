@@ -65,6 +65,6 @@ Done on branch `deliverable/D7-verification` (2026-11-20); awaiting owner review
 - T7.3 cassandra-stress profiles (`tools/autonomic/stress/`): done. Each profile ran against a single node with 0 errors.
 - T7.4 operator guide ([docs/operations/autonomic.md](../operations/autonomic.md)): done. Each step was run on a live single node; steps that need several nodes cite the dtest that covers them. The guide's checks surfaced these findings, left for the owner:
   1. `nodetool autonomic approve` prints `Approved action <id>` even while the layer is paused; the action then ends `REJECTED(PAUSED)`.
-  2. `cqlsh` cannot `SELECT` from `system_autonomic.*` ("Keyspace not found"), although `DESCRIBE KEYSPACES` lists the keyspace. The `system_views.autonomic_*` virtual tables and `nodetool` work.
+  2. `cqlsh` cannot `SELECT` from `system_autonomic.*` ("Keyspace not found"), although `DESCRIBE KEYSPACES` lists the keyspace. The `system_views.autonomic_*` virtual tables and `nodetool` work. T7.5 found the cause and documented a workaround (section 9 of the operator guide): the python driver loads metadata from `system_schema`, which holds only `system` and `system_schema` of the local keyspaces, so no local keyspace such as this one or `system_accord` is visible to it. Not fixable without a core change.
   3. `baseline_drift` names the knob that drifted but not its value.
   4. The stock `bin/nodetool` splits quoted arguments, so a `pause` reason must be a single word (not specific to this fork).
