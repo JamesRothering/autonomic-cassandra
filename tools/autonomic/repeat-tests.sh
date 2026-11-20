@@ -32,13 +32,22 @@
 #   .build/build-jars.sh -s
 #   ant build-test -q
 #
+# Each run's JUnit XML and node logs are kept under OUT/CLASS-RUN/.
+#
 # Env: RUN_TESTS overrides the runner (default .build/run-tests.sh).
+#      BUILD_ACCORD=true rebuilds the accord submodule through gradle on every
+#      run, as run-tests.sh does by default. Without it, once the accord jar is
+#      built, the rebuild is skipped (-Dno-build-accord=true via ANT_ARGS): it
+#      loads a small host for minutes and starves timing-sensitive scenarios.
 
 [ -f "$HOME/.local/env-autonomic.sh" ] && . "$HOME/.local/env-autonomic.sh"
 set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUN_TESTS="${RUN_TESTS:-.build/run-tests.sh}"
+if [ "${BUILD_ACCORD:-false}" != true ] && ls "$ROOT"/build/lib/jars/cassandra-accord-*.jar >/dev/null 2>&1; then
+  export ANT_ARGS="${ANT_ARGS:-} -Dno-build-accord=true"
+fi
 RUNS=5
 TYPE=jvm-dtest
 DRY_RUN=false
@@ -99,6 +108,11 @@ for ((r = 1; r <= RUNS; r++)); do
     (cd "$ROOT" && $RUN_TESTS -s -a "$TYPE" -t "$cls") > "$log" 2>&1
     rc=$?
     secs=$(( $(date +%s) - t0 ))
+    # keep this run's JUnit report and node logs: the next run overwrites them
+    keep="$OUT/$cls-$r"
+    mkdir -p "$keep"
+    find "$ROOT/build/test/output" -name "TEST-*.$cls.xml" -newermt "@$t0" -exec cp {} "$keep/" \; 2>/dev/null
+    (cd "$ROOT/build/test/logs" 2>/dev/null && find . -type f -newermt "@$t0" -path "*$cls*" -exec cp --parents {} "$keep/" \;) 2>/dev/null
     echo "run $r/$RUNS $cls exit=$rc ${secs}s"
     RAW+="$cls $rc $secs $log"$'\n'
   done
