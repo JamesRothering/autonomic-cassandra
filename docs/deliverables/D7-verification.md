@@ -41,3 +41,9 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 ## Status
 
 In progress on branch `deliverable/D7-verification` (started 2026-11-20). T7.2 is tiered `fable` in section 13 of the overview and runs on Opus, because the owner stopped using Fable on 2026-11-17.
+
+- T7.1 scenario dtests (hot spot, load spike, degraded node): done. They found one bug, fixed in the same commit: `PartitionSplitPolicy`'s probe thread kept nodes from shutting down cleanly. In the hot-spot scenario the latency guards are relaxed, because a split raises in-JVM latency, so the verdict rests on the reduced share.
+- T7.2 fault injection (six faults): done. Every fault converges to fail-static and no production change was needed. Three findings are not fail-static violations and are left for the owner:
+  1. After the knowledge store recovers, a failed audit write is not retried. The stored action row stays `APPLYING` and its `inflight` key stays until the next restart.
+  2. When an owner records `CLAIM_LOST` while shutting down, the `action_failed` diagnosis is queued on a control thread that is already stopping, so the diagnosis is lost. The restarted layer is `PAUSED(ACTION_FAILED)` with no diagnosis.
+  3. Not covered by a test; found by reading the code. If an owner restarts after its lease has expired while its peers still see it alive, it pauses on `CLAIM_LOST`. Because it is the preferred proposer, no other node takes over the expired claim until an operator resumes the layer.
