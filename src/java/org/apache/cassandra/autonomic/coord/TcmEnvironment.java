@@ -117,7 +117,8 @@ public class TcmEnvironment implements ClusterCoordinator.Environment
     @Override
     public long commitTimeoutMillis()
     {
-        return config.get().safety.action_step_timeout.toMilliseconds();
+        // half of action_step_timeout: a step whose commit gives up still ends well before the stall check pauses the layer
+        return config.get().safety.action_step_timeout.toMilliseconds() / 2;
     }
 
     @Override

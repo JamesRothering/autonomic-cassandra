@@ -50,7 +50,7 @@ import org.apache.cassandra.tcm.membership.NodeState;
  *     has: {@link Status#OK} only if the ledger shows the intended result, {@link Status#LOST} if it shows that
  *     the claim is gone, {@link Status#UNKNOWN} otherwise. UNKNOWN is safe to retry: the transformations are
  *     idempotent and conditional on the claim's owner and step.</li>
- * <li>Every commit is bounded by {@code action_step_timeout}.</li>
+ * <li>Every commit is bounded by half of {@code action_step_timeout}, below the actuator-stall threshold.</li>
  * <li>A claim that was requested but not seen (UNKNOWN) is remembered and released if it appears later
  *     ({@link #releaseAbandoned}).</li>
  * </ul>
@@ -91,7 +91,7 @@ public class ClusterCoordinator implements ChangeListener
 
         long leaseSafetyMarginMillis();
 
-        /** {@code action_step_timeout}: bound of one commit. */
+        /** Bound of one commit: half of {@code action_step_timeout}, the actuator-stall threshold. */
         long commitTimeoutMillis();
 
         /** Cooldown supplied with a claim when the last action on the same actuator and target committed. */

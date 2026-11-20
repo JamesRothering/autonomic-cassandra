@@ -74,7 +74,7 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
  * </ul>
  *
  * <p>Threading: everything runs on the actuator thread (through the {@link StepScheduler}), which is where commits
- * to the metadata log are allowed to block for up to {@code action_step_timeout}. {@link #recover} and
+ * to the metadata log are allowed to block for up to half of {@code action_step_timeout}. {@link #recover} and
  * {@link #onPhase} are called on other threads and only enqueue.
  */
 public class ClusterActionExecution implements ActionExecutor.ClusterExecution, ClusterCoordinator.PhaseListener
