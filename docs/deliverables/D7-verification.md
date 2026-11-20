@@ -40,4 +40,4 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Not started.
+In progress on branch `deliverable/D7-verification` (started 2026-11-20). T7.2 is tiered `fable` in section 13 of the overview and runs on Opus, because the owner stopped using Fable on 2026-11-17.
