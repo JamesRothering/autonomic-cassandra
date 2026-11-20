@@ -46,7 +46,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * D7 scenario, injected hot spot: a wide partition (1500 rows) takes about 92% of the operations of its table (point
+ * D7 scenario, injected hot spot: a wide partition (1500 rows) takes about 89% of the operations of its table (point
  * reads, writes and a few short slices; the rest are reads and writes of other partitions) on a two-node cluster with replication factor 1, so the buckets can land on both nodes. Everything is the production
  * path: the sampler, the {@code hot_partition} diagnosis, {@code PartitionSplitPolicy} (probe, shape profile, benefit),
  * the safety governor, and the split actuator through every phase to STEADY and its stage B verification. Intervals,
@@ -69,14 +69,16 @@ public class HotSpotScenarioTest extends TestBaseImpl
 
     // Stage A's window is cutover_soak, stage B's runs from the commit point to STEADY (straggler_window and cleanup),
     // capped at verify_window: each must hold min_samples operations of every class, and stage B at least one
-    // collection of LayoutSensor (every 5 s).
+    // collection of LayoutSensor (every 5 s). The single client thread makes a few hundred operations a second, a few
+    // percent of them on the rest of the table, so the soak is 20 s. Stage B's window stays at 12 s: its goal is the
+    // largest share sampled in the window, and on a loaded host a late sampler window can overstate a share up to 1.
     private static void configure(IInstanceConfig c)
     {
         c.with(NETWORK, GOSSIP)
          .set("write_request_timeout", "2000ms")
          .set("range_request_timeout", "5000ms")
          .set("autonomic.layout", Map.ofEntries(Map.entry("ack_poll_interval", "200ms"), Map.entry("cas_drain", "100ms"),
-                                                Map.entry("cutover_soak", "8s"), Map.entry("straggler_window", "13s"),
+                                                Map.entry("cutover_soak", "20s"), Map.entry("straggler_window", "13s"),
                                                 Map.entry("commit_approval", "auto"), Map.entry("verify_recheck_delay", "200ms"),
                                                 Map.entry("backfill_throughput", "0MiB/s"), Map.entry("for_evaluations", 3),
                                                 Map.entry("min_rows_for_split", 500), Map.entry("profile_window", "3s"),
@@ -119,10 +121,10 @@ public class HotSpotScenarioTest extends TestBaseImpl
             await("the layer to be armed", () -> cluster.get(1).nodetoolResult("autonomic", "status").getStdout().contains("Armed: true"));
             cluster.get(1).nodetoolResult("autonomic", "cluster", "enable", "--yes").asserts().success();
 
-            // the hot spot, through node 1, the client is this thread: of every 100 operations, 67 point reads, 24 writes and
-            // 1 slice of 5 rows of the hot key (over 80% of the table's reads and of its writes, CRITICAL), and 4 reads and 4
-            // writes of other partitions (the rest of the table). After the split a slice reads all 32 buckets one after
-            // another, so slices are kept rare: they would take most of the client's time
+            // the hot spot, through node 1, the client is this thread: of every 100 operations, 65 point reads, 23 writes and
+            // 1 slice of 5 rows of the hot key (over 90% of the table's reads, CRITICAL), and 5 reads and 6 writes of other
+            // partitions (the rest of the table). After the split a slice reads every bucket (with a
+            // limit, in parallel), so slices are kept rare: they would take most of the client's time
             int[] counter = { 0 };
             Object[] done = null;
             long end = System.currentTimeMillis() + 3 * ScenarioSupport.DEADLINE_MILLIS;
@@ -135,13 +137,13 @@ public class HotSpotScenarioTest extends TestBaseImpl
                     int mix = (i * 37) % 100;
                     try
                     {
-                        if (mix < 4)
+                        if (mix < 5)
                             cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50);
-                        else if (mix < 8)
+                        else if (mix < 11)
                             cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50, i);
-                        else if (mix < 9)
-                            cluster.coordinator(1).execute("SELECT seq FROM " + KS + ".t WHERE id = ? AND seq >= ? AND seq < ?", ConsistencyLevel.ONE, HOT, seq, seq + 5);
-                        else if (mix < 33)
+                        else if (mix < 12)
+                            cluster.coordinator(1).execute("SELECT seq FROM " + KS + ".t WHERE id = ? AND seq >= ? LIMIT 5", ConsistencyLevel.ONE, HOT, seq);
+                        else if (mix < 35)
                         {
                             uncertain.add(seq);
                             cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, HOT, seq, i);
