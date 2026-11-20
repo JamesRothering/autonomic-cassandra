@@ -98,7 +98,16 @@ public class BaselineDriftDetector implements Detector
             firstSeenMillis = now;
         }
         return List.of(new Diagnosis(id, TYPE, Subject.node(), Severity.INFO, 1.0, firstSeenMillis, now,
-                                     evidence.size() + " knob(s) differ from cassandra.yaml: " + String.join(", ", evidence.keySet()),
+                                     evidence.size() + " knob(s) differ from cassandra.yaml: " + describe(evidence),
                                      evidence, null));
+    }
+
+    /** {@code knob=current (configured baseline)} for each drifted knob. */
+    private static String describe(Map<String, String> evidence)
+    {
+        List<String> parts = new java.util.ArrayList<>();
+        for (Map.Entry<String, String> e : evidence.entrySet())
+            parts.add(e.getKey() + '=' + e.getValue());
+        return String.join(", ", parts);
     }
 }

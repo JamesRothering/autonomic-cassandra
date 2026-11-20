@@ -57,6 +57,7 @@ public class BaselineDriftDetectorTest
         assertEquals(Severity.INFO, d.severity);
         assertEquals(Subject.node(), d.subject);
         assertEquals("80 (configured 64)", d.evidence.get("compaction_throughput"));
+        assertEquals("1 knob(s) differ from cassandra.yaml: compaction_throughput=80 (configured 64)", d.summary);
         assertEquals(d.id, detector.analyze(view).get(0).id);
 
         knob.revert();

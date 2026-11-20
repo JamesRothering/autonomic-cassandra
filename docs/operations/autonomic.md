@@ -329,7 +329,7 @@ at=... from_state=APPLYING to_state=ROLLED_BACK detail=aborted by operator comma
 
 ```
 $ nodetool autonomic history --diagnoses
-id=3664eb60-... type=autonomic.baseline_drift subject=NODE severity=INFO state=OPEN first_seen=... last_seen=... summary=1 knob(s) differ from cassandra.yaml: compaction_throughput
+id=3664eb60-... type=autonomic.baseline_drift subject=NODE severity=INFO state=OPEN first_seen=... last_seen=... summary=1 knob(s) differ from cassandra.yaml: compaction_throughput=32 (configured 64)
 ```
 
 The same data is in `system_views`, all read-only and local to the node you ask:
@@ -443,7 +443,7 @@ When an action commits, the new value is an in-memory override. It is not writte
 ```
 $ nodetool setcompactionthroughput 32        # stands in for a committed change
 $ nodetool autonomic history --diagnoses
-id=3664eb60-... type=autonomic.baseline_drift subject=NODE severity=INFO state=OPEN ... summary=1 knob(s) differ from cassandra.yaml: compaction_throughput
+id=3664eb60-... type=autonomic.baseline_drift subject=NODE severity=INFO state=OPEN ... summary=1 knob(s) differ from cassandra.yaml: compaction_throughput=32 (configured 64)
 ```
 
 (A change you make by hand is reported the same way, and an action in flight on the knob is not reported.) The diagnosis names the knob but not the value. To fold a value into the file:
