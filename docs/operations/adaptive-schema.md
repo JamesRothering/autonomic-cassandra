@@ -442,6 +442,29 @@ The reverse phases (`REVERSE_ANNOUNCED` to `REVERSE_ROLLBACK`) are in section 9.
 
 On the test node the migration of key 1 went from `ANNOUNCED` to `CUTOVER` in about 30 seconds (the baseline and `cas_drain` were short on a quiet node). The migration of key 2 used a `cutover_soak` of 30 seconds, not the default 10 minutes. Expect the defaults to take at least `cutover_soak` plus `straggler_window` (3 hours by default) on a real cluster. The test did not reach `STEADY`.
 
+### 6.2 How a split is verified
+
+A split that the policy proposed is judged twice, by `SplitEvaluation` (ADR-040). An operator's split carries no profile and is not judged.
+
+- **Stage A**, at the end of `CUTOVER`'s soak (`cutover_soak`). A failure rolls the split back, with no loss.
+- **Stage B**, when the key reaches `STEADY`, over the samples from the commit point on, at most the last `verify_window`. The verdict is recorded and the key stays split. `NEUTRAL` and `REGRESSED` raise `layout.split_not_effective`.
+
+Both stages compare with a baseline taken in `ANNOUNCED` over `baseline_window`. The latency guards are:
+
+| Guard | Passes when |
+|-------|-------------|
+| `collateral read latency`, `collateral write latency` | The rest of the table (operations on its other partitions, coordinated by the owner node) is within its baseline times `1 + collateral_tolerance` (default 0.5). |
+| `key read latency` | The key's reads are within `reference * (1 + s * (N - 1)) * (1 + read_regression_tolerance)`. Here `s` is the share of slices among the key's reads in the policy's profile and `N` is the number of buckets: a point read reads one bucket, and a slice may read every bucket. |
+| `key write latency` | The key's writes are within `reference * copies * 1.5`, where `copies` is 2 in `CUTOVER` and 1 after the commit point. The 50% allows for routing. |
+
+The `reference` is the larger of the key's own baseline and the latency of the rest of the table now. If the rest of the table has too few operations in the window, its baseline is used instead. The split moves the key to other replicas and puts every request through routing, so the key's latency before the split is not what it should cost afterwards. The rest of the table, on the same nodes at the same time, is.
+
+Stage A also checks the key's error rate (at most its baseline plus 1%). The goal of stage B is the busiest partition's share of the table: it must fall by `min_improvement` (default 0.5).
+
+Each guard is judged only when the baseline and the window each have `layout.min_samples` operations of its class. The stage's detail names every guard as `ok ... within ...`, as a breach (`... above ...`), or as `not judged (<baseline>/<window> ops, min <n>)`. Stage B's detail is in the action's last event (`nodetool autonomic events <id>`). A passed stage A is logged on the owner node as `stage A passed: ...`. A table whose only traffic is the hot key has no collateral guard, and its key guards then compare with the key's own baseline.
+
+Other tables are not guarded by latency. Node-level damage before the commit point is caught by the C1 guard: new CRITICAL saturation diagnoses, the key's error rate, and the table's coordinator write p99 within 3 times its baseline.
+
 ## 7. Verification notes
 
 - Every command in this guide was run against a running node with the layer armed, except the cases marked "not verified".
