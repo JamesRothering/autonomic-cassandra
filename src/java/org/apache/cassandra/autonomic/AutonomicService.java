@@ -1512,11 +1512,11 @@ public class AutonomicService implements AutonomicServiceMBean
         String reason;
         synchronized (this)
         {
-            gate = killed ? Reasons.KILLED : pauseRequested || state == State.PAUSED ? Reasons.PAUSED : null;
+            gate = killed ? "killed" : pauseRequested || state == State.PAUSED ? "paused" : null;
             reason = pauseReason;
         }
         if (gate != null)
-            throw new IllegalStateException("Cannot approve action " + id + ": the autonomic layer is " + gate.toLowerCase()
+            throw new IllegalStateException("Cannot approve action " + id + ": the autonomic layer is " + gate
                                             + (reason == null || reason.isEmpty() ? "" : " (reason: " + reason + ')')
                                             + "; the action stays PROPOSED. Resume the layer first, or reject the action");
         try
