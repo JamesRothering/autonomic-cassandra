@@ -732,6 +732,29 @@ public class ActionExecutorTest
         assertTrue(store.state.containsKey("inflight/" + b.id));
     }
 
+    @Test
+    public void staleRowsAndInflightKeysAreWrittenOnceTheStoreIsWritableAgain()
+    {
+        Action a = action("t", 128);
+        applied(a);
+        assertEquals(ActionState.VERIFYING, store.actions.get(a.id).state);
+        assertTrue(store.state.containsKey("inflight/" + a.id));
+        store.failWrites = true;
+        observe(100, 10);
+        tick();
+        assertEquals(ActionState.ROLLED_BACK, record(a).state);
+        // on disk: the row before the failure, and the inflight key
+        assertEquals(ActionState.VERIFYING, store.actions.get(a.id).state);
+        assertTrue(store.state.containsKey("inflight/" + a.id));
+
+        // the store recovers: the next successful write retries the stale ones
+        store.failWrites = false;
+        assertEquals(Reasons.STORE_UNAVAILABLE, propose(action("u", 128)).stateReason);
+        assertEquals(ActionState.ROLLED_BACK, store.actions.get(a.id).state);
+        assertEquals("NEUTRAL", store.actions.get(a.id).stateReason);
+        assertFalse(store.state.containsKey("inflight/" + a.id));
+    }
+
     // ---- manual approval ----
 
     @Test

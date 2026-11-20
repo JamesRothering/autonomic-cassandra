@@ -278,6 +278,29 @@ public class ActionExecutor implements PlanSink
         }
     };
 
+    /**
+     * Terminal records whose audit write failed, and terminal actions whose {@code inflight/<id>} key could not be
+     * deleted, kept until the store accepts a write again (T7.5). Bounded: beyond the capacity the oldest is dropped
+     * and left to restart recovery (7.6).
+     */
+    private static final int STALE_CAPACITY = 64;
+    private final Map<UUID, Stale> stale = new LinkedHashMap<>();
+    private final Set<UUID> staleInflight = new java.util.LinkedHashSet<>();
+
+    private static final class Stale
+    {
+        final ActionRecord record;
+        final ActionState from;
+        final String detail;
+
+        Stale(ActionRecord record, ActionState from, String detail)
+        {
+            this.record = record;
+            this.from = from;
+            this.detail = detail;
+        }
+    }
+
     // actuator thread only (invariant 1)
     private final Map<UUID, Execution> inflight = new LinkedHashMap<>();
 
@@ -965,15 +988,82 @@ public class ActionExecutor implements PlanSink
     {
         if (store == null)
             return true;
+        boolean written;
         try
         {
-            return store.recordTransition(record, from, detail);
+            written = store.recordTransition(record, from, detail);
         }
         catch (Throwable t)
         {
             handle("store write of " + record, t);
-            return false;
+            written = false;
         }
+        if (written)
+        {
+            synchronized (stale)
+            {
+                stale.remove(record.id());
+            }
+            retryStale();
+        }
+        else if (record.state.isTerminal())
+        {
+            synchronized (stale)
+            {
+                Stale earlier = stale.remove(record.id());
+                stale.put(record.id(), new Stale(record, earlier == null ? from : earlier.from, detail));
+                if (stale.size() > STALE_CAPACITY)
+                    stale.remove(stale.keySet().iterator().next());
+            }
+        }
+        return written;
+    }
+
+    /**
+     * A write just succeeded, so the store is writable again: write the latest in-memory state of terminal actions
+     * whose row is stale, and delete the {@code inflight} keys of terminal actions that could not be deleted. A
+     * failure leaves the entry for the next successful write.
+     */
+    private void retryStale()
+    {
+        List<Stale> rows;
+        List<UUID> keys;
+        synchronized (stale)
+        {
+            if (stale.isEmpty() && staleInflight.isEmpty())
+                return;
+            rows = new ArrayList<>(stale.values());
+            stale.clear();
+            keys = new ArrayList<>(staleInflight);
+            staleInflight.clear();
+        }
+        for (Stale s : rows)
+        {
+            boolean written;
+            try
+            {
+                written = store.recordTransition(s.record, s.from, s.detail == null ? "store write retried" : s.detail);
+            }
+            catch (Throwable t)
+            {
+                handle("store retry of " + s.record, t);
+                written = false;
+            }
+            if (!written)
+            {
+                synchronized (stale)
+                {
+                    stale.putIfAbsent(s.record.id(), s);
+                }
+            }
+            else
+            {
+                keys.add(s.record.id());
+                logger.info("Autonomic action {} written to the store after it recovered: {}", s.record.id(), s.record.state);
+            }
+        }
+        for (UUID id : keys)
+            deleteInflight(id);
     }
 
     /** {@code inflight/<id>} carries what recovery needs even if the action row cannot be read. */
@@ -1003,15 +1093,26 @@ public class ActionExecutor implements PlanSink
     {
         if (store == null)
             return true;
+        boolean deleted;
         try
         {
-            return store.deleteState(INFLIGHT_PREFIX + id);
+            deleted = store.deleteState(INFLIGHT_PREFIX + id);
         }
         catch (Throwable t)
         {
             handle("inflight key of " + id, t);
-            return false;
+            deleted = false;
         }
+        if (!deleted)
+        {
+            synchronized (stale)
+            {
+                staleInflight.add(id);
+                if (staleInflight.size() > STALE_CAPACITY)
+                    staleInflight.remove(staleInflight.iterator().next());
+            }
+        }
+        return deleted;
     }
 
     private static void handle(String what, Throwable t)

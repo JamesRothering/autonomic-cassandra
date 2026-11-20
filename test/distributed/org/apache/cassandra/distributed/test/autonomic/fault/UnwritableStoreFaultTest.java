@@ -49,7 +49,7 @@ import static org.junit.Assert.assertTrue;
  * an action (APPLYING with its {@code inflight/<id>} key) and the write of VERIFYING, after the knob was changed. The
  * undo is not durable, so the action is rolled back at once; while the store stays unwritable no action is approved
  * (governor check 6) and diagnoses go on in memory. Once the store is writable again, the next rejection finds it so;
- * the row left at APPLYING is closed by restart recovery (7.6).
+ * the layer then rewrites the row left at APPLYING and deletes its inflight key (T7.5).
  */
 public class UnwritableStoreFaultTest extends TestBaseImpl
 {
@@ -128,16 +128,21 @@ public class UnwritableStoreFaultTest extends TestBaseImpl
             String probe = proposeRaise(node, configured);
             assertTrue(probe, probe.startsWith("REJECTED|STORE_UNAVAILABLE|"));
             assertEquals("true", node.callOnInstance(() -> AutonomicService.instance.getStatus().get("store_available")));
-            // until a restart the row of the restored action still says APPLYING (no write is retried)
-            assertEquals("APPLYING", applied(cluster, 1, KNOB).get(0)[1]);
+            // the probe's write succeeded, so the layer rewrote the latest state of the restored action (T7.5): the
+            // row is closed and its inflight key deleted without a restart
+            await("the stale row is written", () -> "ROLLED_BACK".equals(applied(cluster, 1, KNOB).get(0)[1]) && localState(cluster, 1, "inflight/" + uuid) == null);
+            rows = applied(cluster, 1, KNOB);
+            assertEquals(describe(rows.toArray(new Object[0][])), 1, rows.size());
+            assertEquals("STORE_UNAVAILABLE", rows.get(0)[2]);
+            assertEquals(List.of("PROPOSED", "APPROVED", "APPLYING", "ROLLED_BACK"), events(cluster, 1, UUID.fromString(uuid)));
 
-            // restart recovery closes the row: ROLLED_BACK with reason RESTART, key deleted
+            // a restart finds nothing left to recover
             ClusterUtils.restartUnchecked(node);
-            await("restart recovery", () -> localState(cluster, 1, "inflight/" + uuid) == null);
             rows = applied(cluster, 1, KNOB);
             assertEquals(describe(rows.toArray(new Object[0][])), 1, rows.size());
             assertEquals("ROLLED_BACK", rows.get(0)[1]);
-            assertEquals("RESTART", rows.get(0)[2]);
+            assertEquals("STORE_UNAVAILABLE", rows.get(0)[2]);
+            assertEquals(null, localState(cluster, 1, "inflight/" + uuid));
             assertEquals(List.of("PROPOSED", "APPROVED", "APPLYING", "ROLLED_BACK"), events(cluster, 1, UUID.fromString(uuid)));
             assertEquals(configured, throughput(node));
         }
