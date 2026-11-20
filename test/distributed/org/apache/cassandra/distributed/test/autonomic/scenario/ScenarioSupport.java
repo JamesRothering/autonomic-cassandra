@@ -24,18 +24,18 @@ import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 
 /**
- * What the D7 scenario tests share: polling with a deadline and reading the node-local audit tables of one node.
+ * What the D7 scenario and fault tests share: polling with a deadline and reading the node-local audit tables of one node.
  */
-final class ScenarioSupport
+public final class ScenarioSupport
 {
     /** Per wait; a scenario as a whole stays well under the five minutes of the D7 acceptance. */
-    static final long DEADLINE_MILLIS = 90_000;
+    public static final long DEADLINE_MILLIS = 90_000;
 
     private ScenarioSupport()
     {
     }
 
-    static void await(String what, BooleanSupplier condition) throws InterruptedException
+    public static void await(String what, BooleanSupplier condition) throws InterruptedException
     {
         long end = System.currentTimeMillis() + DEADLINE_MILLIS;
         while (!condition.getAsBoolean())
@@ -47,21 +47,21 @@ final class ScenarioSupport
     }
 
     /** Rows of {@code system_autonomic.diagnoses} of the type on the node: subject, state, summary, evidence. */
-    static Object[][] diagnoses(Cluster cluster, int node, String type)
+    public static Object[][] diagnoses(Cluster cluster, int node, String type)
     {
         return cluster.coordinator(node).execute("SELECT subject, state, summary, evidence FROM system_autonomic.diagnoses WHERE type = '" + type
                                                  + "' ALLOW FILTERING", ConsistencyLevel.ONE);
     }
 
     /** Rows of {@code system_autonomic.actions} of the actuator on the node: id, state, state_reason, verdict, params, undo. */
-    static Object[][] actions(Cluster cluster, int node, String actuator)
+    public static Object[][] actions(Cluster cluster, int node, String actuator)
     {
         return cluster.coordinator(node).execute("SELECT id, state, state_reason, verdict, params, undo FROM system_autonomic.actions WHERE actuator = '"
                                                  + actuator + "' ALLOW FILTERING", ConsistencyLevel.ONE);
     }
 
     /** The first action of the actuator in the state, or null. */
-    static Object[] inState(Cluster cluster, int node, String actuator, String state)
+    public static Object[] inState(Cluster cluster, int node, String actuator, String state)
     {
         for (Object[] row : actions(cluster, node, actuator))
             if (state.equals(row[1]))
@@ -69,7 +69,7 @@ final class ScenarioSupport
         return null;
     }
 
-    static String describe(Object[][] rows)
+    public static String describe(Object[][] rows)
     {
         return Arrays.deepToString(rows);
     }
