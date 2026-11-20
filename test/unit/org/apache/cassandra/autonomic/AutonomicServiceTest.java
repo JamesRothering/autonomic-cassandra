@@ -18,6 +18,7 @@
 package org.apache.cassandra.autonomic;
 
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -200,6 +201,49 @@ public class AutonomicServiceTest
         assertEquals("test", service.getStatus().get("pause_reason"));
         service.resume();
         assertEquals(AutonomicService.State.RUNNING, service.state());
+    }
+
+    @Test
+    public void approveIsRefusedWhilePausedOrKilled()
+    {
+        DatabaseDescriptor.getAutonomicConfig().enabled = true;
+        service.start();
+        joined.set(true);
+        now.addAndGet(TimeUnit.HOURS.toMillis(1));
+        service.evaluateArmed();
+        String id = UUID.randomUUID().toString();
+
+        service.pause("maintenance");
+        try
+        {
+            service.approve(id);
+            fail();
+        }
+        catch (IllegalStateException expected)
+        {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("paused (reason: maintenance)"));
+            assertTrue(expected.getMessage(), expected.getMessage().contains("stays PROPOSED"));
+        }
+        service.resume();
+        try
+        {
+            // running: the request reaches the executor, which does not know the action
+            service.approve(id);
+            fail();
+        }
+        catch (IllegalArgumentException expected)
+        {
+        }
+        service.kill("emergency");
+        try
+        {
+            service.approve(id);
+            fail();
+        }
+        catch (IllegalStateException expected)
+        {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("killed (reason: emergency)"));
+        }
     }
 
     @Test

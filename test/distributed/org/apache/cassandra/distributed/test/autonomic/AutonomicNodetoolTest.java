@@ -35,8 +35,12 @@ public class AutonomicNodetoolTest extends TestBaseImpl
             cluster.get(1).nodetoolResult("autonomic", "status").asserts().success().stdoutContains("State: ");
             cluster.get(1).nodetoolResult("autonomic", "pause", "dtest pause").asserts().success();
             cluster.get(1).nodetoolResult("autonomic", "status").asserts().success().stdoutContains("Paused: true");
+            cluster.get(1).nodetoolResult("autonomic", "approve", "00000000-0000-1000-8000-000000000001").asserts().failure()
+                   .errorContains("paused (reason: dtest pause)");
             cluster.get(1).nodetoolResult("autonomic", "resume").asserts().success();
             cluster.get(1).nodetoolResult("autonomic", "kill", "dtest kill").asserts().success();
+            cluster.get(1).nodetoolResult("autonomic", "approve", "00000000-0000-1000-8000-000000000001").asserts().failure()
+                   .errorContains("killed (reason: dtest kill)");
             cluster.get(1).nodetoolResult("autonomic", "history").asserts().success();
             cluster.get(1).nodetoolResult("autonomic", "dryrun").asserts().success().stdoutContains("Dry run: ");
         }

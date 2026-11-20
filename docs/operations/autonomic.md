@@ -129,15 +129,15 @@ nodetool: No action awaiting approval with id f2797cf0-e4f3-11f1-8f34-b54de0faee
 
 A rejected action ends `REJECTED` with `OPERATOR_REJECTED`. `approve <id>` works the same way and prints `Approved action <id>`. An id that is not a UUID is refused (`Invalid UUID string`). A split also needs a second approval at its commit point; see the adaptive-schema guide.
 
-Approval is checked again when you approve. If the layer is paused or killed by then, the action ends `REJECTED` with `PAUSED` or `KILLED` even though `approve` prints `Approved action`. Always check `history` afterwards:
+`approve` is refused while the layer is paused or killed. It fails with an error that names the pause reason, and the action stays `PROPOSED`. Resume the layer first (or reject the action):
 
 ```
 $ nodetool autonomic pause maintenance-window
 $ nodetool autonomic approve 0286d520-e4f4-11f1-8f34-b54de0faee1a
-Approved action 0286d520-e4f4-11f1-8f34-b54de0faee1a
-$ nodetool autonomic history --limit 3
-id=0286d520-... state=REJECTED state_reason=PAUSED actuator=partition_split ...
+error: Cannot approve action 0286d520-e4f4-11f1-8f34-b54de0faee1a: the autonomic layer is paused (reason: maintenance-window); the action stays PROPOSED. Resume the layer first, or reject the action
 ```
+
+If the layer is paused or killed after you approved but before the action ran, the action still ends `REJECTED` with `PAUSED` or `KILLED`. Check `history` afterwards.
 
 ### Rate, cooldown and blast-radius limits
 

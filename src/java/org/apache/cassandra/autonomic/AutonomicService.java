@@ -1506,6 +1506,19 @@ public class AutonomicService implements AutonomicServiceMBean
     {
         UUID id = UUID.fromString(actionId);
         ActionExecutor ex = requireExecutor();
+        // approval is checked again when the action is approved and would end it REJECTED(PAUSED or KILLED): refuse
+        // here instead, and leave the action PROPOSED
+        String gate;
+        String reason;
+        synchronized (this)
+        {
+            gate = killed ? Reasons.KILLED : pauseRequested || state == State.PAUSED ? Reasons.PAUSED : null;
+            reason = pauseReason;
+        }
+        if (gate != null)
+            throw new IllegalStateException("Cannot approve action " + id + ": the autonomic layer is " + gate.toLowerCase()
+                                            + (reason == null || reason.isEmpty() ? "" : " (reason: " + reason + ')')
+                                            + "; the action stays PROPOSED. Resume the layer first, or reject the action");
         try
         {
             ex.approve(id);
