@@ -945,7 +945,8 @@ public class PartitionUnsplitActuator implements ClusterActuator
         SplitEvaluation.Window window = SplitEvaluation.Window.of(knowledge, subject, v.key.phaseSinceMillis, now);
         double tableWrite = SplitEvaluation.mean(knowledge, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS,
                                                  Subject.table(v.target.keyspace, v.target.table), v.key.phaseSinceMillis, now);
-        return SplitEvaluation.Baseline.announced(window, tableWrite, null).encode();
+        // the CUTBACK guard is the C1 guard, which does not judge the rest of the table (ADR-040)
+        return SplitEvaluation.Baseline.announced(window, SplitEvaluation.Window.NONE, tableWrite, null).encode();
     }
 
     private static Subject keySubject(View v)
