@@ -69,8 +69,9 @@ import static org.junit.Assert.assertTrue;
  * single rows, slices, and scans the table through all three coordinators and checks every result against a model.
  *
  * <p>Asserts: every phase was committed (the action's audit trail); no result ever differed from the model; a paging
- * state taken before CUTOVER continues correctly after STEADY; afterwards the base partition is empty on every node,
- * the overflow table holds the 8 bucket partitions, and they are not all on the same nodes.
+ * state taken before CUTOVER continues correctly after STEADY; afterwards the overflow table holds the 8 bucket
+ * partitions, and they are not all on the same nodes. The base partition is kept as residue in STEADY until a reclaim
+ * deletes it (T6.17b), which {@code SplitReclaimTest} covers.
  *
  * <p>The proposal comes from the operator command, not from a diagnosis: the policy that turns {@code hot_partition}
  * into a proposal is T6.11. One cluster start; phase waits are hundreds of milliseconds.
@@ -341,13 +342,13 @@ public class PartitionSplitEndToEndTest extends TestBaseImpl
             assertEquals(null, mismatch.get());
             assertTrue("the workload ran: " + operations.get() + " operations, " + failures.get() + " failures", operations.get() > 200);
 
-            // the base partition is empty on every node; the overflow table has the buckets, not all on the same nodes
+            // STEADY keeps the base partition as residue until a reclaim deletes it (T6.17b, ADR-036; SplitReclaimTest),
+            // so it is not checked here; the overflow table has the buckets, not all on the same nodes
             String overflow = overflowTable(n1);
             Map<Integer, Set<Integer>> holders = new TreeMap<>();
             for (int i = 1; i <= 3; i++)
             {
                 IInvokableInstance node = cluster.get(i);
-                assertEquals("base partition on node " + i, 0, node.executeInternal("SELECT seq FROM " + KS + ".t WHERE id = ?", HOT).length);
                 for (Object[] row : node.executeInternal("SELECT DISTINCT id, \"__al_bucket\" FROM " + KS + '.' + overflow))
                     holders.computeIfAbsent((Integer) row[1], b -> new HashSet<>()).add(i);
             }
