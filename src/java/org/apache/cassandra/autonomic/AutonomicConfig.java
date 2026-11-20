@@ -186,8 +186,13 @@ public class AutonomicConfig
         public DurationSpec.IntMillisecondsBound profile_window = new DurationSpec.IntMillisecondsBound("5m");
         /** Operations the profile, and each evaluation window of design 7.3, needs before it is judged. */
         public int min_samples = 100;
-        /** Stage A and B: the key's read latency may grow by this fraction of its baseline (1.0 is 2x). */
+        /**
+         * Stage A and B (ADR-040): the key's read latency may exceed its expected fan-out cost over its reference (the
+         * larger of its baseline and the rest of the table now) by this fraction (1.0 is 2x).
+         */
         public double read_regression_tolerance = 1.0;
+        /** Stage A and B (ADR-040): the latency of the rest of the key's table may grow by this fraction of its baseline. */
+        public double collateral_tolerance = 0.5;
         /** Stage B: the busiest partition's share of the table's operations must fall by this fraction. */
         public double min_improvement = 0.5;
         /**

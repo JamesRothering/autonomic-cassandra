@@ -46,14 +46,15 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 /**
- * D7 scenario, injected hot spot: a wide partition (1500 rows) takes over 98% of the writes and point reads of its table
- * on a two-node cluster with replication factor 1, so the buckets can land on both nodes. Everything is the production
+ * D7 scenario, injected hot spot: a wide partition (1500 rows) takes about 92% of the operations of its table (point
+ * reads, writes and a few short slices; the rest are reads and writes of other partitions) on a two-node cluster with replication factor 1, so the buckets can land on both nodes. Everything is the production
  * path: the sampler, the {@code hot_partition} diagnosis, {@code PartitionSplitPolicy} (probe, shape profile, benefit),
  * the safety governor, and the split actuator through every phase to STEADY and its stage B verification. Intervals,
  * windows and thresholds are shortened through configuration; approvals are automatic.
  *
  * <p>Asserts the diagnosis (subject and key), the action ({@code partition_split}, split mode, buckets, every phase in
- * its audit trail), the verification outcome ({@code COMMITTED} with the verdict {@code IMPROVED}) and that a client of
+ * its audit trail), the verification outcome ({@code COMMITTED} with the verdict {@code IMPROVED}, with the four latency
+ * guards of ADR-040 judged in stage A and in stage B at their default tolerances and {@code min_samples}) and that a client of
  * the old schema, which keeps using {@code ks.t} unchanged, reads exactly what it wrote: all rows, the single rows and a
  * slice, while the buckets of the overflow table hold the partition. The base rows are removed later by the reclaim, which is not part of this scenario.
  */
@@ -62,24 +63,24 @@ public class HotSpotScenarioTest extends TestBaseImpl
     private static final String KS = "scn_hot";
     private static final int HOT = 1;
     private static final int ROWS = 1500;
-    // The workload is mostly point reads, with a few writes. The profile needs min_samples operations, which the reads
-    // provide, while the write latency of the verification window (a fixed 25% over its baseline) is judged only from
-    // min_samples writes, which the few writes never reach: in-JVM latencies of microseconds swing by factors with the
-    // load of the three phases, and the scenario is about the loop, not about a latency budget. The read guard is kept
-    // with a wide tolerance for the same reason.
+    private static final int OTHERS = 18;
+    /** The latency guards of ADR-040, each of which must have been judged, and passed, in stage A and in stage B. */
+    private static final String[] GUARDS = { "collateral read latency ok", "collateral write latency ok", "key read latency ok", "key write latency ok" };
 
+    // Stage A's window is cutover_soak, stage B's runs from the commit point to STEADY (straggler_window and cleanup),
+    // capped at verify_window: each must hold min_samples operations of every class, and stage B at least one
+    // collection of LayoutSensor (every 5 s).
     private static void configure(IInstanceConfig c)
     {
         c.with(NETWORK, GOSSIP)
          .set("write_request_timeout", "2000ms")
          .set("range_request_timeout", "5000ms")
          .set("autonomic.layout", Map.ofEntries(Map.entry("ack_poll_interval", "200ms"), Map.entry("cas_drain", "100ms"),
-                                                Map.entry("cutover_soak", "1s"), Map.entry("straggler_window", "1s"),
+                                                Map.entry("cutover_soak", "8s"), Map.entry("straggler_window", "13s"),
                                                 Map.entry("commit_approval", "auto"), Map.entry("verify_recheck_delay", "200ms"),
                                                 Map.entry("backfill_throughput", "0MiB/s"), Map.entry("for_evaluations", 3),
                                                 Map.entry("min_rows_for_split", 500), Map.entry("profile_window", "3s"),
-                                                Map.entry("min_samples", 50), Map.entry("read_regression_tolerance", 20.0), Map.entry("baseline_window", "2s"),
-                                                Map.entry("verify_window", "4s")));
+                                                Map.entry("baseline_window", "3s"), Map.entry("verify_window", "12s")));
         if (c.num() != 1)
             return;
         c.set("autonomic.enabled", true)
@@ -118,7 +119,10 @@ public class HotSpotScenarioTest extends TestBaseImpl
             await("the layer to be armed", () -> cluster.get(1).nodetoolResult("autonomic", "status").getStdout().contains("Armed: true"));
             cluster.get(1).nodetoolResult("autonomic", "cluster", "enable", "--yes").asserts().success();
 
-            // the hot spot: over 98% of the operations on one key, writes and point reads, through node 1; the client is this thread
+            // the hot spot, through node 1, the client is this thread: of every 100 operations, 67 point reads, 24 writes and
+            // 1 slice of 5 rows of the hot key (over 80% of the table's reads and of its writes, CRITICAL), and 4 reads and 4
+            // writes of other partitions (the rest of the table). After the split a slice reads all 32 buckets one after
+            // another, so slices are kept rare: they would take most of the client's time
             int[] counter = { 0 };
             Object[] done = null;
             long end = System.currentTimeMillis() + 3 * ScenarioSupport.DEADLINE_MILLIS;
@@ -126,17 +130,22 @@ public class HotSpotScenarioTest extends TestBaseImpl
             {
                 for (int n = 0; n < 40; n++)
                 {
-                    int seq = counter[0]++ % (ROWS + 200);
+                    int i = counter[0]++;
+                    int seq = i % (ROWS + 200);
+                    int mix = (i * 37) % 100;
                     try
                     {
-                        if (n == 0 && counter[0] % 160 < 40)
-                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, 2 + (counter[0] % 18), 0, n);
-                        else if (n == 5 && counter[0] % 80 < 40)
+                        if (mix < 4)
+                            cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50);
+                        else if (mix < 8)
+                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50, i);
+                        else if (mix < 9)
+                            cluster.coordinator(1).execute("SELECT seq FROM " + KS + ".t WHERE id = ? AND seq >= ? AND seq < ?", ConsistencyLevel.ONE, HOT, seq, seq + 5);
+                        else if (mix < 33)
                         {
-                            int v = counter[0];
                             uncertain.add(seq);
-                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, HOT, seq, v);
-                            model.put(seq, v);
+                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, HOT, seq, i);
+                            model.put(seq, i);
                             uncertain.remove(seq);
                         }
                         else
@@ -178,6 +187,18 @@ public class HotSpotScenarioTest extends TestBaseImpl
             for (String e : events)
                 trail.append(e).append('\n');
             assertEquals(trail.toString() + describe(actions(cluster, 1, "partition_split")), "IMPROVED", done[3]);
+            // ADR-040: IMPROVED with the latency guards judged, not only the share
+            String stageB = events.stream().filter(e -> e.contains("stage B IMPROVED")).findFirst().orElse(null);
+            assertNotNull("no stage B verdict in the audit trail:\n" + trail, stageB);
+            List<String> stageA = cluster.get(1).logs().grep("stage A passed").getResult();
+            assertEquals(stageA.toString(), 1, stageA.size());
+            System.out.println("HotSpotScenarioTest " + stageA.get(0).substring(stageA.get(0).indexOf("stage A passed")));
+            System.out.println("HotSpotScenarioTest " + stageB.substring(stageB.indexOf("stage B")));
+            for (String guard : GUARDS)
+            {
+                assertTrue(guard + " in stage A: " + stageA.get(0), stageA.get(0).contains(guard));
+                assertTrue(guard + " in stage B: " + stageB, stageB.contains(guard));
+            }
             for (String p : new String[]{ "ANNOUNCED", "DUAL_WRITE", "BACKFILL", "VERIFY", "CUTOVER", "NEW_ONLY", "CLEANUP", "STEADY" })
                 assertTrue(p + " is not in the audit trail:\n" + trail, trail.toString().contains("phase " + p + " "));
 

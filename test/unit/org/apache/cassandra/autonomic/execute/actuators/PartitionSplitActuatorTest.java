@@ -1008,6 +1008,58 @@ public class PartitionSplitActuatorTest
         assertRemovedAndDropped();
     }
 
+    /** Signals of the rest of the key's table (ADR-040), as {@code LayoutSensor} emits them, 300 and 400 ms from now. */
+    private void restSignals(double readMicros, double writeMicros)
+    {
+        long t = cluster.now.get();
+        for (long at : new long[]{ t + 300, t + 400 })
+        {
+            observe(Signals.REST_READ_LATENCY_MICROS, Subject.table(KS, TABLE), at, readMicros);
+            observe(Signals.REST_READ_OPS_DELTA, Subject.table(KS, TABLE), at, 300);
+            observe(Signals.REST_WRITE_LATENCY_MICROS, Subject.table(KS, TABLE), at, writeMicros);
+            observe(Signals.REST_WRITE_OPS_DELTA, Subject.table(KS, TABLE), at, 300);
+        }
+    }
+
+    @Test
+    public void stageAFailureOnCollateralLatencyRollsBack() throws Exception
+    {
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.ANNOUNCED);
+        keySignals(1000, 500, 0.0);
+        restSignals(800, 400);
+        owner.reach(Phase.CUTOVER);
+        // the key is fine; the rest of the table is 2x slower than in its baseline
+        keySignals(1000, 500, 0.0);
+        restSignals(1600, 400);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), StepResult.Kind.ROLLED_BACK, end.kind);
+        assertTrue(end.detail, end.detail.contains("stage A failed: collateral read latency 1.60e+03 above 1.20e+03us"));
+        assertRemovedAndDropped();
+    }
+
+    @Test
+    public void theKeyIsJudgedAgainstTheRestOfTheTableAfterTheSplit() throws Exception
+    {
+        // the key was 4x faster than the rest of the table; after the split it costs what the rest costs, which passes
+        withKnowledge();
+        Owner owner = ownerWithProfile().reach(Phase.ANNOUNCED);
+        keySignals(250, 250, 0.0);
+        restSignals(1000, 1000);
+        owner.reach(Phase.CUTOVER);
+        keySignals(1100, 1100, 0.0);
+        restSignals(1000, 1000);
+        owner.reach(Phase.CLEANUP);
+        cluster.now.addAndGet(1000);
+        keySignals(1100, 1100, 0.0);
+        restSignals(1000, 1000);
+        overflowShare(0.1);
+        StepResult end = owner.toEnd();
+        assertEquals(end.toString(), Verdict.IMPROVED, end.verdict);
+        for (String guard : new String[]{ "collateral read latency ok", "collateral write latency ok", "key read latency ok", "key write latency ok" })
+            assertTrue(guard + ": " + end.detail, end.detail.contains(guard));
+    }
+
     @Test
     public void stageAFailureOnTheErrorRateRollsBack() throws Exception
     {
@@ -1052,7 +1104,7 @@ public class PartitionSplitActuatorTest
     {
         withKnowledge();
         Owner owner = profiled().reach(Phase.CUTOVER);
-        // fine during the soak, worse than 25% over the baseline's write latency afterwards
+        // fine during the soak, worse than 50% over the baseline's write latency afterwards
         keySignals(1000, 500, 0.0);
         owner.reach(Phase.CLEANUP);
         cluster.now.addAndGet(1000);
@@ -1165,8 +1217,8 @@ public class PartitionSplitActuatorTest
     {
         withKnowledge();
         Owner owner = profiled().reach(Phase.CUTOVER);
-        // slow writes during the soak (stage A judges reads and errors only); stage B must not see them
-        keySignals(1000, 5000, 0.0);
+        // writes slower than stage B allows (750us) during the soak, within stage A's two copies (1500us); stage B must not see them
+        keySignals(1000, 1200, 0.0);
         owner.reach(Phase.CLEANUP);
         assertNotNull(owner.claim().state.get(PartitionSplitActuator.S_COMMITTED_AT));
         cluster.now.addAndGet(1000);

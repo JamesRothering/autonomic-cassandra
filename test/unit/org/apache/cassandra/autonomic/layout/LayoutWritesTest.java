@@ -343,10 +343,12 @@ public class LayoutWritesTest extends CQLTester
         assertCalls("plain QUORUM [t(" + K + ")2]");
         assertTrue(route(List.of(rangeDelete(K + 1)), ConsistencyLevel.QUORUM, false));
         assertTrue(route(List.of(partitionDelete(K + 1)), ConsistencyLevel.QUORUM, false));
-        // not watched: the stock path, which the hook leaves to its caller
-        assertFalse(route(List.of(rows(logical, 99, 1)), ConsistencyLevel.QUORUM, false));
+        // another key of a watched key's table: executed by the hook and timed as the rest of the table (ADR-040)
+        assertTrue(route(List.of(rows(logical, 99, 1)), ConsistencyLevel.QUORUM, false));
+        assertEquals(1, LayoutProfiler.rest(logical.id).timedWrites);
+        // a table with no watched key: the stock path, which the hook leaves to its caller
         assertFalse(route(List.of(rows(unrelated, K, 1)), ConsistencyLevel.QUORUM, false));
-        assertEquals(3, recorder.calls.size());
+        assertEquals(4, recorder.calls.size());
 
         LayoutProfiler.Shape a = LayoutProfiler.get(logical.id, key(K)).shape();
         assertEquals(2, a.rowWrites);

@@ -925,6 +925,7 @@ public class PartitionSplitActuator implements ClusterActuator
                 if (manualCommitApproval() && !"true".equals(v.claim.state.get(S_COMMIT_APPROVED)))
                     return StepResult.stay(Math.max(1, Math.min(pollMillis(), window - ctx.nowMillis())));
                 // the commit point
+                logger.info("Autonomic partition split of {}: stage A passed: {}", v.name(), stageA.detail);
                 return advanceKey(v, ctx, Phase.NEW_ONLY, key.generation);
             }
             case NEW_ONLY:
@@ -949,9 +950,10 @@ public class PartitionSplitActuator implements ClusterActuator
     {
         KnowledgeView knowledge = env.knowledge();
         if (knowledge == null)
-            return SplitEvaluation.stageA(null, null, layoutConfig());
+            return SplitEvaluation.stageA(null, null, null, 0, layoutConfig());
         SplitEvaluation.Window window = SplitEvaluation.Window.of(knowledge, keySubject(v), ackedAt(v), ctx.nowMillis());
-        return SplitEvaluation.stageA(SplitEvaluation.Baseline.fromMap(v.claim.state), window, layoutConfig());
+        SplitEvaluation.Window rest = SplitEvaluation.Window.rest(knowledge, tableSubject(v), ackedAt(v), ctx.nowMillis());
+        return SplitEvaluation.stageA(SplitEvaluation.Baseline.fromMap(v.claim.state), window, rest, v.layout.buckets, layoutConfig());
     }
 
     /**
@@ -963,19 +965,21 @@ public class PartitionSplitActuator implements ClusterActuator
     {
         KnowledgeView knowledge = env.knowledge();
         if (knowledge == null)
-            return SplitEvaluation.stageB(null, null, Double.NaN, layoutConfig());
+            return SplitEvaluation.stageB(null, null, null, Double.NaN, 0, layoutConfig());
         long now = ctx.nowMillis();
         String committed = v.claim.state.get(S_COMMITTED_AT);
         long since = committed != null ? Long.parseLong(committed) : v.key.phaseSinceMillis;
         long from = Math.max(now - layoutConfig().verify_window.toMilliseconds(), since);
         Subject key = keySubject(v);
         SplitEvaluation.Window signals = SplitEvaluation.Window.of(knowledge, key, from, now);
+        SplitEvaluation.Window rest = SplitEvaluation.Window.rest(knowledge, tableSubject(v), from, now);
         double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, Math.max(1, now - from));
-        return SplitEvaluation.stageB(SplitEvaluation.Baseline.fromMap(v.claim.state), signals, share, layoutConfig());
+        return SplitEvaluation.stageB(SplitEvaluation.Baseline.fromMap(v.claim.state), signals, rest, share, v.layout.buckets, layoutConfig());
     }
 
     /**
-     * Design 7.3, ANNOUNCED: the key's baseline over {@code [registration, now]} and the table's write latency, which
+     * Design 7.3, ANNOUNCED: the key's baseline and that of the rest of its table (ADR-040) over {@code [registration, now]}
+     * and the table's write latency, which
      * replace the numbers of the policy's profile (its busiest share stays, for stage B's goal). A split the policy
      * proposed is aborted with {@value SplitEvaluation#INSUFFICIENT_BASELINE} when the window has fewer than
      * {@code min_samples} operations. An operator's split carries no profile and is not judged (as since T6.11): it
@@ -995,7 +999,8 @@ public class PartitionSplitActuator implements ClusterActuator
             {
                 double tableWrite = SplitEvaluation.mean(knowledge, Signals.TABLE_COORDINATOR_WRITE_LATENCY_P99_MICROS,
                                                          Subject.table(v.target.keyspace, v.target.table), v.key.phaseSinceMillis, now);
-                state.put(SplitEvaluation.S_BASELINE, SplitEvaluation.Baseline.announced(window, tableWrite, proposed).encode());
+                SplitEvaluation.Window rest = SplitEvaluation.Window.rest(knowledge, tableSubject(v), v.key.phaseSinceMillis, now);
+                state.put(SplitEvaluation.S_BASELINE, SplitEvaluation.Baseline.announced(window, rest, tableWrite, proposed).encode());
                 state.put(S_BASELINE_AT, Long.toString(now));
             }
             else
@@ -1025,6 +1030,11 @@ public class PartitionSplitActuator implements ClusterActuator
             if (d.severity == Severity.CRITICAL && SATURATION.contains(d.type) && d.firstSeenMillis >= v.key.dualWriteSinceMillis)
                 saturation.add(d.type);
         return SplitEvaluation.guardC1(SplitEvaluation.Baseline.fromMap(v.claim.state), window, tableWrite, saturation, layoutConfig());
+    }
+
+    private static Subject tableSubject(View v)
+    {
+        return Subject.table(v.target.keyspace, v.target.table);
     }
 
     private static Subject keySubject(View v)

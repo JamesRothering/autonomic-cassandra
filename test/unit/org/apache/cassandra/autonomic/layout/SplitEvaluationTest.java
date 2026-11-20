@@ -62,38 +62,38 @@ public class SplitEvaluationTest
     {
         Baseline b = base(1000, 500, 0.0, 1000, 1000, 0.6);
         // default tolerance 1.0: up to 2x
-        assertTrue(SplitEvaluation.stageA(b, window(1900, 500, 0.0, 500, 500), lc).ok);
-        assertTrue("exactly 2x passes", SplitEvaluation.stageA(b, window(2000, 500, 0.0, 500, 500), lc).ok);
-        SplitEvaluation.Result slow = SplitEvaluation.stageA(b, window(2100, 500, 0.0, 500, 500), lc);
+        assertTrue(SplitEvaluation.stageA(b, window(1900, 500, 0.0, 500, 500), null, 4, lc).ok);
+        assertTrue("exactly 2x passes", SplitEvaluation.stageA(b, window(2000, 500, 0.0, 500, 500), null, 4, lc).ok);
+        SplitEvaluation.Result slow = SplitEvaluation.stageA(b, window(2100, 500, 0.0, 500, 500), null, 4, lc);
         assertFalse(slow.ok);
         assertTrue(slow.detail, slow.detail.contains("read latency") && slow.detail.contains("above"));
         // errors: baseline + 1%
-        assertTrue(SplitEvaluation.stageA(b, window(1000, 500, 0.01, 500, 500), lc).ok);
-        SplitEvaluation.Result errors = SplitEvaluation.stageA(b, window(1000, 500, 0.02, 500, 500), lc);
+        assertTrue(SplitEvaluation.stageA(b, window(1000, 500, 0.01, 500, 500), null, 4, lc).ok);
+        SplitEvaluation.Result errors = SplitEvaluation.stageA(b, window(1000, 500, 0.02, 500, 500), null, 4, lc);
         assertFalse(errors.ok);
         assertTrue(errors.detail, errors.detail.contains("error rate"));
-        assertTrue(SplitEvaluation.stageA(base(1000, 500, 0.05, 1000, 1000, 0.6), window(1000, 500, 0.06, 500, 500), lc).ok);
+        assertTrue(SplitEvaluation.stageA(base(1000, 500, 0.05, 1000, 1000, 0.6), window(1000, 500, 0.06, 500, 500), null, 4, lc).ok);
         // the tolerance is configurable
         lc.read_regression_tolerance = 0.2;
-        assertFalse(SplitEvaluation.stageA(b, window(1300, 500, 0.0, 500, 500), lc).ok);
-        assertTrue(SplitEvaluation.stageA(b, window(1200, 500, 0.0, 500, 500), lc).ok);
+        assertFalse(SplitEvaluation.stageA(b, window(1300, 500, 0.0, 500, 500), null, 4, lc).ok);
+        assertTrue(SplitEvaluation.stageA(b, window(1200, 500, 0.0, 500, 500), null, 4, lc).ok);
     }
 
     @Test
     public void stageAIsNotJudgedWithoutDataAndDoesNotFail()
     {
         Baseline b = base(1000, 500, 0.0, 1000, 1000, 0.6);
-        SplitEvaluation.Result noBaseline = SplitEvaluation.stageA(null, window(9999, 9999, 1, 500, 500), lc);
+        SplitEvaluation.Result noBaseline = SplitEvaluation.stageA(null, window(9999, 9999, 1, 500, 500), null, 4, lc);
         assertTrue(noBaseline.ok);
         assertTrue(noBaseline.detail, noBaseline.detail.contains("no baseline"));
         // fewer than min_samples reads: the latency is not judged; the error rate needs min_samples operations
-        assertTrue(SplitEvaluation.stageA(b, window(9999, 500, 0.0, 99, 0), lc).ok);
-        SplitEvaluation.Result few = SplitEvaluation.stageA(b, window(9999, 9999, 1.0, 40, 40), lc);
+        assertTrue(SplitEvaluation.stageA(b, window(9999, 500, 0.0, 99, 0), null, 4, lc).ok);
+        SplitEvaluation.Result few = SplitEvaluation.stageA(b, window(9999, 9999, 1.0, 40, 40), null, 4, lc);
         assertTrue(few.detail, few.ok && few.detail.contains("not judged"));
         // a baseline with too few reads cannot judge the read latency either
-        assertTrue(SplitEvaluation.stageA(base(1000, 500, 0.0, 10, 1000, 0.6), window(9999, 500, 0.0, 500, 500), lc).ok);
+        assertTrue(SplitEvaluation.stageA(base(1000, 500, 0.0, 10, 1000, 0.6), window(9999, 500, 0.0, 500, 500), null, 4, lc).ok);
         // no read latency in the window (a write-only key)
-        assertTrue(SplitEvaluation.stageA(b, window(NAN, 500, 0.0, 0, 500), lc).ok);
+        assertTrue(SplitEvaluation.stageA(b, window(NAN, 500, 0.0, 0, 500), null, 4, lc).ok);
     }
 
     // ---- the ANNOUNCED baseline and the C1 guard (T6.11 review) ----
@@ -105,7 +105,7 @@ public class SplitEvaluationTest
         Window announced = window(800, 400, 0.002, 70, 40);
         assertTrue(SplitEvaluation.sufficient(announced, lc));
         assertFalse(SplitEvaluation.sufficient(window(800, 400, 0.0, 60, 39), lc));
-        Baseline b = Baseline.announced(announced, 3000, proposed);
+        Baseline b = Baseline.announced(announced, window(300, 200, NAN, 500, 400), 3000, proposed);
         assertEquals(800, b.readMicros, 0.0);
         assertEquals(400, b.writeMicros, 0.0);
         assertEquals(0.002, b.errorRate, 0.0);
@@ -116,7 +116,9 @@ public class SplitEvaluationTest
         // one claim state entry, and back
         Baseline decoded = Baseline.fromMap(Map.of(SplitEvaluation.S_BASELINE, b.encode()));
         assertEquals(b.toParams(), decoded.toParams());
-        assertTrue(Double.isNaN(Baseline.announced(announced, NAN, null).opsShare));
+        assertEquals("the rest of the table in ANNOUNCED", 300, b.rest.readMicros, 0.0);
+        assertEquals(400, decoded.rest.writes);
+        assertTrue(Double.isNaN(Baseline.announced(announced, Window.NONE, NAN, null).opsShare));
     }
 
     @Test
@@ -174,7 +176,7 @@ public class SplitEvaluationTest
 
     private Verdict stageB(Baseline b, Window w, double after)
     {
-        return SplitEvaluation.stageB(b, w, after, lc).verdict;
+        return SplitEvaluation.stageB(b, w, null, after, 4, lc).verdict;
     }
 
     @Test
@@ -188,9 +190,9 @@ public class SplitEvaluationTest
         assertEquals(Verdict.NEUTRAL, stageB(b, fine, 0.31));
         assertEquals(Verdict.NEUTRAL, stageB(b, fine, 0.6));
         assertEquals("a share that grew is not an improvement", Verdict.NEUTRAL, stageB(b, fine, 0.9));
-        // guards: write latency within baseline + 25%, read latency within the stage A tolerance
-        assertEquals(Verdict.IMPROVED, stageB(b, window(2000, 625, 0.0, 500, 500), 0.1));
-        assertEquals(Verdict.REGRESSED, stageB(b, window(1500, 626, 0.0, 500, 500), 0.1));
+        // guards: write latency within baseline + 50%, read latency within the stage A tolerance
+        assertEquals(Verdict.IMPROVED, stageB(b, window(2000, 750, 0.0, 500, 500), 0.1));
+        assertEquals(Verdict.REGRESSED, stageB(b, window(1500, 751, 0.0, 500, 500), 0.1));
         assertEquals(Verdict.REGRESSED, stageB(b, window(2001, 500, 0.0, 500, 500), 0.1));
         assertEquals("a breached guard wins over a missed goal", Verdict.REGRESSED, stageB(b, window(2001, 500, 0.0, 500, 500), 0.6));
         // a goal that cannot be judged
@@ -206,10 +208,10 @@ public class SplitEvaluationTest
     public void stageBForPartitionSizeOnlyDoesNotMeasureTheGoal()
     {
         Baseline sizeOnly = new Baseline(1000, 500, 0.0, 1000, 1000, 0.6, true);
-        SplitEvaluation.Result r = SplitEvaluation.stageB(sizeOnly, window(1500, 500, 0.0, 500, 500), 0.01, lc);
+        SplitEvaluation.Result r = SplitEvaluation.stageB(sizeOnly, window(1500, 500, 0.0, 500, 500), null, 0.01, 4, lc);
         assertEquals(Verdict.INCONCLUSIVE, r.verdict);
         assertTrue(r.detail, r.detail.contains("partition_size_only"));
-        assertEquals(Verdict.REGRESSED, SplitEvaluation.stageB(sizeOnly, window(5000, 500, 0.0, 500, 500), 0.01, lc).verdict);
+        assertEquals(Verdict.REGRESSED, SplitEvaluation.stageB(sizeOnly, window(5000, 500, 0.0, 500, 500), null, 0.01, 4, lc).verdict);
     }
 
     @Test
@@ -221,6 +223,102 @@ public class SplitEvaluationTest
         lc.min_improvement = 0.5;
         lc.min_samples = 1000;
         assertEquals("the guards are not judged below min_samples", Verdict.IMPROVED, stageB(b, window(9000, 9000, 0.0, 500, 500), 0.1));
+    }
+
+    // ---- ADR-040: the key against its expected overhead, the rest of the table against its baseline ----
+
+    /** Before the split: the key reads and writes in 100us, the rest of the table in 400us, 1000 operations of each class. */
+    private static Baseline split(double sliceFraction)
+    {
+        return new Baseline(100, 100, 0.0, 1000, 1000, 0.6, false, NAN, sliceFraction, window(400, 400, NAN, 1000, 1000));
+    }
+
+    @Test
+    public void aGoodSplitPassesThoughTheKeyIsSlowerThanBefore()
+    {
+        // the key now costs what an operation of the rest of the table costs, plus routing: 4.5x its own baseline
+        Window key = window(450, 450, 0.0, 500, 500);
+        Window rest = window(420, 410, NAN, 500, 500);
+        SplitEvaluation.Result b = SplitEvaluation.stageB(split(NAN), key, rest, 0.1, 8, lc);
+        assertEquals(b.detail, Verdict.IMPROVED, b.verdict);
+        for (String guard : new String[]{ "collateral read latency ok", "collateral write latency ok", "key read latency ok", "key write latency ok" })
+            assertTrue(guard + ": " + b.detail, b.detail.contains(guard));
+        assertFalse(b.detail, b.detail.contains("not judged"));
+        assertTrue(b.detail, b.detail.contains("key write latency ok 450 within 615us (baseline 100us, reference 410us, 1 copy)"));
+        // stage A, both copies written: the same numbers pass
+        SplitEvaluation.Result a = SplitEvaluation.stageA(split(NAN), key, rest, 8, lc);
+        assertTrue(a.detail, a.ok);
+        assertTrue(a.detail, a.detail.contains("2 copies"));
+    }
+
+    @Test
+    public void aSplitThatSlowsTheRestOfTheTableFails()
+    {
+        Window key = window(450, 450, 0.0, 500, 500);
+        // collateral tolerance 0.5: the rest of the table may reach 600us
+        assertEquals(Verdict.IMPROVED, SplitEvaluation.stageB(split(NAN), key, window(600, 600, NAN, 500, 500), 0.1, 8, lc).verdict);
+        SplitEvaluation.Result reads = SplitEvaluation.stageB(split(NAN), key, window(700, 410, NAN, 500, 500), 0.1, 8, lc);
+        assertEquals(reads.detail, Verdict.REGRESSED, reads.verdict);
+        assertTrue(reads.detail, reads.detail.contains("collateral read latency 700 above 600us"));
+        SplitEvaluation.Result writes = SplitEvaluation.stageA(split(NAN), key, window(420, 650, NAN, 500, 500), 8, lc);
+        assertFalse(writes.detail, writes.ok);
+        assertTrue(writes.detail, writes.detail.contains("collateral write latency 650 above 600us"));
+        // the tolerance is configurable
+        lc.collateral_tolerance = 0.1;
+        assertEquals(Verdict.REGRESSED, SplitEvaluation.stageB(split(NAN), key, window(450, 410, NAN, 500, 500), 0.1, 8, lc).verdict);
+    }
+
+    @Test
+    public void aSplitWhoseKeyWritesBlowUpFails()
+    {
+        Window rest = window(420, 410, NAN, 500, 500);
+        // after the commit point one copy: up to 410 * 1.5 = 615us
+        SplitEvaluation.Result b = SplitEvaluation.stageB(split(NAN), window(450, 620, 0.0, 500, 500), rest, 0.1, 8, lc);
+        assertEquals(b.detail, Verdict.REGRESSED, b.verdict);
+        assertTrue(b.detail, b.detail.contains("key write latency 620 above 615us"));
+        // in CUTOVER two copies: up to 1230us
+        assertTrue(SplitEvaluation.stageA(split(NAN), window(450, 1200, 0.0, 500, 500), rest, 8, lc).ok);
+        SplitEvaluation.Result a = SplitEvaluation.stageA(split(NAN), window(450, 1300, 0.0, 500, 500), rest, 8, lc);
+        assertFalse(a.detail, a.ok);
+        assertTrue(a.detail, a.detail.contains("key write latency 1.30e+03 above 1.23e+03us"));
+        // with no rest of the table in the window, the reference is the rest of the table in the baseline (400us)
+        assertEquals(Verdict.REGRESSED, SplitEvaluation.stageB(split(NAN), window(100, 610, 0.0, 500, 500), null, 0.1, 8, lc).verdict);
+        assertEquals(Verdict.IMPROVED, SplitEvaluation.stageB(split(NAN), window(100, 590, 0.0, 500, 500), null, 0.1, 8, lc).verdict);
+    }
+
+    @Test
+    public void slicesOfTheKeyMayCostEveryBucket()
+    {
+        // a fifth of the reads are slices over 8 buckets: the reads may cost 1 + 0.2 * 7 = 2.4 times the reference, then 2x
+        Window rest = window(420, 410, NAN, 500, 500);
+        assertEquals(Verdict.IMPROVED, SplitEvaluation.stageB(split(0.2), window(2000, 450, 0.0, 500, 500), rest, 0.1, 8, lc).verdict);
+        SplitEvaluation.Result r = SplitEvaluation.stageB(split(0.2), window(2100, 450, 0.0, 500, 500), rest, 0.1, 8, lc);
+        assertEquals(r.detail, Verdict.REGRESSED, r.verdict);
+        assertTrue(r.detail, r.detail.contains("fan-out 2.40"));
+        assertEquals("point reads only: no fan-out allowance", Verdict.REGRESSED,
+                     SplitEvaluation.stageB(split(0.0), window(900, 450, 0.0, 500, 500), rest, 0.1, 8, lc).verdict);
+    }
+
+    @Test
+    public void eachGuardNeedsMinSamplesOfItsClass()
+    {
+        // too few operations of the rest of the table now: the collateral guard is not judged, and the key's reference is
+        // the rest of the table in the baseline (400us)
+        Window thinRest = window(9000, 9000, NAN, 99, 99);
+        SplitEvaluation.Result r = SplitEvaluation.stageB(split(NAN), window(150, 580, 0.0, 500, 500), thinRest, 0.1, 8, lc);
+        assertEquals(r.detail, Verdict.IMPROVED, r.verdict);
+        assertTrue(r.detail, r.detail.contains("collateral read latency not judged (1000/99 ops, min 100)"));
+        assertTrue(r.detail, r.detail.contains("key write latency ok 580 within 600us (baseline 100us, reference 400us"));
+        // and with too few in the baseline as well, the key's own baseline
+        Baseline thin = new Baseline(100, 100, 0.0, 1000, 1000, 0.6, false, NAN, NAN, window(400, 400, NAN, 99, 99));
+        SplitEvaluation.Result k = SplitEvaluation.stageB(thin, window(150, 120, 0.0, 500, 500), thinRest, 0.1, 8, lc);
+        assertTrue(k.detail, k.detail.contains("key write latency ok 120 within 150us (baseline 100us, reference 100us"));
+        assertEquals(Verdict.REGRESSED, SplitEvaluation.stageB(thin, window(150, 160, 0.0, 500, 500), thinRest, 0.1, 8, lc).verdict);
+        // a baseline without the rest of the table (taken before ADR-040) judges the key only
+        Baseline old = new Baseline(100, 100, 0.0, 1000, 1000, 0.6, false);
+        SplitEvaluation.Result o = SplitEvaluation.stageB(old, window(150, 120, 0.0, 500, 500), window(9000, 9000, NAN, 500, 500), 0.1, 8, lc);
+        assertTrue(o.detail, o.detail.contains("collateral write latency not judged (0/500 ops"));
+        assertEquals(o.detail, Verdict.IMPROVED, o.verdict);
     }
 
     // ---- the baseline travels as action parameters ----
@@ -240,6 +338,15 @@ public class SplitEvaluationTest
         assertTrue(back.sizeOnly);
         assertNull("no baseline in an operator's proposal", Baseline.fromMap(Map.of("buckets", "8", "mode", "split")));
         assertNotNull(Baseline.fromMap(Map.of(SplitEvaluation.P_OPS_SHARE, "0.4")));
+        Baseline full = new Baseline(100, 200, 0.0, 300, 400, 0.5, false, 900, 0.125, window(410, 420, NAN, 430, 440));
+        Baseline decoded = Baseline.fromMap(Map.of(SplitEvaluation.S_BASELINE, full.encode()));
+        assertEquals(full.toParams(), decoded.toParams());
+        assertEquals(0.125, decoded.sliceFraction, 0);
+        assertEquals(420, decoded.rest.writeMicros, 0);
+        assertEquals(430, decoded.rest.reads);
+        // the policy's profile gives the slice fraction of the key's reads
+        LayoutProfiler.Shape profile = new LayoutProfiler.Shape(30, 10, 60, 0, 0, 0, 40, 4000, 60, 6000, 0, 0);
+        assertEquals(0.25, Baseline.of(profile, 0.6, false).sliceFraction, 0);
     }
 
     // ---- the windows come from the signals of LayoutSensor ----

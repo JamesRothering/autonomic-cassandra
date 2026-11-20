@@ -47,8 +47,9 @@ import org.apache.cassandra.utils.Clock;
  * times a hook went on to look at a watch; it stays at zero while nothing is watched (asserted by the tests).
  *
  * <p>While a key is watched, a request that touches it is executed by the hook itself (the stock tail, under the
- * hook's re-entrancy flag) so that its latency can be taken; requests that do not touch a watched key take the stock
- * path as before. A watch has an expiry; {@link #sweep} removes the expired ones and, with the last, deactivates the
+ * hook's re-entrancy flag) so that its latency can be taken. So is a request to the table of a watched key that touches
+ * no watched key: its latency is counted for the <em>rest of the table</em> ({@link #rest}), the control of the
+ * collateral guard of ADR-040. Requests to other tables take the stock path as before. A watch has an expiry; {@link #sweep} removes the expired ones and, with the last, deactivates the
  * hooks. The sensor of this node keeps the keys of running migrations watched.
  */
 public final class LayoutProfiler
@@ -176,12 +177,7 @@ public final class LayoutProfiler
         private final LongAdder rowWrites = new LongAdder();
         private final LongAdder deletes = new LongAdder();
         private final LongAdder cas = new LongAdder();
-        private final LongAdder readNanos = new LongAdder();
-        private final LongAdder timedReads = new LongAdder();
-        private final LongAdder writeNanos = new LongAdder();
-        private final LongAdder timedWrites = new LongAdder();
-        private final LongAdder readErrors = new LongAdder();
-        private final LongAdder writeErrors = new LongAdder();
+        private final Timing timing = new Timing();
 
         Watch(TableId table, ByteBuffer key, long startedMillis)
         {
@@ -201,9 +197,45 @@ public final class LayoutProfiler
         {
             Watches w = current;
             return new Shape(namedReads.sum(), sliceReads.sum(), rowWrites.sum(), deletes.sum(), cas.sum(), w == null ? 0 : w.scans(table),
-                             timedReads.sum(), readNanos.sum() / 1000, timedWrites.sum(), writeNanos.sum() / 1000,
+                             timing.timedReads.sum(), timing.readNanos.sum() / 1000, timing.timedWrites.sum(), timing.writeNanos.sum() / 1000,
+                             timing.readErrors.sum(), timing.writeErrors.sum());
+        }
+    }
+
+    /** The timed reads and writes of a watched key, or of the rest of its table; counters only grow. */
+    static final class Timing
+    {
+        private final LongAdder readNanos = new LongAdder();
+        private final LongAdder timedReads = new LongAdder();
+        private final LongAdder writeNanos = new LongAdder();
+        private final LongAdder timedWrites = new LongAdder();
+        private final LongAdder readErrors = new LongAdder();
+        private final LongAdder writeErrors = new LongAdder();
+
+        /** The counters now, as a shape with only the timed fields set. */
+        Shape shape()
+        {
+            return new Shape(0, 0, 0, 0, 0, 0, timedReads.sum(), readNanos.sum() / 1000, timedWrites.sum(), writeNanos.sum() / 1000,
                              readErrors.sum(), writeErrors.sum());
         }
+    }
+
+    /**
+     * The timed requests to the table that touched no watched key since its first key was watched (ADR-040): only the
+     * timed fields of the shape are set. Null if no key of the table is watched.
+     */
+    public static Shape rest(TableId table)
+    {
+        Watches w = current;
+        Timing timing = w == null ? null : w.rest(table);
+        return timing == null ? null : timing.shape();
+    }
+
+    /** The tables with a watched key now. */
+    public static java.util.Set<TableId> watchedTables()
+    {
+        Watches w = current;
+        return w == null ? java.util.Set.of() : java.util.Set.copyOf(w.byTable.keySet());
     }
 
     /** A copy of the counters of one watch. */
@@ -288,16 +320,19 @@ public final class LayoutProfiler
     {
         private final Map<TableId, Map<ByteBuffer, Watch>> byTable;
         private final Map<TableId, LongAdder> scans = new HashMap<>();
+        private final Map<TableId, Timing> rest = new HashMap<>();
 
         Watches(Map<TableId, Map<ByteBuffer, Watch>> byTable)
         {
             this.byTable = byTable;
-            // range scans are counted per table and carried over a republication
+            // range scans and the rest of the table are counted per table and carried over a republication
             Watches previous = current;
             for (TableId table : byTable.keySet())
             {
                 LongAdder adder = previous == null ? null : previous.scans.get(table);
                 scans.put(table, adder == null ? new LongAdder() : adder);
+                Timing timing = previous == null ? null : previous.rest.get(table);
+                rest.put(table, timing == null ? new Timing() : timing);
             }
         }
 
@@ -321,29 +356,37 @@ public final class LayoutProfiler
             return adder == null ? 0 : adder.sum();
         }
 
-        /** Hook H17: a probe if a command of the group reads a watched key, else null. */
+        /**
+         * Hook H17: a probe if a command of the group reads a watched key, or else, if the group reads the table of a
+         * watched key, a probe of the rest of that table; else null.
+         */
         public Probe read(SinglePartitionReadCommand.Group group)
         {
             HOOK_CALLS.incrementAndGet();
             Probe probe = null;
+            Timing others = null;
             for (SinglePartitionReadCommand command : group.queries)
             {
                 Watch watch = find(command.metadata().id, command.partitionKey().getKey());
                 if (watch == null)
+                {
+                    others = others == null ? rest.get(command.metadata().id) : others;
                     continue;
+                }
                 ClusteringIndexFilter filter = command.clusteringIndexFilter();
                 (filter instanceof ClusteringIndexNamesFilter ? watch.namedReads : watch.sliceReads).increment();
                 probe = probe == null ? new Probe(true) : probe;
-                probe.watches.add(watch);
+                probe.timings.add(watch.timing);
             }
-            return probe;
+            return probe != null ? probe : others(true, others);
         }
 
-        /** Hook H16: a probe if a mutation writes a watched key, else null. */
+        /** Hook H16: a probe if a mutation writes a watched key, else one of the rest of a watched key's table it writes, else null. */
         public Probe write(List<? extends IMutation> mutations)
         {
             HOOK_CALLS.incrementAndGet();
             Probe probe = null;
+            Timing others = null;
             for (IMutation m : mutations)
             {
                 if (!(m instanceof Mutation))
@@ -352,15 +395,33 @@ public final class LayoutProfiler
                 {
                     Watch watch = find(update.metadata().id, update.partitionKey().getKey());
                     if (watch == null)
+                    {
+                        others = others == null ? rest.get(update.metadata().id) : others;
                         continue;
+                    }
                     if (!update.partitionLevelDeletion().isLive() || update.deletionInfo().hasRanges())
                         watch.deletes.increment();
                     watch.rowWrites.add(update.rowCount());
                     probe = probe == null ? new Probe(false) : probe;
-                    probe.watches.add(watch);
+                    probe.timings.add(watch.timing);
                 }
             }
+            return probe != null ? probe : others(false, others);
+        }
+
+        private static Probe others(boolean read, Timing others)
+        {
+            if (others == null)
+                return null;
+            Probe probe = new Probe(read);
+            probe.timings.add(others);
             return probe;
+        }
+
+        /** The requests to the table that touched no watched key, or null if no key of the table is watched. */
+        Timing rest(TableId table)
+        {
+            return rest.get(table);
         }
 
         /** Hook H19. */
@@ -389,7 +450,7 @@ public final class LayoutProfiler
     public static final class Probe
     {
         private final boolean read;
-        private final java.util.ArrayList<Watch> watches = new java.util.ArrayList<>(1);
+        private final java.util.ArrayList<Timing> timings = new java.util.ArrayList<>(1);
 
         private Probe(boolean read)
         {
@@ -398,19 +459,19 @@ public final class LayoutProfiler
 
         public void done(long nanos)
         {
-            for (Watch w : watches)
+            for (Timing t : timings)
             {
-                (read ? w.timedReads : w.timedWrites).increment();
-                (read ? w.readNanos : w.writeNanos).add(nanos);
+                (read ? t.timedReads : t.timedWrites).increment();
+                (read ? t.readNanos : t.writeNanos).add(nanos);
             }
         }
 
         public void failed()
         {
-            for (Watch w : watches)
+            for (Timing t : timings)
             {
-                (read ? w.timedReads : w.timedWrites).increment();
-                (read ? w.readErrors : w.writeErrors).increment();
+                (read ? t.timedReads : t.timedWrites).increment();
+                (read ? t.readErrors : t.writeErrors).increment();
             }
         }
     }

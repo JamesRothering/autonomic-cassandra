@@ -155,6 +155,11 @@ public final class Signals
     public static final SignalId KEY_ERROR_RATE = def("layout.key_error_rate", "fraction", "Fraction of the reads and writes of the watched key in the last collection interval that failed (absent when none)");
     public static final SignalId KEY_READ_OPS_DELTA = def("layout.key_read_ops_delta", "ops", "Reads of the watched key coordinated here since the previous collection");
     public static final SignalId KEY_WRITE_OPS_DELTA = def("layout.key_write_ops_delta", "ops", "Writes of the watched key coordinated here since the previous collection");
+    // ---- LayoutSensor (subject TABLE); only for tables with a watched key: the requests that touched no watched key (ADR-040) ----
+    public static final SignalId REST_READ_LATENCY_MICROS = def("layout.rest_read_latency_micros", "us", "Mean latency, over the last collection interval, of reads of the table that touched no watched key and that this node coordinated (absent when none)");
+    public static final SignalId REST_WRITE_LATENCY_MICROS = def("layout.rest_write_latency_micros", "us", "Mean latency, over the last collection interval, of writes of the table that touched no watched key and that this node coordinated (absent when none)");
+    public static final SignalId REST_READ_OPS_DELTA = def("layout.rest_read_ops_delta", "ops", "Reads of the table that touched no watched key, coordinated here since the previous collection");
+    public static final SignalId REST_WRITE_OPS_DELTA = def("layout.rest_write_ops_delta", "ops", "Writes of the table that touched no watched key, coordinated here since the previous collection");
 
     private Signals()
     {

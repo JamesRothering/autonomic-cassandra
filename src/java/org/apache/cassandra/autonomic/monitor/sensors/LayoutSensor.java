@@ -34,6 +34,7 @@ import org.apache.cassandra.autonomic.monitor.Sensor;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.tcm.ClusterMetadata;
 
@@ -43,7 +44,8 @@ import static org.apache.cassandra.autonomic.monitor.sensors.SensorSupport.emit;
  * The key signals of adaptive-schema design 7.3, from {@link LayoutProfiler}. It does two things on the monitor thread:
  * it keeps watched, on this node, every key of the layout registry whose migration is running (not STEADY, or STEADY
  * with its action still holding the claim), so the profile stays on for the whole migration; and it emits, for every
- * watched key, the deltas of the profiler's counters since the previous collection as means and an error rate. A
+ * watched key, the deltas of the profiler's counters since the previous collection as means and an error rate; and the
+ * same means for the rest of each table with a watched key (the requests that touched no watched key, ADR-040). A
  * collection with nothing watched and an empty registry does nothing else.
  *
  * <p>The signals are what this node coordinated: a node that coordinates none of a key's requests has none.
@@ -55,7 +57,8 @@ public class LayoutSensor implements Sensor
 
     private static final Set<SignalId> SIGNALS = Set.of(
         Signals.KEY_READ_LATENCY_MICROS, Signals.KEY_WRITE_LATENCY_MICROS, Signals.KEY_ERROR_RATE,
-        Signals.KEY_READ_OPS_DELTA, Signals.KEY_WRITE_OPS_DELTA);
+        Signals.KEY_READ_OPS_DELTA, Signals.KEY_WRITE_OPS_DELTA,
+        Signals.REST_READ_LATENCY_MICROS, Signals.REST_WRITE_LATENCY_MICROS, Signals.REST_READ_OPS_DELTA, Signals.REST_WRITE_OPS_DELTA);
 
     private final Map<String, LayoutProfiler.Shape> previous = new HashMap<>();
 
@@ -100,16 +103,39 @@ public class LayoutSensor implements Sensor
             long errors = (current.readErrors - before.readErrors) + (current.writeErrors - before.writeErrors);
             emit(sink, Signals.KEY_READ_OPS_DELTA, subject, now, reads);
             emit(sink, Signals.KEY_WRITE_OPS_DELTA, subject, now, writes);
-            long readErrors = current.readErrors - before.readErrors;
-            long writeErrors = current.writeErrors - before.writeErrors;
-            if (reads - readErrors > 0)
-                emit(sink, Signals.KEY_READ_LATENCY_MICROS, subject, now, (double) (current.readMicros - before.readMicros) / (reads - readErrors));
-            if (writes - writeErrors > 0)
-                emit(sink, Signals.KEY_WRITE_LATENCY_MICROS, subject, now, (double) (current.writeMicros - before.writeMicros) / (writes - writeErrors));
+            emitMeans(sink, Signals.KEY_READ_LATENCY_MICROS, Signals.KEY_WRITE_LATENCY_MICROS, subject, now, before, current);
             if (reads + writes > 0)
                 emit(sink, Signals.KEY_ERROR_RATE, subject, now, (double) errors / (reads + writes));
         }
+        for (TableId tableId : LayoutProfiler.watchedTables())
+        {
+            TableMetadata table = Schema.instance.getTableMetadata(tableId);
+            LayoutProfiler.Shape current = table == null ? null : LayoutProfiler.rest(tableId);
+            if (current == null)
+                continue;
+            Subject subject = Subject.table(table.keyspace, table.name);
+            String id = subject.asString();
+            live.add(id);
+            LayoutProfiler.Shape before = previous.put(id, current);
+            if (before == null || current.timedReads < before.timedReads || current.timedWrites < before.timedWrites)
+                continue;
+            emit(sink, Signals.REST_READ_OPS_DELTA, subject, now, current.timedReads - before.timedReads);
+            emit(sink, Signals.REST_WRITE_OPS_DELTA, subject, now, current.timedWrites - before.timedWrites);
+            emitMeans(sink, Signals.REST_READ_LATENCY_MICROS, Signals.REST_WRITE_LATENCY_MICROS, subject, now, before, current);
+        }
         previous.keySet().retainAll(live);
+    }
+
+    /** The mean latencies of the successful reads and writes between two shapes, where there were any. */
+    private static void emitMeans(ObservationSink sink, SignalId read, SignalId write, Subject subject, long now,
+                                  LayoutProfiler.Shape before, LayoutProfiler.Shape current)
+    {
+        long reads = (current.timedReads - before.timedReads) - (current.readErrors - before.readErrors);
+        long writes = (current.timedWrites - before.timedWrites) - (current.writeErrors - before.writeErrors);
+        if (reads > 0)
+            emit(sink, read, subject, now, (double) (current.readMicros - before.readMicros) / reads);
+        if (writes > 0)
+            emit(sink, write, subject, now, (double) (current.writeMicros - before.writeMicros) / writes);
     }
 
     /** Package-visible for tests: the hooks of the keys of running migrations on this node. */

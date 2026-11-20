@@ -407,9 +407,12 @@ public class LayoutReadsTest extends CQLTester
         assertEquals(0.5, shape.pointFraction(), 0.0);
         assertEquals(2, LayoutProfiler.hookCalls() - hooks);
 
-        // another key of the same table is looked at by the hook but not counted or taken over
-        assertNull(LayoutReads.read(group(logical, K + 1), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution()));
+        // another key of the same table is not counted for the key, but taken over and timed as the rest of the table (ADR-040)
+        PartitionIterator rest = LayoutReads.read(group(logical, K + 1), ConsistencyLevel.ONE, Dispatcher.RequestTime.forImmediateExecution());
+        assertNotNull(rest);
+        rest.close();
         assertEquals(2, LayoutProfiler.get(logical.id, key(K)).shape().timedReads);
+        assertEquals(1, LayoutProfiler.rest(logical.id).timedReads);
     }
 
     /** The whole partition with a limit of 1000 rows: with the default settings an eager read, which the test can see. */
