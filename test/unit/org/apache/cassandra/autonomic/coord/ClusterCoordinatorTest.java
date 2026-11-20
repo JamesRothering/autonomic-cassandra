@@ -192,6 +192,47 @@ public class ClusterCoordinatorTest
         assertTrue(c1.membersNotAlive().isEmpty());
     }
 
+    @Test
+    public void takeoverIsDueAtExpiryForThePreferredProposerAndOneMarginPerRankLater()
+    {
+        FakeCluster three = new FakeCluster(3);
+        ClusterCoordinator[] c = new ClusterCoordinator[4];
+        FakeCluster.Node[] env = new FakeCluster.Node[4];
+        for (int i = 1; i <= 3; i++)
+        {
+            env[i] = three.node(i);
+            c[i] = new ClusterCoordinator(env[i]);
+        }
+        c[1].setEnabled(true);
+        Claim claim = claim(c[1], Lane.MAINTENANCE, three.newActionId()).claim;
+        for (int i = 2; i <= 3; i++)
+            env[i].catchUp();
+        for (int i = 1; i <= 3; i++)
+            assertEquals(i - 1, c[i].proposerRank());
+
+        long expiry = claim.leaseExpiresAtMillis;
+        long margin = env[1].margin;
+        three.now.set(expiry + 1);
+        assertEquals(claim, c[1].takeoverDue().get(Lane.MAINTENANCE));
+        assertTrue(c[2].takeoverDue().isEmpty());
+        three.now.set(expiry + margin);
+        assertTrue("one margin after expiry, not yet", c[2].takeoverDue().isEmpty());
+        three.now.set(expiry + margin + 1);
+        assertEquals(claim, c[2].takeoverDue().get(Lane.MAINTENANCE));
+        assertTrue(c[3].takeoverDue().isEmpty());
+        three.now.set(expiry + 2 * margin + 1);
+        assertEquals(claim, c[3].takeoverDue().get(Lane.MAINTENANCE));
+
+        // a node that is down in a node's view does not count
+        three.now.set(expiry + 1);
+        env[3].down.add(env[1].self);
+        assertEquals(1, c[3].proposerRank());
+        assertTrue(c[3].takeoverDue().isEmpty());
+        env[3].down.add(env[2].self);
+        assertEquals(0, c[3].proposerRank());
+        assertEquals(claim, c[3].takeoverDue().get(Lane.MAINTENANCE));
+    }
+
     // ---- claims ----
 
     @Test

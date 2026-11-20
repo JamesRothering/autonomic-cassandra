@@ -40,10 +40,10 @@ import static org.junit.Assert.assertTrue;
  * T7.7 (T7.2 finding 3, ADR-038): an expired claim whose owner is the preferred proposer but paused is still taken
  * over. Node 1 owns a claim in phase P1 and dies without releasing it; nobody takes it over while node 1 is down
  * (nodes 2 and 3 are paused, standing in for peers whose failure detector has not convicted it yet). Node 1 restarts
- * past its lease, records its action FAILED with CLAIM_LOST and pauses itself. Nodes 2 and 3 are resumed and see node
- * 1 alive, so node 1 is the preferred proposer of every node. Node 2, the next node in id order, takes the expired
- * claim over one grace period later and its actuator's {@code recover} undoes the action; node 1 and node 3 call
- * nothing.
+ * past its lease, records its action FAILED with CLAIM_LOST and pauses itself. Nodes 2 and 3 see node 1 alive, so
+ * node 1 is the preferred proposer of every node. Node 2, the next node in id order, is resumed and takes the
+ * expired claim over (one {@code lease_safety_margin} after expiry); its actuator's {@code recover} undoes the
+ * action. Node 1 and node 3 call nothing.
  *
  * <p>Three nodes with the CMS on all three, as in {@link OwnerKilledFaultTest}: the claim must outlive its owner.
  */
@@ -110,19 +110,21 @@ public class ExpiredClaimTakeoverFaultTest extends TestBaseImpl
             assertEquals(status.toString(), "PAUSED", status.get("state"));
             assertEquals(status.toString(), "ACTION_FAILED", status.get("pause_reason"));
 
-            // its peers see it alive and run again; node 1 stays the preferred proposer of all three
+            // its peers see it alive, so node 1 stays the preferred proposer of all three; node 2 runs again. Node 3
+            // stays paused until the takeover: once both are past their turn, either may win the takeover commit
             InetSocketAddress address = owner.broadcastAddress();
             for (int i = 2; i <= 3; i++)
             {
                 IInvokableInstance node = cluster.get(i);
                 await("node " + i + " to see node 1 alive", () -> node.callOnInstance(() -> FaultSupport.inAlive(address)));
-                node.runOnInstance(() -> AutonomicService.instance.resume());
             }
             for (int i = 1; i <= 3; i++)
                 assertEquals("node " + i, String.valueOf(i == 1), cluster.get(i).callOnInstance(() -> AutonomicService.instance.getClusterStatus().get("preferred_proposer")));
+            cluster.get(2).runOnInstance(() -> AutonomicService.instance.resume());
 
             // in flight restored by the next node in id order: node 2 takes over and undoes the action
             await("the takeover", () -> "ROLLED_BACK".equals(recentFinalState(cluster.get(2))));
+            cluster.get(3).runOnInstance(() -> AutonomicService.instance.resume());
             assertEquals(List.of("recover:RECOVERING:0"), cluster.get(2).callOnInstance(() -> FaultSupport.inClusterCalls("recover")));
             assertEquals(List.of(), cluster.get(3).callOnInstance(() -> FaultSupport.inClusterCalls("recover")));
             for (int i = 1; i <= 3; i++)

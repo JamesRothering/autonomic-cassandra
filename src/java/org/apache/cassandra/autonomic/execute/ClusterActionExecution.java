@@ -69,7 +69,8 @@ import org.apache.cassandra.utils.JVMStabilityInspector;
  * <li>Kill, shutdown and a step that keeps throwing: past the commit point the claim is released as
  *     COMMITTED_CLEANUP_PENDING; before it the actuator's abort path runs until it reports a terminal result.</li>
  * <li>A lease is renewed every third of its length by the periodic tick, which also takes over expired claims
- *     of any node when this node is the preferred proposer, and then drives {@code recover}.</li>
+ *     of any node when this node's turn has come (the preferred proposer at expiry, the next nodes in id order
+ *     later, ADR-038), and then drives {@code recover}.</li>
  * </ul>
  *
  * <p>Threading: everything runs on the actuator thread (through the {@link StepScheduler}), which is where commits
@@ -666,8 +667,9 @@ public class ClusterActionExecution implements ActionExecutor.ClusterExecution, 
         // a recovery is new work for this node: not while paused, killed or not armed
         if (host.gate() != null || !coordinator.enabled())
             return;
-        Map<Lane, Claim> expired = coordinator.expiredClaims();
-        if (expired.isEmpty() || !coordinator.preferredProposer())
+        // ADR-038: the preferred proposer at expiry, each next node in id order one grace period later
+        Map<Lane, Claim> expired = coordinator.takeoverDue();
+        if (expired.isEmpty())
             return;
         for (Map.Entry<Lane, Claim> e : expired.entrySet())
         {

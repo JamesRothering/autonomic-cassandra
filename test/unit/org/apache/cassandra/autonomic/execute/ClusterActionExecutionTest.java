@@ -496,6 +496,30 @@ public class ClusterActionExecutionTest
     }
 
     @Test
+    public void takeoverByTheNextNodeWhenThePreferredProposerDoesNotTakeOver()
+    {
+        // ADR-038: node 1, the preferred proposer of both nodes, does not take its expired claim over (paused)
+        p1.actuator.onStep = claim -> StepResult.stay(1000);
+        p1.startedIn("CLAIMED");
+        Claim old = claim(Lane.MAINTENANCE);
+        p2.env.catchUp();
+        p1.gate = Reasons.PAUSED;
+        cluster.now.set(old.leaseExpiresAtMillis + p2.env.margin);
+        p1.execution.tick();
+        p2.execution.tick();
+        assertEquals("within one margin of expiry only the preferred proposer may", old, claim(Lane.MAINTENANCE));
+        cluster.now.addAndGet(1);
+        p2.execution.tick();
+        Claim taken = claim(Lane.MAINTENANCE);
+        assertEquals(p2.env.self, taken.owner);
+        assertEquals(Claim.RECOVERING, taken.phase);
+        p1.env.catchUp();
+        p1.gate = null;
+        p1.execution.tick();
+        assertEquals("one takeover", taken, claim(Lane.MAINTENANCE));
+    }
+
+    @Test
     public void claimLostMidActionByForcedRelease()
     {
         Action a = p1.startedIn("P2");

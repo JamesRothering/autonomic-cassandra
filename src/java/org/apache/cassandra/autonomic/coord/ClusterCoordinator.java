@@ -221,6 +221,30 @@ public class ClusterCoordinator implements ChangeListener
         return false;
     }
 
+    /**
+     * ADR-038: this node's place in the takeover order, the number of JOINED members with a lower id that it sees
+     * alive; 0 for the preferred proposer, -1 if this node is not a JOINED member.
+     */
+    public int proposerRank()
+    {
+        NodeId self = self();
+        ClusterMetadata metadata = env.metadata();
+        if (self == null || metadata == null)
+            return -1;
+        Directory directory = metadata.directory;
+        int rank = 0;
+        for (NodeId id : directory.peerIds())
+        {
+            if (directory.peerState(id) != NodeState.JOINED)
+                continue;
+            if (id.equals(self))
+                return rank;
+            if (env.isAlive(id))
+                rank++;
+        }
+        return -1;
+    }
+
     /** FC3: ids of directory members this node does not see alive; empty if all are. */
     public List<NodeId> membersNotAlive()
     {
@@ -274,6 +298,24 @@ public class ClusterCoordinator implements ChangeListener
             if (e.getValue().leaseExpiresAtMillis < now)
                 expired.put(e.getKey(), e.getValue());
         return expired;
+    }
+
+    /**
+     * ADR-038: expired claims this node may take over now, by lane. The preferred proposer (rank 0) may at expiry;
+     * the node of rank {@code r} one {@code lease_safety_margin} per rank later, so that an expired claim is
+     * recovered even when the nodes before it in the order do not take it over (paused, killed, actuator disabled).
+     * Who wins is still decided by {@link ClaimAction}.
+     */
+    public Map<Lane, Claim> takeoverDue()
+    {
+        int rank = proposerRank();
+        if (rank < 0)
+            return new LinkedHashMap<>();
+        long now = env.nowMillis();
+        long wait = rank * env.leaseSafetyMarginMillis();
+        Map<Lane, Claim> due = expiredClaims();
+        due.values().removeIf(claim -> claim.leaseExpiresAtMillis + wait >= now);
+        return due;
     }
 
     // ---------------------------------------------------------------------------------------------------------

@@ -484,11 +484,9 @@ Within a few analyze intervals the diagnosis turns `CLEARED`. `revert` restores 
 
 ### From fault injection (T7.2, `docs/deliverables/D7-verification.md`)
 
-Every fault tested ends fail-static. The one below is not a fail-static violation, and the owner has not fixed it yet. Two others are fixed: a `CLAIM_LOST` recorded during shutdown used to lose its `action_failed` diagnosis (it is now written on the shutdown path), and a failed audit write used to stay unwritten after the knowledge store recovered. Now the first successful write afterwards rewrites the latest state of each terminal action whose row is stale and deletes its `inflight` key, up to 64 pending entries; anything beyond that is left to restart recovery.
+Every fault tested ends fail-static. Three findings are fixed: a `CLAIM_LOST` recorded during shutdown used to lose its `action_failed` diagnosis (it is now written on the shutdown path), and a failed audit write used to stay unwritten after the knowledge store recovered. Now the first successful write afterwards rewrites the latest state of each terminal action whose row is stale and deletes its `inflight` key, up to 64 pending entries; anything beyond that is left to restart recovery.
 
-**An owner that restarts after its lease expired, while peers still see it alive, pauses on `CLAIM_LOST`.** It is the preferred proposer, so no other node takes over the expired claim. The lane stays claimed until you act. On that node run `nodetool autonomic cluster status` to confirm, then `nodetool autonomic resume`. If the claim stays, `nodetool autonomic cluster release <lane>`.
-
-This cannot be shown on a healthy single node, so it was not run live. It has no test; it was found by reading the code.
+The third fix (T7.7, ADR-038): an owner that restarts after its lease expired, while peers still see it alive, pauses on `CLAIM_LOST`. It is still the preferred proposer, and it used to be the only node allowed to take over the expired claim, so the lane stayed claimed until an operator acted. Now the next node in id order takes the claim over one `lease_safety_margin` after expiry (the node after it two margins after, and so on) and rolls it back or finishes it. The same applies when the preferred proposer is paused or killed for any other reason. Expect such a recovery up to `rank × lease_safety_margin` after the lease expired. The paused owner itself stays paused: check its `action_failed` diagnosis, then `nodetool autonomic resume`. `ExpiredClaimTakeoverFaultTest` covers it.
 
 ### cqlsh cannot read `system_autonomic` (T7.5)
 
