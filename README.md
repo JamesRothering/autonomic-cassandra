@@ -46,6 +46,7 @@ Guardrails apply to every stage: dry-run mode (plan and log without acting), a k
 - [docs/deliverables/README.md](docs/deliverables/README.md): the deliverable plan (D0 to D7) and their status.
 - [docs/architecture/](docs/architecture/): architecture specifications (produced in D1).
 - [docs/BUILD.md](docs/BUILD.md): how to build and test the fork.
+- [docs/operations/autonomic.md](docs/operations/autonomic.md): operator guide for the autonomic layer.
 - [README.asc](README.asc): upstream Apache Cassandra README.
 
 ## Git conventions
