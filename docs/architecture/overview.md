@@ -463,7 +463,7 @@ All read-only, all local to the queried node, defined in `AutonomicVirtualTables
 
 | Table | Source | Columns (key first) |
 |-------|--------|---------------------|
-| `system_views.autonomic_status` | `AutonomicService` | `name text` PK, `value text`: state, dry_run, paused_reason, armed, loop iteration counts, last tick times, in-flight action count |
+| `system_views.autonomic_status` | `AutonomicService` | `name text` PK, `value text`: state, dry_run, pause_reason, armed, loop iteration counts, last tick times, in-flight action count |
 | `system_views.autonomic_components` | component registry | `kind text`, `name text` PK; `enabled boolean`, `healthy boolean`, `last_run timestamp`, `last_duration_micros bigint`, `consecutive_failures int`, `disabled_reason text` |
 | `system_views.autonomic_signals` | `ObservationStore` | `signal text`, `subject text` PK; `value double`, `at timestamp`, `samples int` |
 | `system_views.autonomic_diagnoses` | memory (open) and `system_autonomic.diagnoses` (last 24h) | as the table |
@@ -603,7 +603,7 @@ Evaluated in this order; the first failing check rejects the action with its nam
 |---|-------|---------|-------|
 | 1 | `KILLED` / `PAUSED` / not armed | | |
 | 2 | `DRY_RUN` | `dry_run: true` | Action is recorded as `REJECTED` with reason `DRY_RUN` and the full plan, so operators can see what would have happened. Dry-run is the default when the layer is first enabled. |
-| 3 | `ACTUATOR_DISABLED` | each actuator off by default | |
+| 3 | `ACTUATOR_DISABLED`, `CLUSTER_DISABLED` | each actuator off by default; cluster actions off until `nodetool autonomic cluster enable` | the cluster gate is checked with the actuator gate |
 | 4 | `VALIDATION` | | `Actuator.validate` |
 | 5 | `NODE_STATE` | | node must be `JOINED`, not draining (`StorageService.isDraining()`); for the `TOPOLOGY` and `SCHEMA_LAYOUT` lanes also no in-progress sequences and every directory member alive (`ClusterGate.nodeState`, FC3) |
 | 6 | `STORE_UNAVAILABLE` | | the write-ahead record for the action must be writable (section 7.6) |
@@ -1067,7 +1067,7 @@ The refined D6 task list (T6.1 to T6.16), with files, dependencies, acceptance c
 |----|-------------|-------|---------|-----------|------|
 | T7.1 | Scenario dtests: hot spot, load spike, degraded node; each asserts diagnosis, action, verdict | dtests | D3 to D6 | each under 5 minutes within ADR-003 limits | sonnet |
 | T7.2 | Fault injection of the layer: throwing sensor, unwritable store, CMS unreachable during claim, owner killed mid-action, control thread stalled, repeated regressions tripping the breaker | dtests | D2 to D5 | each failure converges to the fail-static behaviour in 7.5 | fable |
-| T7.3 | cassandra-stress profiles for the three scenarios | `tools/stress` profile yaml only | T7.1 | profiles run against a single node | haiku |
+| T7.3 | cassandra-stress profiles for the three scenarios | `tools/autonomic/stress/` profile yaml only | T7.1 | profiles run against a single node | haiku |
 | T7.4 | Operator guide: configuration, gates, kill switch, `nodetool autonomic`, rollback, sampler contention, one-way cluster enable, folding committed values into yaml | `docs/` | all | each step executed against a running node | sonnet |
 
 ### Changes to the previous plan

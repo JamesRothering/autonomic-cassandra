@@ -31,4 +31,4 @@ Work is organized into deliverables D0 to D7. Each deliverable is developed on a
 | D4 | Self-healing | Done | D3 | [D4-self-healing.md](D4-self-healing.md) |
 | D5 | Elasticity | Done | D4 | [D5-elasticity.md](D5-elasticity.md) |
 | D6 | Adaptive schema | Done | D2 (T2.8) | [D6-adaptive-schema.md](D6-adaptive-schema.md) |
-| D7 | Verification | In progress | D4, D5, D6 | [D7-verification.md](D7-verification.md) |
+| D7 | Verification | Done, awaiting owner review | D4, D5, D6 | [D7-verification.md](D7-verification.md) |
