@@ -31,6 +31,20 @@ Show the autonomic behaviors end to end under realistic scenarios, and document 
 - **T7.3** cassandra-stress workload profiles that drive the scenarios.
 - **T7.4** Operator guide.
 
+Follow-up tasks the owner added at the D7 review (2026-11-20):
+
+- **T7.5** Fix four findings (sonnet):
+  - lost `action_failed` diagnosis on shutdown (T7.2 finding 2)
+  - audit writes not retried after the store recovers (T7.2 finding 1)
+  - `approve` while paused (T7.4 finding 1)
+  - `cqlsh` reads of `system_autonomic` (T7.4 finding 2)
+- **T7.6** `baseline_drift` reports the drifted value (T7.4 finding 3) (sonnet; done with T7.5).
+- **T7.7** An expired claim is taken over when its owner restarts past its lease while peers still see it alive (T7.2 finding 3) (opus).
+- **T7.8** Latency verification of a split that judges latency correctly, instead of being relaxed in the hot-spot scenario (opus).
+- **T7.9** A load-spike scenario driven by real client load, with no injected sensors (sonnet).
+- **T7.10** A way to make the layer propose a split by itself on a live node: config, stress profile and script (sonnet).
+- **T7.11** A repeatability harness that runs the scenario and fault classes N times and reports pass rate and timing, plus a recorded run (haiku for the script; run last).
+
 ## Acceptance criteria
 
 - [x] Each scenario in T7.1 runs in CI or on the development machine within the resource limits in ADR-003.
