@@ -657,3 +657,19 @@ ADR-020 is accepted with one change: its statement that `NEW_ONLY` has no undo h
 **Alternatives considered.** The restarted owner rolling back its own expired claim while paused was rejected: it is new work on a node that paused itself, possibly at restart before it is armed or while an operator has killed it, and it covers only the restart case, not a preferred proposer paused or killed for any other reason. Skipping a paused or killed node in the preferred-proposer choice was rejected because no node can see another's pause state: it would need new gossip state or a ledger field per node. Letting any live node take over after one common grace period was rejected in favour of the ordering, which gives the same recovery with at most one competing takeover commit at a time.
 
 **Consequences.** Fail-static holds: a takeover only runs `recover`, which undoes or finishes what is in flight, and applies no new change. Two nodes never both act on one claim: `ClaimAction` admits a takeover only of a claim that is expired at the proposer's timestamp, so of two concurrent takeovers the second finds the lane held by an unexpired claim and is rejected; the old owner stops acting at `leaseExpiresAt - lease_safety_margin`, before any takeover. The order only spaces the first attempts: once several nodes are past their turn (for example nodes that were paused themselves), any of them may win the commit. When the preferred proposer is paused, a claim is recovered `rank * lease_safety_margin` after its expiry (60 s per rank by default). The TLA+ specs in `docs/specs/` model the layout migration, not the ledger's leases or takeover, and are not affected.
+
+## ADR-039: Do not make `system_autonomic` queryable from cqlsh
+
+- **Date:** 2026-11-20
+- **Status:** Accepted (owner decision at the D7 review)
+- **Deliverable:** D7
+
+**Context.** T7.4 found that `cqlsh` cannot `SELECT` from `system_autonomic.*` ("Keyspace not found"), although `DESCRIBE KEYSPACES` lists the keyspace. T7.5 traced the cause to upstream, not to this fork. The python driver that `cqlsh` uses reads table metadata from `system_schema`, and upstream's `SchemaKeyspace.saveSystemKeyspacesSchema` writes only `system` and `system_schema` of the node-local keyspaces there. Upstream's own `system_accord` is affected in the same way. The owner asked for all six D7 findings to be fixed, and this one cannot be fixed without changing core `SchemaKeyspace`.
+
+**Decision.** Leave it as it is. `system_autonomic` stays out of `system_schema`, and the fork makes no core change for it. Operators read the layer's state through `nodetool autonomic` (`status`, `history`, `events`, `actuators`), the `system_views.autonomic_*` virtual tables, and server-side `DESCRIBE KEYSPACE system_autonomic`. The operator guide (`docs/operations/autonomic.md`, section 9) documents the cause and these routes.
+
+The owner debated this decision for a while before making it. The owner's reasoning: the whole point of this fork is to avoid operational intervention. Making the approach more invasive into core Cassandra runs against that. Operators should have no need to query the system schema with `cqlsh`, especially since the same data is available by other means, such as `nodetool` commands and the virtual tables.
+
+**Alternatives considered.** A core change that also writes `system_autonomic` to `system_schema` was rejected. It would add a core change outside the enumerated hooks of ADR-011 and ADR-022, and it would change upstream behaviour that may be deliberate, since upstream's own `system_accord` is treated the same way. It would also give operators only another way to read data they can already read.
+
+**Consequences.** The finding is closed as accepted, not fixed. The core change budget of ADR-011 is unchanged. If a later need calls for client-side CQL access to this data, it should go through a virtual table, not through `system_schema`.
