@@ -63,7 +63,6 @@ import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
 import org.apache.cassandra.autonomic.plan.Policy;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
-import org.apache.cassandra.concurrent.ExecutorPlus;
 import org.apache.cassandra.locator.NetworkTopologyStrategy;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.TableMetadata;
@@ -72,6 +71,7 @@ import org.apache.cassandra.tcm.membership.NodeId;
 import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.TimeUUID;
+import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.Future;
 
 import static org.apache.cassandra.concurrent.ExecutorFactory.Global.executorFactory;
@@ -504,7 +504,6 @@ public class PartitionSplitPolicy implements Policy
     static final class NodeEnv implements Env
     {
         private final ClusterCoordinator coordinator;
-        private volatile ExecutorPlus probes;
 
         NodeEnv(ClusterCoordinator coordinator)
         {
@@ -532,14 +531,19 @@ public class PartitionSplitPolicy implements Policy
         @Override
         public Future<PartitionProbe.Result> probe(TableMetadata table, ByteBuffer key, long maxRows)
         {
-            return probes().submit(() -> PartitionProbe.run(table, key, maxRows));
-        }
-
-        private synchronized ExecutorPlus probes()
-        {
-            if (probes == null)
-                probes = executorFactory().sequential("AutonomicLayoutProbe");
-            return probes;
+            // a thread of its own that ends with the probe: a pool would keep an idle thread that nothing stops with the layer
+            AsyncPromise<PartitionProbe.Result> result = new AsyncPromise<>();
+            executorFactory().startThread("AutonomicLayoutProbe", () -> {
+                try
+                {
+                    result.setSuccess(PartitionProbe.run(table, key, maxRows));
+                }
+                catch (Throwable t)
+                {
+                    result.tryFailure(t);
+                }
+            });
+            return result;
         }
 
         @Override
