@@ -1,0 +1,53 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+#
+# Load spike: a uniform read/write mix over many partitions. Run with a high thread count or rate
+# to saturate the request pools, as in LoadSpikeScenarioTest.
+#
+# cassandra-stress user profile=tools/autonomic/stress/load-spike.yaml "ops(spike_write=1,spike_read=1)" n=20000 -rate threads=8 -node 127.0.0.1
+
+keyspace: autonomic_stress
+
+keyspace_definition: |
+  CREATE KEYSPACE autonomic_stress WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+table: load_spike
+
+table_definition: |
+  CREATE TABLE load_spike (
+        id int,
+        seq int,
+        v int,
+        PRIMARY KEY (id, seq)
+  )
+
+columnspec:
+  - name: id
+    population: uniform(1..1000000)
+  - name: seq
+    population: uniform(1..100)
+  - name: v
+    population: uniform(1..1000000)
+
+queries:
+   spike_read:
+      cql: select v from load_spike where id = ? and seq = ?
+      fields: multirow
+   spike_write:
+      cql: insert into load_spike (id, seq, v) values (?, ?, ?)
+      fields: multirow
