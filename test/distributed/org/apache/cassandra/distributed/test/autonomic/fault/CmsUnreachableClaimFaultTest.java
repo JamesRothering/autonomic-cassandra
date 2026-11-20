@@ -52,7 +52,8 @@ import static org.junit.Assert.assertTrue;
  *     with the log, before its lease could expire, and nothing ran under it.</li>
  * </ol>
  * Two nodes suffice: the proposer must be a non-CMS node that does not see the CMS alive, which is exactly what a
- * partition from a single-member CMS gives.
+ * partition from a single-member CMS gives. {@code cms_commit_timeout} is below {@code action_step_timeout}: the
+ * claim commit is bounded by both, and the actuator-stall check pauses a node whose step outlasts the latter.
  */
 public class CmsUnreachableClaimFaultTest extends TestBaseImpl
 {
@@ -84,7 +85,9 @@ public class CmsUnreachableClaimFaultTest extends TestBaseImpl
     @Test
     public void aClaimTheCmsCannotConfirmChangesNothing() throws Throwable
     {
-        try (Cluster cluster = init(Cluster.build(2).withConfig(c -> FaultSupport.clusterConfig(c, "60s")).start()))
+        // a claim the CMS cannot confirm blocks the actuator thread until the commit gives up; that must end well
+        // before action_step_timeout (5s), or the stall check may pause node 2 (ACTUATOR_STALLED)
+        try (Cluster cluster = init(Cluster.build(2).withConfig(c -> FaultSupport.clusterConfig(c, "60s").set("cms_commit_timeout", "2s")).start()))
         {
             IInvokableInstance cms = cluster.get(1);
             IInvokableInstance proposer = cluster.get(2);
