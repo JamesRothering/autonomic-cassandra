@@ -484,13 +484,12 @@ Within a few analyze intervals the diagnosis turns `CLEARED`. `revert` restores 
 
 ### From fault injection (T7.2, `docs/deliverables/D7-verification.md`)
 
-Every fault tested ends fail-static. These three are not fail-static violations, and the owner has not fixed them yet.
+Every fault tested ends fail-static. These are not fail-static violations, and the owner has not fixed them yet. (A `CLAIM_LOST` recorded during shutdown used to lose its `action_failed` diagnosis; it is now written on the shutdown path.)
 
 1. **A failed audit write is not retried after the knowledge store recovers.** The stored action row stays `APPLYING`, and its `inflight` key stays, until the next restart. Look for an action that stays `APPLYING` in `history` long after the store is back (`store_available` true in `autonomic_status`). The change itself was made or rolled back correctly. Restart the node to clear the stale row.
-2. **A `CLAIM_LOST` recorded during shutdown loses its diagnosis.** The `action_failed` diagnosis is queued on a thread that is already stopping. After the restart the layer is `PAUSED` with reason `ACTION_FAILED` and no diagnosis explaining it. Check the latest actions with `nodetool autonomic history` and `nodetool autonomic cluster status`, then `resume`.
-3. **An owner that restarts after its lease expired, while peers still see it alive, pauses on `CLAIM_LOST`.** It is the preferred proposer, so no other node takes over the expired claim. The lane stays claimed until you act. On that node run `nodetool autonomic cluster status` to confirm, then `nodetool autonomic resume`. If the claim stays, `nodetool autonomic cluster release <lane>`.
+2. **An owner that restarts after its lease expired, while peers still see it alive, pauses on `CLAIM_LOST`.** It is the preferred proposer, so no other node takes over the expired claim. The lane stays claimed until you act. On that node run `nodetool autonomic cluster status` to confirm, then `nodetool autonomic resume`. If the claim stays, `nodetool autonomic cluster release <lane>`.
 
-None of the three can be shown on a healthy single node, so none was run live. Findings 1 and 2 were found by the T7.2 fault dtests (`test/distributed/.../autonomic/fault/`). Finding 3 has no test; it was found by reading the code.
+Neither can be shown on a healthy single node, so neither was run live. Finding 1 was found by a T7.2 fault dtest (`test/distributed/.../autonomic/fault/`). Finding 2 has no test; it was found by reading the code.
 
 ### cqlsh cannot read `system_autonomic` (T7.5)
 

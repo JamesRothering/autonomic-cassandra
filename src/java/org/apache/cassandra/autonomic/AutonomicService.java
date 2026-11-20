@@ -1130,6 +1130,9 @@ public class AutonomicService implements AutonomicServiceMBean
             executor = null;
             governor = null;
             ExecutorUtils.shutdownNowAndWait(timeout, unit, executors);
+            // the control thread has stopped, so diagnoses raised on the way down (such as action_failed from a
+            // CLAIM_LOST) would be lost in its queue: write them here, on the shutdown path
+            drainDiagnosisWrites();
             for (Detector detector : builtinDetectors)
                 safely("stop", detector.name(), detector::stop);
             for (Sensor sensor : sensors)

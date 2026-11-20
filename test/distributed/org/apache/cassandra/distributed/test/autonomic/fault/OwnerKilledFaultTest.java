@@ -83,6 +83,20 @@ public class OwnerKilledFaultTest extends TestBaseImpl
         return rows.length == 0 ? null : rows[0][0] + ":" + rows[0][1];
     }
 
+    /** The number of persisted {@code autonomic.action_failed} diagnoses on a node that name the action. */
+    private static int actionFailedDiagnoses(Cluster cluster, int node, String actionId)
+    {
+        int found = 0;
+        for (Object[] row : cluster.coordinator(node).execute("SELECT type, evidence FROM system_autonomic.diagnoses ALLOW FILTERING", ConsistencyLevel.ONE))
+        {
+            @SuppressWarnings("unchecked")
+            Map<String, String> evidence = (Map<String, String>) row[1];
+            if (FaultSupport.ACTION_FAILED.equals(row[0]) && evidence != null && actionId.equals(evidence.get("action")))
+                found++;
+        }
+        return found;
+    }
+
     /** The owner dies: nothing it sends on the way down arrives, and its peers' failure detectors convict it. */
     private static void kill(Cluster cluster, IInvokableInstance owner)
     {
@@ -149,9 +163,10 @@ public class OwnerKilledFaultTest extends TestBaseImpl
             Map<String, String> status = owner.callOnInstance(() -> AutonomicService.instance.getStatus());
             assertEquals(status.toString(), "PAUSED", status.get("state"));
             assertEquals(status.toString(), "ACTION_FAILED", status.get("pause_reason"));
-            // the audit trail of the action ends FAILED; the action_failed diagnosis raised on the way down is not
-            // asserted: its write is queued for a control thread that is already stopping, and the restarted layer
-            // pauses from the persisted flag without raising it again
+            // the action_failed diagnosis raised while the owner shut down is persisted (T7.5), not lost with the
+            // control thread that was stopping: it is there after the restart, and the restart sweep may have cleared it
+            assertTrue("the action_failed diagnosis of " + first, actionFailedDiagnoses(cluster, 1, first) >= 1);
+            // the audit trail of the action ends FAILED
             List<String> trail = events(cluster, 1, UUID.fromString(first));
             assertEquals(trail.toString(), "FAILED", trail.get(trail.size() - 1));
             assertEquals(List.of(), owner.callOnInstance(() -> FaultSupport.inClaims()));
