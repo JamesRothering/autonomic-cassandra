@@ -55,7 +55,8 @@ STRESS_PID=""
 
 stop_all()
 {
-    [ -n "$STRESS_PID" ] && kill "$STRESS_PID" 2>/dev/null
+    # the stress tool is a shell wrapper around a JVM: stop the child first
+    [ -n "$STRESS_PID" ] && { pkill -P "$STRESS_PID" 2>/dev/null; kill "$STRESS_PID" 2>/dev/null; }
     if [ -s "$PIDFILE" ]; then
         pid="$(cat "$PIDFILE")"
         kill "$pid" 2>/dev/null
