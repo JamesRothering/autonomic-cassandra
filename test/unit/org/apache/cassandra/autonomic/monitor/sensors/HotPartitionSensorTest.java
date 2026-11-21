@@ -118,6 +118,11 @@ public class HotPartitionSensorTest extends CQLTester
         assertEquals(table, top.subject.table);
         assertTrue("share " + top.value, top.value >= 0.9 && top.value <= 1.0);
         assertTrue(sink.value(Signals.PARTITION_WRITE_OPS_PER_SEC, top.subject) > 0);
+        // the denominator of the share, for consumers that add up windows (ADR-041)
+        Double tableWrites = sink.value(Signals.SAMPLED_TABLE_WRITES, Subject.table(keyspace(), table));
+        assertEquals(200, tableWrites, 0);
+        assertEquals(190, top.value * tableWrites, 1);
+        assertTrue(sink.of(Signals.SAMPLED_TABLE_READS).isEmpty());
 
         // the raw key bytes round trip, through hex and through the subject string
         ByteBuffer expected = Int32Type.instance.decompose(7);

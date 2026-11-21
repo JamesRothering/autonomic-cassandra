@@ -991,6 +991,8 @@ public class PartitionSplitActuatorTest
     private void overflowShare(double share)
     {
         TableLayout layout = LayoutRegistry.of(cluster.log).layout(LOGICAL);
+        // one sampling window of 1000 reads of the overflow table, the denominator of the share (ADR-041)
+        observe(Signals.SAMPLED_TABLE_READS, Subject.table(KS, layout.physicalName), cluster.now.get(), 1000);
         observe(Signals.PARTITION_READ_SHARE, Subject.partition(KS, layout.physicalName, "0001"), cluster.now.get(), share);
     }
 

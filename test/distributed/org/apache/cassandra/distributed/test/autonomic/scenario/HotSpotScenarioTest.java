@@ -22,7 +22,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.Test;
 
@@ -64,25 +65,29 @@ public class HotSpotScenarioTest extends TestBaseImpl
     private static final int HOT = 1;
     private static final int ROWS = 1500;
     private static final int OTHERS = 18;
+    /** Client threads: enough operations for every guard's {@code min_samples} in each stage's window on a loaded host. */
+    private static final int CLIENTS = 3;
     /** The latency guards of ADR-040, each of which must have been judged, and passed, in stage A and in stage B. */
     private static final String[] GUARDS = { "collateral read latency ok", "collateral write latency ok", "key read latency ok", "key write latency ok" };
 
     // Stage A's window is cutover_soak, stage B's runs from the commit point to STEADY (straggler_window and cleanup),
     // capped at verify_window: each must hold min_samples operations of every class, and stage B at least one
-    // collection of LayoutSensor (every 5 s). The single client thread makes a few hundred operations a second, a few
-    // percent of them on the rest of the table, so the soak is 20 s. Stage B's window stays at 12 s: its goal is the
-    // largest share sampled in the window, and on a loaded host a late sampler window can overstate a share up to 1.
+    // collection of LayoutSensor (every 5 s). Each client thread makes a few hundred operations a second, a few
+    // percent of them on the rest of the table. Stage B's goal adds up the sampler's windows (ADR-041), so its window
+    // may be as long as needed. cas_contention_timeout bounds the first CMS node's pre-initialize CAS at startup,
+    // which is not retried: at its default of 1.8 s a loaded host has failed the cluster's start.
     private static void configure(IInstanceConfig c)
     {
         c.with(NETWORK, GOSSIP)
          .set("write_request_timeout", "2000ms")
          .set("range_request_timeout", "5000ms")
+         .set("cas_contention_timeout", "5000ms")
          .set("autonomic.layout", Map.ofEntries(Map.entry("ack_poll_interval", "200ms"), Map.entry("cas_drain", "100ms"),
-                                                Map.entry("cutover_soak", "20s"), Map.entry("straggler_window", "13s"),
+                                                Map.entry("cutover_soak", "20s"), Map.entry("straggler_window", "17s"),
                                                 Map.entry("commit_approval", "auto"), Map.entry("verify_recheck_delay", "200ms"),
                                                 Map.entry("backfill_throughput", "0MiB/s"), Map.entry("for_evaluations", 3),
                                                 Map.entry("min_rows_for_split", 500), Map.entry("profile_window", "3s"),
-                                                Map.entry("baseline_window", "3s"), Map.entry("verify_window", "12s")));
+                                                Map.entry("baseline_window", "3s"), Map.entry("verify_window", "16s")));
         if (c.num() != 1)
             return;
         c.set("autonomic.enabled", true)
@@ -106,8 +111,8 @@ public class HotSpotScenarioTest extends TestBaseImpl
             cluster.schemaChange("CREATE KEYSPACE " + KS + " WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}");
             cluster.schemaChange("CREATE TABLE " + KS + ".t (id int, seq int, v int, PRIMARY KEY (id, seq))");
             String insert = "INSERT INTO " + KS + ".t (id, seq, v) VALUES (?, ?, ?)";
-            TreeMap<Integer, Integer> model = new TreeMap<>();
-            Set<Integer> uncertain = new HashSet<>();
+            Map<Integer, Integer> model = new ConcurrentHashMap<>();
+            Set<Integer> uncertain = ConcurrentHashMap.newKeySet();
             for (int start = 0; start < ROWS; start += 250)
             {
                 StringBuilder batch = new StringBuilder("BEGIN UNLOGGED BATCH ");
@@ -121,46 +126,66 @@ public class HotSpotScenarioTest extends TestBaseImpl
             await("the layer to be armed", () -> cluster.get(1).nodetoolResult("autonomic", "status").getStdout().contains("Armed: true"));
             cluster.get(1).nodetoolResult("autonomic", "cluster", "enable", "--yes").asserts().success();
 
-            // the hot spot, through node 1, the client is this thread: of every 100 operations, 65 point reads, 23 writes and
+            // the hot spot, through node 1, from CLIENTS threads: of every 100 operations, 65 point reads, 23 writes and
             // 1 slice of 5 rows of the hot key (over 90% of the table's reads, CRITICAL), and 5 reads and 6 writes of other
             // partitions (the rest of the table). After the split a slice reads every bucket (with a
-            // limit, in parallel), so slices are kept rare: they would take most of the client's time
-            int[] counter = { 0 };
-            Object[] done = null;
-            long end = System.currentTimeMillis() + 3 * ScenarioSupport.DEADLINE_MILLIS;
-            while (System.currentTimeMillis() < end && done == null)
+            // limit, in parallel), so slices are kept rare: they would take most of the client's time. Each thread writes
+            // only the rows of the hot key whose seq is its own modulo CLIENTS, so the model of a row has one writer
+            AtomicBoolean stop = new AtomicBoolean();
+            List<Thread> clients = new ArrayList<>();
+            for (int k = 0; k < CLIENTS; k++)
             {
-                for (int n = 0; n < 40; n++)
-                {
-                    int i = counter[0]++;
-                    int seq = i % (ROWS + 200);
-                    int mix = (i * 37) % 100;
-                    try
+                int client = k;
+                Thread thread = new Thread(() -> {
+                    for (int j = 0; !stop.get(); j++)
                     {
-                        if (mix < 5)
-                            cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50);
-                        else if (mix < 11)
-                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50, i);
-                        else if (mix < 12)
-                            cluster.coordinator(1).execute("SELECT seq FROM " + KS + ".t WHERE id = ? AND seq >= ? LIMIT 5", ConsistencyLevel.ONE, HOT, seq);
-                        else if (mix < 35)
+                        int i = j * CLIENTS + client;
+                        int seq = (j % ((ROWS + 200) / CLIENTS)) * CLIENTS + client;
+                        int mix = (i * 37) % 100;
+                        try
                         {
-                            uncertain.add(seq);
-                            cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, HOT, seq, i);
-                            model.put(seq, i);
-                            uncertain.remove(seq);
+                            if (mix < 5)
+                                cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50);
+                            else if (mix < 11)
+                                cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, 2 + i % OTHERS, i % 50, i);
+                            else if (mix < 12)
+                                cluster.coordinator(1).execute("SELECT seq FROM " + KS + ".t WHERE id = ? AND seq >= ? LIMIT 5", ConsistencyLevel.ONE, HOT, seq);
+                            else if (mix < 35)
+                            {
+                                uncertain.add(seq);
+                                cluster.coordinator(1).execute(insert, ConsistencyLevel.ONE, HOT, seq, i);
+                                model.put(seq, i);
+                                uncertain.remove(seq);
+                            }
+                            else
+                                cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, HOT, seq);
                         }
-                        else
-                            cluster.coordinator(1).execute("SELECT v FROM " + KS + ".t WHERE id = ? AND seq = ?", ConsistencyLevel.ONE, HOT, seq);
+                        catch (Throwable t)
+                        {
+                            // a timeout around a phase change is allowed; the outcome of that write is unknown
+                        }
                     }
-                    catch (Throwable t)
-                    {
-                        // a timeout around a phase change is allowed; the outcome of that write is unknown
-                    }
+                }, "hot-spot-client-" + k);
+                clients.add(thread);
+                thread.start();
+            }
+            Object[] done = null;
+            try
+            {
+                long end = System.currentTimeMillis() + 3 * ScenarioSupport.DEADLINE_MILLIS;
+                while (System.currentTimeMillis() < end && done == null)
+                {
+                    Thread.sleep(200);
+                    done = inState(cluster, 1, "partition_split", "COMMITTED");
+                    for (String bad : new String[]{ "FAILED", "ROLLED_BACK", "ABORTED", "REJECTED" })
+                        assertTrue(bad + ": " + describe(actions(cluster, 1, "partition_split")), inState(cluster, 1, "partition_split", bad) == null);
                 }
-                done = inState(cluster, 1, "partition_split", "COMMITTED");
-                for (String bad : new String[]{ "FAILED", "ROLLED_BACK", "ABORTED", "REJECTED" })
-                    assertTrue(bad + ": " + describe(actions(cluster, 1, "partition_split")), inState(cluster, 1, "partition_split", bad) == null);
+            }
+            finally
+            {
+                stop.set(true);
+                for (Thread thread : clients)
+                    thread.join(30_000);
             }
             assertNotNull("no COMMITTED split within the deadline: " + describe(actions(cluster, 1, "partition_split")), done);
 

@@ -973,7 +973,8 @@ public class PartitionSplitActuator implements ClusterActuator
         Subject key = keySubject(v);
         SplitEvaluation.Window signals = SplitEvaluation.Window.of(knowledge, key, from, now);
         SplitEvaluation.Window rest = SplitEvaluation.Window.rest(knowledge, tableSubject(v), from, now);
-        double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, Math.max(1, now - from));
+        double share = SplitEvaluation.busiestShare(knowledge, key, v.layout.keyspace, v.layout.physicalName, Math.max(1, now - from),
+                                                    layoutConfig().min_samples);
         return SplitEvaluation.stageB(SplitEvaluation.Baseline.fromMap(v.claim.state), signals, rest, share, v.layout.buckets, layoutConfig());
     }
 

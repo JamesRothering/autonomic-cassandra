@@ -31,6 +31,7 @@ import org.apache.cassandra.autonomic.layout.SplitEvaluation.Window;
 import org.apache.cassandra.autonomic.monitor.Observation;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 
 import static org.junit.Assert.assertEquals;
@@ -379,7 +380,7 @@ public class SplitEvaluationTest
     }
 
     @Test
-    public void theBusiestShareIsTheLargestOfTheBaseKeyAndTheBuckets()
+    public void theBusiestShareIsTheLargestOfTheBaseKeyAndTheBucketsOverTheLogicalTable()
     {
         long[] now = { 100_000 };
         ObservationStore store = new ObservationStore(64, 64);
@@ -388,16 +389,79 @@ public class SplitEvaluationTest
         Subject bucketA = Subject.partition("ks", "t_overflow", "aa");
         Subject bucketB = Subject.partition("ks", "t_overflow", "bb");
         Subject other = Subject.partition("ks", "other", "cc");
-        assertTrue(Double.isNaN(SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000)));
-        put(store, Signals.PARTITION_READ_SHARE, bucketA, 90_000, 0.2);
-        put(store, Signals.PARTITION_WRITE_SHARE, bucketB, 90_000, 0.25);
+        assertTrue(Double.isNaN(SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0)));
+        // one window: 100 reads of t, 100 of t_overflow, 60 of them bucket A's
+        put(store, Signals.SAMPLED_TABLE_READS, Subject.table("ks", "t"), 90_000, 100);
+        put(store, Signals.SAMPLED_TABLE_READS, Subject.table("ks", "t_overflow"), 90_000, 100);
+        put(store, Signals.SAMPLED_TABLE_READS, Subject.table("ks", "other"), 90_000, 10);
+        put(store, Signals.PARTITION_READ_SHARE, bucketA, 90_000, 0.6);
+        put(store, Signals.PARTITION_READ_SHARE, bucketB, 90_000, 0.4);
         put(store, Signals.PARTITION_READ_SHARE, other, 90_000, 0.9);
-        assertEquals(0.25, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000), 0);
-        put(store, Signals.PARTITION_READ_SHARE, base, 95_000, 0.4);
-        assertEquals(0.4, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000), 0);
-        assertEquals("the base key's sample is the newest", 0.4, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 10_000), 0);
-        assertTrue("samples older than the window are not seen", Double.isNaN(SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 4_000)));
-        assertTrue(Double.isNaN(SplitEvaluation.busiestShare(view, Subject.partition("ks", "t", "dd"), "ks", "nothing", 1000)));
+        assertEquals("a share of the base and the overflow table together", 0.3, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0), 1e-9);
+        put(store, Signals.PARTITION_READ_SHARE, base, 90_000, 0.8);
+        assertEquals(0.4, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0), 1e-9);
+        assertTrue("fewer operations than min_samples", Double.isNaN(SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 201)));
+        assertTrue("samples older than the window are not seen", Double.isNaN(SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 4_000, 0)));
+        assertTrue(Double.isNaN(SplitEvaluation.busiestShare(view, Subject.partition("ks", "u", "dd"), "ks", "nothing", 60_000, 0)));
+
+        // writes are judged on their own, and the larger class is the share
+        put(store, Signals.SAMPLED_TABLE_WRITES, Subject.table("ks", "t_overflow"), 90_000, 10);
+        put(store, Signals.PARTITION_WRITE_SHARE, bucketB, 90_000, 0.9);
+        assertEquals(0.9, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0), 1e-9);
+        assertEquals("the writes have too few operations", 0.4, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 50), 1e-9);
+    }
+
+    /**
+     * T7.8b: one late or quiet window in which a single bucket took the only few operations must not decide the share,
+     * as the largest of the windows' shares did (1.00 for a split that had spread the key over 16 buckets of this node).
+     */
+    @Test
+    public void theBusiestShareAddsUpTheWindowsInsteadOfTakingTheLargestWindow()
+    {
+        long[] now = { 100_000 };
+        ObservationStore store = new ObservationStore(64, 64);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, () -> now[0]);
+        Subject base = Subject.partition("ks", "t", "00ff");
+        Subject overflow = Subject.table("ks", "t_overflow");
+        // 10 windows of 160 reads over 16 buckets (10 each), the 5 reported change from window to window
+        for (int w = 0; w < 10; w++)
+        {
+            long t = 80_000 + w * 1_000;
+            put(store, Signals.SAMPLED_TABLE_READS, Subject.table("ks", "t"), t, 10);
+            put(store, Signals.SAMPLED_TABLE_READS, overflow, t, 160);
+            for (int b = 0; b < HotPartitionSensor.TOP_K; b++)
+                put(store, Signals.PARTITION_READ_SHARE, Subject.partition("ks", "t_overflow", "b" + ((w + b) % 16)), t, 10.0 / 160);
+        }
+        // and a late window, in which the only read of the overflow table was one bucket's
+        put(store, Signals.SAMPLED_TABLE_READS, overflow, 95_000, 1);
+        put(store, Signals.PARTITION_READ_SHARE, Subject.partition("ks", "t_overflow", "b3"), 95_000, 1.0);
+        double share = SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 100);
+        // b3: 10 in each of the 10 windows (reported or bounded by the smallest reported) and the late read, of 1701
+        assertEquals(101.0 / 1701, share, 1e-9);
+        Baseline before = base(1000, 1000, 0, 1000, 1000, 0.89);
+        assertEquals(Verdict.IMPROVED, SplitEvaluation.stageB(before, window(1000, 1000, 0, 0, 0), Window.NONE, share, 32, lc).verdict);
+    }
+
+    @Test
+    public void anUnreportedPartitionIsBoundedByTheSmallestReportedCount()
+    {
+        long[] now = { 100_000 };
+        ObservationStore store = new ObservationStore(64, 64);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, () -> now[0]);
+        Subject base = Subject.partition("ks", "t", "00ff");
+        Subject overflow = Subject.table("ks", "t_overflow");
+        Subject hot = Subject.partition("ks", "t_overflow", "aa");
+        // window 1: hot is reported with 50 of 100; window 2: five others with 15 each are reported, hot is not
+        put(store, Signals.SAMPLED_TABLE_READS, overflow, 90_000, 100);
+        put(store, Signals.PARTITION_READ_SHARE, hot, 90_000, 0.5);
+        put(store, Signals.SAMPLED_TABLE_READS, overflow, 91_000, 100);
+        for (int b = 0; b < HotPartitionSensor.TOP_K; b++)
+            put(store, Signals.PARTITION_READ_SHARE, Subject.partition("ks", "t_overflow", "c" + b), 91_000, 0.15);
+        assertEquals((50 + 15) / 200.0, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0), 1e-9);
+        // window 3: fewer than TOP_K reported, so an unreported partition was below MIN_EMIT_SHARE
+        put(store, Signals.SAMPLED_TABLE_READS, overflow, 92_000, 100);
+        put(store, Signals.PARTITION_READ_SHARE, Subject.partition("ks", "t_overflow", "c0"), 92_000, 0.3);
+        assertEquals((50 + 15 + HotPartitionSensor.MIN_EMIT_SHARE * 100) / 300.0, SplitEvaluation.busiestShare(view, base, "ks", "t_overflow", 60_000, 0), 1e-9);
     }
 
     private static void put(ObservationStore store, SignalId signal, Subject subject, long time, double value)

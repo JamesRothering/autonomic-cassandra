@@ -56,8 +56,10 @@ import static org.apache.cassandra.autonomic.monitor.sensors.SensorSupport.emit;
  * </ul>
  *
  * Share is the sampled count divided by the table's operation count over the window (the latency counter delta,
- * scaled down if the window was closed late). Only partitions with at least {@link #MIN_EMIT_SHARE} are emitted.
- * Sampler counts are upper bounds (StreamSummary), so a share can slightly overstate and is clamped to 1.
+ * scaled down if the window was closed late). Only the {@link #TOP_K} partitions with at least {@link #MIN_EMIT_SHARE}
+ * are emitted. Sampler counts are upper bounds (StreamSummary), so a share can slightly overstate and is clamped to 1.
+ * The operation count itself is emitted for the table ({@code partition.sampled_table_*}), so that a consumer can add
+ * up counts over several windows instead of taking one window's share, which a handful of operations decides (ADR-041).
  */
 public class HotPartitionSensor implements Sensor
 {
@@ -70,7 +72,8 @@ public class HotPartitionSensor implements Sensor
 
     private static final Set<SignalId> SIGNALS = Set.of(
         Signals.PARTITION_READ_SHARE, Signals.PARTITION_WRITE_SHARE,
-        Signals.PARTITION_READ_OPS_PER_SEC, Signals.PARTITION_WRITE_OPS_PER_SEC);
+        Signals.PARTITION_READ_OPS_PER_SEC, Signals.PARTITION_WRITE_OPS_PER_SEC,
+        Signals.SAMPLED_TABLE_READS, Signals.SAMPLED_TABLE_WRITES);
 
     private static final class Window
     {
@@ -259,12 +262,12 @@ public class HotPartitionSensor implements Sensor
             {
                 if (w.reads)
                     finish(sink, now, w.cfs, w.cfs.metric.topReadPartitionFrequency, realElapsedMillis,
-                           (long) ((w.cfs.metric.readLatency.latency.getCount() - w.readsBase) * scale),
-                           Signals.PARTITION_READ_SHARE, Signals.PARTITION_READ_OPS_PER_SEC);
+                           (w.cfs.metric.readLatency.latency.getCount() - w.readsBase) * scale,
+                           Signals.PARTITION_READ_SHARE, Signals.PARTITION_READ_OPS_PER_SEC, Signals.SAMPLED_TABLE_READS);
                 if (w.writes)
                     finish(sink, now, w.cfs, w.cfs.metric.topWritePartitionFrequency, realElapsedMillis,
-                           (long) ((w.cfs.metric.writeLatency.latency.getCount() - w.writesBase) * scale),
-                           Signals.PARTITION_WRITE_SHARE, Signals.PARTITION_WRITE_OPS_PER_SEC);
+                           (w.cfs.metric.writeLatency.latency.getCount() - w.writesBase) * scale,
+                           Signals.PARTITION_WRITE_SHARE, Signals.PARTITION_WRITE_OPS_PER_SEC, Signals.SAMPLED_TABLE_WRITES);
             }
             catch (RuntimeException e)
             {
@@ -274,16 +277,17 @@ public class HotPartitionSensor implements Sensor
     }
 
     private void finish(ObservationSink sink, long now, ColumnFamilyStore cfs, Sampler<ByteBuffer> sampler,
-                        long realElapsedMillis, long tableOps, SignalId share, SignalId opsPerSec)
+                        long realElapsedMillis, double tableOps, SignalId share, SignalId opsPerSec, SignalId tableOpsSignal)
     {
         if (ownedByOther(sampler, realElapsedMillis))
             return;
         List<Sampler.Sample<ByteBuffer>> samples = sampler.finishSampling(TOP_K);
-        if (tableOps <= 0)
+        if (tableOps < 1)
             return;
+        emit(sink, tableOpsSignal, Subject.table(cfs.getKeyspaceName(), cfs.getTableName()), now, tableOps);
         for (Sampler.Sample<ByteBuffer> sample : samples)
         {
-            double s = Math.min(1.0, (double) sample.count / tableOps);
+            double s = Math.min(1.0, sample.count / tableOps);
             if (s < MIN_EMIT_SHARE)
                 continue;
             Subject partition = PartitionKeys.subject(cfs.getKeyspaceName(), cfs.getTableName(), sample.value);

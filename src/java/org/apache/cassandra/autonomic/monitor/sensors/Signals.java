@@ -148,6 +148,9 @@ public final class Signals
     public static final SignalId PARTITION_WRITE_SHARE = def("partition.write_share", "fraction", "Share (0 to 1) of the table's writes in the last sampling window that hit this partition");
     public static final SignalId PARTITION_READ_OPS_PER_SEC = def("partition.read_ops_per_sec", "ops/s", "Estimated reads per second of this partition in the last sampling window");
     public static final SignalId PARTITION_WRITE_OPS_PER_SEC = def("partition.write_ops_per_sec", "ops/s", "Estimated writes per second of this partition in the last sampling window");
+    // ---- HotPartitionSensor (subject TABLE): the denominators of the shares, so that shares can be added up over windows ----
+    public static final SignalId SAMPLED_TABLE_READS = def("partition.sampled_table_reads", "ops", "Reads of the table counted for the last sampling window, the denominator of its partitions' read_share (subject TABLE)");
+    public static final SignalId SAMPLED_TABLE_WRITES = def("partition.sampled_table_writes", "ops", "Writes of the table counted for the last sampling window, the denominator of its partitions' write_share (subject TABLE)");
 
     // ---- LayoutSensor (subject PARTITION; detail is the raw key as lowercase hex); only for keys the LayoutProfiler watches ----
     public static final SignalId KEY_READ_LATENCY_MICROS = def("layout.key_read_latency_micros", "us", "Mean latency, over the last collection interval, of reads of the watched key that this node coordinated (absent when none)");

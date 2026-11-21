@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.layout;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -27,6 +28,7 @@ import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.Series;
 import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.monitor.sensors.HotPartitionSensor;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 
 /**
@@ -554,23 +556,101 @@ public final class SplitEvaluation
     }
 
     /**
-     * The largest share of its table's operations that the base key or any partition of the overflow table had in the
-     * last {@code windowMillis} (from the sampler of {@code HotPartitionSensor}); NaN if there was no sample.
+     * The busiest share of the logical table after a split (stage B's goal, ADR-041): the largest, over the base key and
+     * the partitions of the overflow table, of the reads (or writes) it took in the last {@code windowMillis} divided by
+     * the reads (or writes) of the base and overflow tables together over the sampling windows of {@code HotPartitionSensor}
+     * in that time. The counts are added up over the windows; one window's share, decided by a handful of operations, is
+     * not used. In a window that did not report a partition, its count is bounded by the smallest count reported for its
+     * table if {@link HotPartitionSensor#TOP_K} were reported, else by {@link HotPartitionSensor#MIN_EMIT_SHARE} of the
+     * table's operations; the same bound stands for a partition of the overflow table that no window reported. A table
+     * not sampled in a window counts for neither side. A class (reads, writes) with fewer than {@code minOps} operations
+     * is not judged; NaN if neither is.
      */
-    public static double busiestShare(KnowledgeView knowledge, Subject baseKey, String keyspace, String overflowTable, long windowMillis)
+    public static double busiestShare(KnowledgeView knowledge, Subject baseKey, String keyspace, String overflowTable, long windowMillis, long minOps)
     {
-        double max = Double.NaN;
-        for (SignalId signal : new SignalId[]{ Signals.PARTITION_READ_SHARE, Signals.PARTITION_WRITE_SHARE })
-            for (Subject subject : knowledge.subjects(signal))
+        double reads = busiestShare(knowledge, Signals.PARTITION_READ_SHARE, Signals.SAMPLED_TABLE_READS, baseKey, keyspace, overflowTable, windowMillis, minOps);
+        double writes = busiestShare(knowledge, Signals.PARTITION_WRITE_SHARE, Signals.SAMPLED_TABLE_WRITES, baseKey, keyspace, overflowTable, windowMillis, minOps);
+        return Double.isNaN(reads) ? writes : Double.isNaN(writes) ? reads : Math.max(reads, writes);
+    }
+
+    private static double busiestShare(KnowledgeView knowledge, SignalId shareSignal, SignalId opsSignal, Subject baseKey, String keyspace,
+                                       String overflowTable, long windowMillis, long minOps)
+    {
+        Subject baseTable = Subject.table(baseKey.keyspace, baseKey.table);
+        Subject overflow = Subject.table(keyspace, overflowTable);
+        Map<Subject, Map<Long, Double>> tableOps = new LinkedHashMap<>();
+        double total = 0;
+        for (Subject table : new Subject[]{ baseTable, overflow })
+        {
+            Map<Long, Double> ops = points(knowledge.series(opsSignal, table, windowMillis));
+            tableOps.put(table, ops);
+            for (double v : ops.values())
+                total += v;
+        }
+        if (total <= 0 || total < minOps)
+            return Double.NaN;
+
+        // the counts reported per partition and window, and every count reported per table and window
+        Map<Subject, Map<Long, Double>> counts = new LinkedHashMap<>();
+        Map<Subject, Map<Long, Collection<Double>>> reported = new LinkedHashMap<>();
+        counts.put(baseKey, new LinkedHashMap<>());
+        for (Subject subject : knowledge.subjects(shareSignal))
+        {
+            if (subject.kind != Subject.Kind.PARTITION)
+                continue;
+            Subject table = Subject.table(subject.keyspace, subject.table);
+            Map<Long, Double> ops = tableOps.get(table);
+            if (ops == null)
+                continue;
+            Series shares = knowledge.series(shareSignal, subject, windowMillis);
+            for (int i = 0; i < shares.size(); i++)
             {
-                boolean ours = subject.equals(baseKey)
-                               || (subject.kind == Subject.Kind.PARTITION && keyspace.equals(subject.keyspace) && overflowTable.equals(subject.table));
-                if (!ours)
+                Double n = ops.get(shares.times[i]);
+                if (n == null)
                     continue;
-                Series series = knowledge.series(signal, subject, windowMillis);
-                for (int i = 0; i < series.size(); i++)
-                    max = Double.isNaN(max) ? series.values[i] : Math.max(max, series.values[i]);
+                double count = shares.values[i] * n;
+                reported.computeIfAbsent(table, k -> new LinkedHashMap<>()).computeIfAbsent(shares.times[i], k -> new ArrayList<>()).add(count);
+                if (subject.equals(baseKey) || table.equals(overflow))
+                    counts.computeIfAbsent(subject, k -> new LinkedHashMap<>()).put(shares.times[i], count);
             }
-        return max;
+        }
+        // a partition of the overflow table that no window reported
+        Subject unseen = Subject.partition(keyspace, overflowTable, null);
+        counts.put(unseen, new LinkedHashMap<>());
+
+        double max = 0;
+        for (Map.Entry<Subject, Map<Long, Double>> e : counts.entrySet())
+        {
+            Subject table = e.getKey().equals(baseKey) ? baseTable : overflow;
+            Map<Long, Collection<Double>> byWindow = reported.getOrDefault(table, Map.of());
+            double sum = 0;
+            for (Map.Entry<Long, Double> window : tableOps.get(table).entrySet())
+            {
+                Double count = e.getValue().get(window.getKey());
+                sum += count != null ? count : unreportedBound(byWindow.get(window.getKey()), window.getValue());
+            }
+            max = Math.max(max, sum);
+        }
+        return Math.min(1, max / total);
+    }
+
+    /** The most an unreported partition can have taken in a window with these reported counts and table operations. */
+    private static double unreportedBound(Collection<Double> reported, double tableOps)
+    {
+        if (reported == null || reported.size() < HotPartitionSensor.TOP_K)
+            return HotPartitionSensor.MIN_EMIT_SHARE * tableOps;
+        double min = Double.MAX_VALUE;
+        for (double c : reported)
+            min = Math.min(min, c);
+        return min;
+    }
+
+    /** The points of a series by time, the values of equal times added. */
+    private static Map<Long, Double> points(Series series)
+    {
+        Map<Long, Double> m = new LinkedHashMap<>();
+        for (int i = 0; i < series.size(); i++)
+            m.merge(series.times[i], series.values[i], Double::sum);
+        return m;
     }
 }
