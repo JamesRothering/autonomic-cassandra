@@ -1,0 +1,62 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Wide hot spot for split-demo.sh: like ../stress/hot-spot.yaml (one partition, id = 1, takes nearly all the
+# traffic), but each row carries a 6000 byte payload, so that the partition passes 100 MiB with the 24000 or so rows that the load phase writes.
+# A single node has nowhere to move load to, so the policy proposes a split there only for a partition that large
+# (PartitionSplitPolicy: "no_spread" below LARGE_PARTITION_BYTES); on two or more nodes any wide partition counts.
+#
+# Load phase:  cassandra-stress user profile=tools/autonomic/split-demo/hot-spot-wide.yaml "ops(hot_write=1)" n=120000 -rate threads=8 -node 127.0.0.1
+# Hot phase:   cassandra-stress user profile=tools/autonomic/split-demo/hot-spot-wide.yaml "ops(hot_point=12,hot_write=3,hot_slice=1,cold_point=2)" duration=240s -rate threads=4 -node 127.0.0.1
+
+keyspace: autonomic_stress
+
+keyspace_definition: |
+  CREATE KEYSPACE autonomic_stress WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+
+table: hotwide
+
+table_definition: |
+  CREATE TABLE hotwide (
+        id int,
+        seq int,
+        payload blob,
+        PRIMARY KEY (id, seq)
+  )
+
+# id is only bound by the cold queries; the hot queries use the literal partition 1
+columnspec:
+  - name: id
+    population: uniform(2..100000)
+  - name: seq
+    population: uniform(1..40000)
+  - name: payload
+    size: fixed(6000)
+
+queries:
+   hot_point:
+      cql: select payload from hotwide where id = 1 and seq = ?
+      fields: multirow
+   hot_slice:
+      cql: select seq, payload from hotwide where id = 1 and seq >= ? limit 20
+      fields: multirow
+   hot_write:
+      cql: insert into hotwide (id, seq, payload) values (1, ?, ?)
+      fields: multirow
+   cold_point:
+      cql: select payload from hotwide where id = ? and seq = ?
+      fields: multirow

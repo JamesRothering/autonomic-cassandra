@@ -512,3 +512,17 @@ Details are in section 9 of the [adaptive-schema guide](adaptive-schema.md#99-kn
 | `degraded-node.yaml` | a write-heavy mix that builds a compaction backlog | `tools/bin/cassandra-stress user profile=tools/autonomic/stress/degraded-node.yaml "ops(backlog_write=9,backlog_read=1)" n=20000 -rate threads=8 -node 127.0.0.1` |
 
 Only `hot-spot.yaml` was run on the node, with `duration=150s` in place of `n=20000`. It created `autonomic_stress.hotspot` and drove about 2,000 operations a second. In that time, with the layer enabled, no `hot_partition` diagnosis was raised (it needs several evaluations over a busier table; the thresholds are in the `detectors:` section). Run against a test cluster, with `dry_run: true`, and watch `nodetool autonomic history --diagnoses` and the virtual tables. The in-JVM scenario dtests (`HotSpotScenarioTest`, `LoadSpikeScenarioTest`, `RealLoadSpikeScenarioTest`, `DegradedNodeScenarioTest`) assert the full diagnosis, action and verdict.
+
+### Making the layer propose a split by itself (split demo)
+
+`tools/autonomic/split-demo/` shows the layer proposing a partition split on a real single node, with no operator command for the split itself:
+
+| File | Content |
+|---|---|
+| `autonomic-split-demo.yaml` | Overlay for `cassandra.yaml`: the layer on, `dry_run: false`, `partition_split` enabled, short sampler windows and `layout` thresholds a small node reaches in minutes (`min_rows_for_split: 500`, `profile_window: 15s`, `min_samples: 50`). `safety.cluster_approval` stays `manual`. Do not use these values in production. |
+| `hot-spot-wide.yaml` | `cassandra-stress` profile: partition 1 takes nearly all operations and each row has a 6000 byte payload. |
+| `split-demo.sh` | Copies `conf/` to a scratch directory (`CASSANDRA_CONF`), appends the overlay and storage paths inside the scratch directory (`bin/cassandra.in.sh` fixes `cassandra.storagedir`, so the yaml names every directory), starts the node with a 768M heap and the layer off, loads the hot partition, restarts the node with the overlay, runs `nodetool autonomic cluster enable --yes`, drives the hot partition, polls `nodetool autonomic history` for a `partition_split` action, prints it and the `hot_partition` diagnosis, stops the node and removes the scratch directory (`KEEP=1` keeps it). Exit 0: proposal seen; 1: timeout; 2: setup failure. |
+
+Run it from the checkout after `.build/build-jars.sh -s`: `tools/autonomic/split-demo/split-demo.sh` (about 4 minutes). The split is a cluster action and the cluster gate is manual, so the action stays `PROPOSED`; nothing is split unless you approve it on a node you keep running.
+
+A single node has nowhere to move load to, so the policy proposes a split there only for a partition of at least 100 MiB (otherwise the diagnosis carries `layout=not_applicable(no_spread)`). That is why the profile writes 6000 byte rows: about 24,000 rows pass 100 MiB. The partition is loaded before the layer starts because the policy probes a partition's size once and keeps the result for an hour: a probe taken while the load is still running judges the partition too small, and a demo that loaded and drove it with the layer on never got a proposal. On two or more nodes any partition above `layout.min_rows_for_split` rows qualifies. A run on this branch's single node proposed the split 50 s after the hot traffic began: `partition_split`, `PROPOSED`, `buckets=32`, `size_only=true`, target `PARTITION:autonomic_stress.hotwide:00000001`.

@@ -1,0 +1,49 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Overlay for tools/autonomic/split-demo/split-demo.sh: appended to a scratch copy of conf/cassandra.yaml.
+#
+# It enables the layer with the partition-split policy and thresholds that a single small node reaches within a
+# couple of minutes (the defaults need 10000 rows, 100 samples, 20 evaluations and a 5 minute profile). Actions
+# are real (dry_run false) but a split is a cluster action and the cluster gate stays manual: the layer proposes
+# the split by itself and the action waits as PROPOSED for `nodetool autonomic approve <id>`. Nothing is split
+# unless you approve it. Do not use these values on a production node.
+
+autonomic:
+  enabled: true
+  dry_run: false
+  startup_grace: 10s
+  monitor_interval: 1s
+  analyze_interval: 2s
+  sampling:
+    enabled: true
+    window: 3s
+    interval: 6s
+    min_ops_per_sec: 10
+  safety:
+    cluster_approval: manual
+  detectors:
+    hot_partition: { enabled: true, share_of_table_ops: 0.3, for_evaluations: 2 }
+  actuators:
+    partition_split: { enabled: true }
+  layout:
+    for_evaluations: 3
+    min_rows_for_split: 500
+    profile_window: 15s
+    min_samples: 50
+    baseline_window: 15s
+    backfill_throughput: 0MiB/s
