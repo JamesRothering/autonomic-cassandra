@@ -739,7 +739,7 @@ The reference of a key guard is the larger of the key's baseline and the concurr
 ## ADR-044: A node action's verification baseline is taken from the problem period
 
 - **Date:** 2026-11-22
-- **Status:** Accepted (owner, 2026-11-21, including the trade-off; start at the first check that saw the problem)
+- **Status:** Accepted (owner, 2026-11-21, including the trade-off; start at the first check that saw the problem); written record approved by the owner 2026-11-22
 - **Deliverable:** D7 (T7.13, from T7.9 finding 1)
 
 **Context.** The baseline of a node action (overview 7.3, rule 5) is the mean of its goal and guards over the `baseline_window` (2 to 3 minutes) before apply. A diagnosis opens after `for_evaluations` consecutive breaching checks (4 x 15 s by default), so the layer acts about a minute after a problem starts and about half the baseline falls before it. In `RealLoadSpikeScenarioTest` a correct `read_pool` growth was judged against that half-calm baseline (p99 120 ms against 219 ms during the spike with the fix) and rolled back with `EARLY_ABORT`; the test had to require 20 s of saturation before the diagnosis. Each rollback also lengthens the policy's cooldown, so a recurring spike could switch the policy off in effect.
