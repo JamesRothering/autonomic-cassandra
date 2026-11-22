@@ -753,7 +753,7 @@ The reference of a key guard is the larger of the key's baseline and the concurr
 ## ADR-045: A latency guard is judged only where its request class had traffic before the action
 
 - **Date:** 2026-11-22
-- **Status:** Accepted (owner, 2026-11-22: "We need to fix that"; option 1, the orchestrator's recommendation)
+- **Status:** Accepted (owner, 2026-11-22: "We need to fix that"; option 1, the orchestrator's recommendation); written record approved by the owner 2026-11-22; default floor of 10 kept by the owner after the spike `docs/spikes/guard-traffic-floor.md` (20 considered: fewer false alarms where stalls set the p99, but no latency guard for classes at 10 to 20 ops/s)
 - **Deliverable:** D7 (T7.14, from the T7.11 recorded run)
 
 **Context.** A node action's latency guards (`client.read_latency_p99_micros`, `client.write_latency_p99_micros`, `table.read_latency_p99_micros`) compare the p99 after the action with the baseline, with a 25% tolerance. The p99 comes from a decaying histogram whose buckets are 20% apart (1916, 2299, 2759, 3311, 3973 us). On a request class with almost no traffic it rests on a handful of operations, and a few samples moving up a bucket raise the mean by more than the tolerance. In the T7.11 recorded run all five failures of `RealLoadSpikeScenarioTest` were a correct `read_pool` growth (ReadStage queue 36 to 3.3, read p99 unchanged) rolled back `REGRESSED` because the write p99, on a node with almost no writes, rose by about 29% (2759 to 3568 us, samples moving between adjacent buckets). A guard on traffic that does not exist protects nothing, yet it can undo a correct fix. The shorter baseline of ADR-044 makes this more likely.
