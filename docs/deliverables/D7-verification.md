@@ -47,6 +47,7 @@ Follow-up tasks the owner added at the D7 review (2026-11-20):
 - **T7.12** The cheap index-based partition size as the split probe's trigger, with re-probe on growth (ADR-043; replaces T7.10 finding 2, includes T7.10 finding 3) (sonnet).
 - **T7.13** A node action's verification baseline taken from the problem period (ADR-044; T7.9 finding 1) (sonnet, Opus review).
 - **T7.14** A latency guard is judged only where its request class had traffic before the action (ADR-045; T7.11 recorded run) (sonnet, Opus review).
+- **T7.15** (D7.1) Cache hit rates as a signal and `cache_miss_pressure` as a cause of latency (ADR-046) (sonnet, Opus review).
 
 ## Acceptance criteria
 

@@ -763,3 +763,21 @@ The reference of a key guard is the larger of the key's baseline and the concurr
 **Alternatives considered.** An absolute slack (ignore changes below a few milliseconds) was rejected: it would also miss a 3x slowdown of a fast workload. Requiring traffic both before and after was rejected: an action that drives a class's traffic down would then escape its guard. Widening the tolerance above one bucket was rejected: it weakens the guard where it matters.
 
 **Consequences.** A correct fix is no longer undone by noise on an idle class. Traffic that starts only after the action is not guarded during that verification. The floor is a setting; a workload whose real traffic is below 10 operations a second on a node has its latency guards switched off for that class.
+
+## ADR-046: Cache hit rates are a signal, and a drop in a cache's hit rate is a cause of latency
+
+- **Date:** 2026-11-22
+- **Status:** Accepted (owner, 2026-11-22: "Yes, make it so: add the cache hit-rate signal"; design details are orchestrator decisions)
+- **Deliverable:** D7.1 (T7.15)
+
+**Context.** The layer measures GC directly and names it as the cause of latency and queue growth (`RuleCorrelator`), but it has no cache signal. A slowdown from cache misses (a key or chunk cache that has become too small, or a workload that moved off its hot set) shows up as `latency_slo_breach` with no cause attached. The layer does not mistake it for a load spike (client traffic does not rise), but it cannot name it either. Cassandra already counts hits, misses and requests per cache (`AbstractCacheMetrics`, `ChunkCacheMetrics`).
+
+**Decision.**
+1. A `CacheSensor` emits, per enabled cache (key, row, chunk; a cache with zero capacity is skipped), its hit rate over the sensor interval, from the deltas of the hit and request counters (not the lifetime `hitRate` gauge, which hides a recent drop), and its requests per second: `cache.<name>_hit_rate` (0 to 1) and `cache.<name>_requests_per_sec`, subject NODE. The hit rate is not emitted for an interval with fewer requests than `cache.min_requests_per_sec` (default 10, the same reasoning as ADR-045: a rate over a handful of requests is noise).
+2. A `cache_miss_pressure` detector raises a diagnosis when a cache's hit rate stays at least `drop` (default 0.2, that is 20 percentage points) below its own long-run level (its mean over the previous `reference_window`, default 1 hour, excluding the current breach) for `for_evaluations` checks. A drop against the cache's own level, not an absolute threshold, because a normal hit rate depends on the workload.
+3. `RuleCorrelator` gets the rule `cache_miss_pressure` -> `latency_slo_breach` (LOCAL): "reads that miss the cache go to disk". It is not made a cause of `pool_saturation`: more read threads can still help reads that wait on disk, so the load-spike policy keeps acting on a saturated pool.
+4. Diagnosis only: no policy or action. The cause is visible in `nodetool autonomic history --diagnoses` and `system_views.autonomic_diagnoses`, with the hit rate, its reference level and the requests per second in the evidence.
+
+**Alternatives considered.** An absolute hit-rate threshold was rejected: 60% is healthy for one workload and a failure for another. A policy that grows the cache was left out: the right size depends on memory the layer does not own, and a wrong guess can cause GC pressure; it can be added later on top of the diagnosis. Making cache misses a cause of pool saturation was rejected, see point 3.
+
+**Consequences.** The layer can name a cache-driven slowdown. A new node, or one just restarted, has no reference level for up to `reference_window`, and reports no `cache_miss_pressure` until then. A deliberate workload change that lowers the hit rate is reported once, until the reference level catches up.
