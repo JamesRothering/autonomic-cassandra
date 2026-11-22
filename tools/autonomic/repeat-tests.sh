@@ -79,7 +79,7 @@ while [ $# -gt 0 ]; do
     --out) need "$@"; OUT="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
-    @scenario) CLASSES+=(HotSpotScenarioTest LoadSpikeScenarioTest DegradedNodeScenarioTest); shift ;;
+    @scenario) CLASSES+=(HotSpotScenarioTest LoadSpikeScenarioTest RealLoadSpikeScenarioTest DegradedNodeScenarioTest); shift ;;
     @fault) CLASSES+=(ThrowingSensorFaultTest UnwritableStoreFaultTest CmsUnreachableClaimFaultTest OwnerKilledFaultTest StalledControlThreadFaultTest CircuitBreakerFaultTest); shift ;;
     -*) usage >&2; die "unknown option $1" ;;
     *) CLASSES+=("$1"); shift ;;
