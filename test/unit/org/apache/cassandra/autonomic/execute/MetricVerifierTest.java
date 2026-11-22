@@ -102,6 +102,51 @@ public class MetricVerifierTest
     }
 
     @Test
+    public void baselineSinceShortensTheLookbackButNeverBeyondTheWindow()
+    {
+        AtomicLong now = new AtomicLong(100_000);
+        ObservationStore store = new ObservationStore(100, 100);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, now::get);
+        // calm before the problem (t = 91..95 s), then three samples of the problem
+        for (int i = 91; i <= 95; i++)
+        {
+            store.accept(new Observation(GOAL, NODE, i * 1000L, 10));
+            store.accept(new Observation(GUARD, NODE, i * 1000L, 10));
+        }
+        for (int i = 96; i <= 98; i++)
+        {
+            store.accept(new Observation(GOAL, NODE, i * 1000L, 100));
+            store.accept(new Observation(GUARD, NODE, i * 1000L, 50));
+        }
+        Map<String, Double> trailing = MetricVerifier.baseline(spec, view).get();
+        assertEquals(43.75, trailing.get(GOAL_KEY), 1e-9);
+
+        Map<String, Double> since = MetricVerifier.baseline(spec.withBaselineSince(95_500), view).get();
+        assertEquals("only the samples of the problem period", 100.0, since.get(GOAL_KEY), 1e-9);
+        assertEquals(50.0, since.get(GUARD_KEY), 1e-9);
+
+        // a start older than the window is capped at the window
+        assertEquals(trailing, MetricVerifier.baseline(spec.withBaselineSince(0), view).get());
+        // a start in the future or too recent leaves too few samples
+        assertFalse(MetricVerifier.baseline(spec.withBaselineSince(97_500), view).isPresent());
+        assertFalse(MetricVerifier.baseline(spec.withBaselineSince(200_000), view).isPresent());
+        // the default is the trailing window
+        assertEquals(VerifySpec.NO_BASELINE_SINCE, spec.baselineSinceMillis);
+    }
+
+    @Test
+    public void baselineSinceIsPartOfTheSpecsIdentity()
+    {
+        VerifySpec a = spec.withBaselineSince(5);
+        assertEquals(a, spec.withBaselineSince(5));
+        assertEquals(a.hashCode(), spec.withBaselineSince(5).hashCode());
+        assertFalse(a.equals(spec));
+        assertFalse(a.equals(spec.withBaselineSince(6)));
+        assertTrue(a.toString().contains("baselineSince=5"));
+        assertFalse(spec.toString().contains("baselineSince"));
+    }
+
+    @Test
     public void compareUsesOnlyTheObservationWindow()
     {
         AtomicLong now = new AtomicLong(100_000);

@@ -154,7 +154,7 @@ public class RequestThrottlePolicy implements Policy
         VerifySpec spec = new VerifySpec(write ? Signals.CLIENT_WRITE_LATENCY_P99_MICROS : Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(),
                                          true, 0.10, List.of(write ? KnobPolicy.readLatencyGuard() : KnobPolicy.writeLatencyGuard()),
                                          w.baselineMillis, w.observationMillis);
-        return target.map(t -> plan(diagnosis, knob, t, spec, "shed load: request limit " + RequestThrottleActuator.format(knob.current()) + " -> " + RequestThrottleActuator.format(t)));
+        return target.flatMap(t -> plan(diagnosis, knowledge, knob, t, spec, "shed load: request limit " + RequestThrottleActuator.format(knob.current()) + " -> " + RequestThrottleActuator.format(t)));
     }
 
     private Optional<Plan> recovery(Diagnosis diagnosis, KnowledgeView knowledge)
@@ -167,14 +167,17 @@ public class RequestThrottlePolicy implements Policy
         Windows w = windows.apply(RequestThrottleActuator.NAME);
         VerifySpec spec = new VerifySpec(Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(), true, 0.0,
                                          List.of(KnobPolicy.writeLatencyGuard()), w.baselineMillis, w.observationMillis);
-        return target.map(t -> plan(diagnosis, knob, t, spec, "recovery: request limit " + RequestThrottleActuator.format(knob.current())
+        return target.flatMap(t -> plan(diagnosis, knowledge, knob, t, spec, "recovery: request limit " + RequestThrottleActuator.format(knob.current())
                                                               + (t >= knob.ceiling() ? " released" : " -> " + RequestThrottleActuator.format(t))));
     }
 
-    private Plan plan(Diagnosis diagnosis, RequestThrottleActuator knob, double target, VerifySpec spec, String rationale)
+    private Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge, RequestThrottleActuator knob, double target, VerifySpec spec, String rationale)
     {
+        Optional<VerifySpec> verify = Policies.forProblem(spec, diagnosis, knowledge, name());
+        if (!verify.isPresent())
+            return Optional.empty();
         Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), knob.name(), ActionScope.NODE, Subject.node(),
-                                   RequestThrottleActuator.params(target, diagnosis.id.toString()), spec);
-        return new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale);
+                                   RequestThrottleActuator.params(target, diagnosis.id.toString()), verify.get());
+        return Optional.of(new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale));
     }
 }

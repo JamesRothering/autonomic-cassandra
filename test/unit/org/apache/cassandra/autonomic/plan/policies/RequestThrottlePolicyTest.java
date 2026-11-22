@@ -20,11 +20,13 @@ package org.apache.cassandra.autonomic.plan.policies;
 import java.util.List;
 import java.util.Map;
 
+import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.execute.ActionContext;
 import org.apache.cassandra.autonomic.execute.actuators.RequestThrottleActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
@@ -68,6 +70,22 @@ public class RequestThrottlePolicyTest
     public static void setupClass()
     {
         DatabaseDescriptor.daemonInitialization();
+    }
+
+    /** Latency samples of the goal and the guard in the baseline window. */
+    private static void latencies(ObservationStore into)
+    {
+        for (int i = 1; i <= 5; i++)
+        {
+            into.accept(new Observation(Signals.CLIENT_READ_LATENCY_P99_MICROS, NODE, NOW - i * 1000L, 1000));
+            into.accept(new Observation(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, NODE, NOW - i * 1000L, 1000));
+        }
+    }
+
+    @Before
+    public void samples()
+    {
+        latencies(store);
     }
 
     private void put(SignalId signal, Subject subject, long ago, double value)
@@ -118,6 +136,19 @@ public class RequestThrottlePolicyTest
     }
 
     @Test
+    public void theLimiterWaitsForSamplesOfTheProblemPeriod()
+    {
+        queue(true);
+        put(Signals.CLIENT_READ_OPS_PER_SEC, NODE, 1000, 3000);
+        Diagnosis d = diagnosis("latency_slo_breach", NODE, Severity.CRITICAL,
+                                Map.of(ThresholdDetector.BREACH_SINCE, Long.toString(NOW - 2500), "client.read_latency_p99_micros", "300000 us"));
+        assertFalse("two latency samples since the problem began", breach.plan(d, view).isPresent());
+        Diagnosis earlier = diagnosis("latency_slo_breach", NODE, Severity.CRITICAL,
+                                      Map.of(ThresholdDetector.BREACH_SINCE, Long.toString(NOW - 3500), "client.read_latency_p99_micros", "300000 us"));
+        assertEquals(NOW - 3500, breach.plan(earlier, view).get().actions.get(0).verify.baselineSinceMillis);
+    }
+
+    @Test
     public void nothingBelowCriticalWithoutAGrowingQueueOrForATableOrWithoutARate()
     {
         put(Signals.CLIENT_READ_OPS_PER_SEC, NODE, 1000, 4000);
@@ -131,6 +162,7 @@ public class RequestThrottlePolicyTest
         InMemoryKnowledgeView noRate = new InMemoryKnowledgeView(other, () -> NOW);
         for (int i = 0; i < 8; i++)
             other.accept(new Observation(Signals.POOL_PENDING_TASKS, POOL, NOW - (8 - i) * 10_000L, 10 + 10 * i));
+        latencies(other);
         assertFalse("an unknown rate cannot engage the limiter", breach.plan(breaching(Severity.CRITICAL), noRate).isPresent());
     }
 

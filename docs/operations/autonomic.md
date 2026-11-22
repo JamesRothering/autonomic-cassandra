@@ -293,7 +293,7 @@ A split needs `actuators.partition_split.enabled: true` and cluster actions enab
 
 Every node-scoped action is verified, then kept or undone:
 
-1. **Baseline.** Before it acts, the layer records the goal signal and the guard signals over `baseline_window` (default 2m). Too few samples reject the action as `INSUFFICIENT_BASELINE`.
+1. **Baseline.** Before it acts, the layer records the goal signal and the guard signals over `baseline_window` (default 2m). For an action on this node, the baseline starts at the first check that saw the problem (the diagnosis's `breach_since`) when that is more recent, so it is not diluted by the calm before; the policy proposes only once the period holds enough samples (it waits, `waiting_for_baseline` in the debug log). Too few samples reject the action as `INSUFFICIENT_BASELINE`.
 2. **Apply.** The undo is stored before the action runs, so a rollback needs nothing else.
 3. **Verify.** After `observation_window` (default 5m) the layer compares the same signals. `IMPROVED` commits the action (`COMMITTED`). `REGRESSED`, `NEUTRAL` and `INCONCLUSIVE` roll it back (`ROLLED_BACK`). A change must earn its place.
 4. **Early abort.** A guard far beyond its tolerance rolls the action back at once.

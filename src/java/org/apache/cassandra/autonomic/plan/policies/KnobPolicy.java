@@ -121,9 +121,11 @@ abstract class KnobPolicy implements Policy
             Optional<Double> target = knob.nextTarget(step.direction, STEP_FRACTION, diagnosis.id.toString());
             if (!target.isPresent())
                 continue;
+            Optional<VerifySpec> verify = Policies.forProblem(verify(diagnosis, knowledge, windows.apply(step.actuator)), diagnosis, knowledge, name);
+            if (!verify.isPresent())
+                return Optional.empty();
             Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), knob.name(), ActionScope.NODE, NODE,
-                                       KnobActuator.params(target.get(), diagnosis.id.toString()),
-                                       verify(diagnosis, knowledge, windows.apply(step.actuator)));
+                                       KnobActuator.params(target.get(), diagnosis.id.toString()), verify.get());
             String rationale = diagnosis.type + " on " + diagnosis.subject.asString() + ": " + knob.name() + ' '
                                + KnobActuator.format(knob.current()) + " -> " + KnobActuator.format(target.get());
             return Optional.of(new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name, List.of(action), rationale));

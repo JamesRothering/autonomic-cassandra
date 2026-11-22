@@ -136,7 +136,7 @@ public class RequestPoolPolicy implements Policy
         if (cpuSaturated(knowledge))
             return back(diagnosis, knowledge, actuator, diagnosis.subject.detail, 0.10);
         Optional<Double> target = knob.nextTarget(KnobActuator.Direction.UP, STEP_FRACTION, diagnosis.id.toString());
-        return target.map(t -> plan(diagnosis, knob, t, diagnosis.subject.detail, 0.10,
+        return target.flatMap(t -> plan(diagnosis, knowledge, knob, t, diagnosis.subject.detail, 0.10,
                                     diagnosis.type + " on " + diagnosis.subject.detail + ": " + actuator + ' '
                                     + KnobActuator.format(knob.current()) + " -> " + KnobActuator.format(t)));
     }
@@ -149,19 +149,22 @@ public class RequestPoolPolicy implements Policy
         KnobActuator knob = (KnobActuator) actuators.apply(actuator);
         if (knob.current() <= knob.configured() && diagnosis.type.equals(PoolSaturationDetector.NAME))
             return Optional.empty();
-        return knob.nextTargetTowardConfigured(STEP_FRACTION).map(t -> plan(diagnosis, knob, t, pool, minImprovement,
+        return knob.nextTargetTowardConfigured(STEP_FRACTION).flatMap(t -> plan(diagnosis, knowledge, knob, t, pool, minImprovement,
                                                                  diagnosis.type + ": " + actuator + ' ' + KnobActuator.format(knob.current())
                                                                  + " back towards " + KnobActuator.format(knob.configured())));
     }
 
-    private Plan plan(Diagnosis diagnosis, KnobActuator knob, double target, String pool, double minImprovement, String rationale)
+    private Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge, KnobActuator knob, double target, String pool, double minImprovement, String rationale)
     {
         Windows w = windows.apply(knob.name());
         VerifySpec spec = new VerifySpec(Signals.POOL_PENDING_TASKS, Subject.threadPool(pool), true, minImprovement,
                                          List.of(KnobPolicy.readLatencyGuard(), KnobPolicy.writeLatencyGuard()),
                                          w.baselineMillis, w.observationMillis);
+        Optional<VerifySpec> verify = Policies.forProblem(spec, diagnosis, knowledge, name());
+        if (!verify.isPresent())
+            return Optional.empty();
         Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), knob.name(), ActionScope.NODE, Subject.node(),
-                                   KnobActuator.params(target, diagnosis.id.toString()), spec);
-        return new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale);
+                                   KnobActuator.params(target, diagnosis.id.toString()), verify.get());
+        return Optional.of(new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, name(), List.of(action), rationale));
     }
 }

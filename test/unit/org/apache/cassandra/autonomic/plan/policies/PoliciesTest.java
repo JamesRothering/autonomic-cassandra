@@ -27,6 +27,7 @@ import org.junit.Test;
 import org.apache.cassandra.autonomic.AutonomicConfig;
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.execute.ActionContext;
 import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.execute.ActionState;
@@ -42,7 +43,10 @@ import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.execute.actuators.StreamThroughputActuator;
 import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
+import org.apache.cassandra.autonomic.monitor.Observation;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
+import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
@@ -63,7 +67,8 @@ public class PoliciesTest
 
     private final Map<String, FakeHandle> handles = new HashMap<>();
     private final Map<String, Actuator> actuators = new HashMap<>();
-    private final InMemoryKnowledgeView view = new InMemoryKnowledgeView(new ObservationStore(8, 8), () -> 1_000_000L);
+    private final ObservationStore store = new ObservationStore(8, 8);
+    private final InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, () -> 1_000_000L);
     private final CompactionBacklogPolicy backlog = new CompactionBacklogPolicy(actuators::get, name -> WINDOWS);
     private final TombstoneOverloadPolicy tombstones = new TombstoneOverloadPolicy(actuators::get, name -> WINDOWS);
     private final GcPressurePolicy gc = new GcPressurePolicy(actuators::get, name -> WINDOWS);
@@ -72,6 +77,17 @@ public class PoliciesTest
 
     public PoliciesTest()
     {
+        // samples of every goal and guard in the baseline window, so that the policies do not wait for a baseline
+        for (int i = 0; i < 5; i++)
+        {
+            long at = 990_000 + i * 1_000;
+            for (SignalId signal : List.of(Signals.COMPACTION_PENDING_TASKS, Signals.GC_TIME_FRACTION,
+                                           Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_LATENCY_P99_MICROS))
+                store.accept(new Observation(signal, NODE, at, 10));
+            for (SignalId signal : List.of(Signals.TABLE_TOMBSTONES_SCANNED_P99, Signals.TABLE_READ_LATENCY_P99_MICROS))
+                for (Subject table : List.of(TABLE, Subject.table("ks", "u")))
+                    store.accept(new Observation(signal, table, at, 10));
+        }
         knob(CompactionThroughputActuator.NAME, 64, new CompactionThroughputActuator(handle(CompactionThroughputActuator.NAME, 64), Map.of()));
         knob(ConcurrentCompactorsActuator.NAME, 2, new ConcurrentCompactorsActuator(handle(ConcurrentCompactorsActuator.NAME, 2), 4));
         knob(StreamThroughputActuator.NAME, 100, new StreamThroughputActuator(handle(StreamThroughputActuator.NAME, 100), Map.of()));
@@ -162,6 +178,31 @@ public class PoliciesTest
 
         atLimit("concurrent_compactors", 4);
         assertFalse(backlog.plan(d, view).isPresent());
+    }
+
+    @Test
+    public void aKnobPolicyWaitsForSamplesOfTheProblemPeriodAndCarriesItsStart()
+    {
+        ObservationStore fresh = new ObservationStore(8, 8);
+        InMemoryKnowledgeView freshView = new InMemoryKnowledgeView(fresh, () -> 1_000_000L);
+        Diagnosis d = diagnosis("compaction_backlog", NODE, Severity.WARN, Map.of(ThresholdDetector.BREACH_SINCE, "980000"));
+        assertFalse("nothing sampled yet", backlog.plan(d, freshView).isPresent());
+        for (int i = 0; i < 2; i++)
+            feedBacklogBaseline(fresh, 982_000 + i * 1_000);
+        assertFalse("two samples are too few", backlog.plan(d, freshView).isPresent());
+        feedBacklogBaseline(fresh, 984_000);
+        VerifySpec spec = only(backlog.plan(d, freshView), d, "compaction_backlog").verify;
+        assertEquals(980_000, spec.baselineSinceMillis);
+        // a table-scoped diagnosis of the tombstone policy takes the same rule, in its CRITICAL (garbage collect) path too
+        Diagnosis t = diagnosis("tombstone_overload", TABLE, Severity.CRITICAL, Map.of(ThresholdDetector.BREACH_SINCE, "980000"));
+        assertFalse(tombstones.plan(t, freshView).isPresent());
+        assertEquals(980_000, only(tombstones.plan(t, view), t, "tombstone_overload").verify.baselineSinceMillis);
+    }
+
+    private static void feedBacklogBaseline(ObservationStore fresh, long at)
+    {
+        for (SignalId signal : List.of(Signals.COMPACTION_PENDING_TASKS, Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_LATENCY_P99_MICROS))
+            fresh.accept(new Observation(signal, NODE, at, 10));
     }
 
     @Test

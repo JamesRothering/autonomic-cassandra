@@ -67,6 +67,8 @@ public abstract class ThresholdDetector implements Detector
 {
     private static final Logger logger = LoggerFactory.getLogger(ThresholdDetector.class);
 
+    /** Evidence key: epoch millis of the first breaching check of the run of breaches that opened the diagnosis. */
+    public static final String BREACH_SINCE = "breach_since";
     public static final String FOR_EVALUATIONS = "for_evaluations";
     public static final String CLEAR_THRESHOLD = "clear_threshold";
     public static final String MAX_SIGNAL_AGE_MILLIS = "max_signal_age_ms";
@@ -166,6 +168,7 @@ public abstract class ThresholdDetector implements Detector
         long touchedMillis;
         UUID id;                 // non-null while open
         long firstSeenMillis;
+        long breachSinceMillis;  // first breaching check of the current run of breaches
         long countedAtMillis = Long.MIN_VALUE;   // observation time of the last measurement that was counted
     }
 
@@ -359,7 +362,8 @@ public abstract class ThresholdDetector implements Detector
             if (st == null && (st = admit(subject)) == null)
                 return null;
             st.countedAtMillis = at;
-            st.breaches++;
+            if (st.breaches++ == 0)
+                st.breachSinceMillis = now;
             st.lastValue = value;
             st.touchedMillis = now;
             if (st.breaches < settings.forEvaluations)
@@ -401,6 +405,7 @@ public abstract class ThresholdDetector implements Detector
     {
         Map<String, String> evidence = new LinkedHashMap<>();
         addEvidence(subject, st.lastValue, evidence, knowledge);
+        evidence.put(BREACH_SINCE, Long.toString(st.breachSinceMillis));
         return new Diagnosis(st.id, type, subject, severity(subject, st.lastValue, knowledge), confidence(subject, st.lastValue),
                              st.firstSeenMillis, now, summary(subject, st.lastValue), evidence, null);
     }

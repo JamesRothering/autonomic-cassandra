@@ -103,6 +103,15 @@ public class LoadSpikePolicyTest
         for (int i = 0; i < 8; i++)
             store.accept(new Observation(Signals.POOL_PENDING_TASKS, Subject.threadPool("ReadStage"), NOW - (8 - i) * 10_000L, 10 + 10 * i));
         store.accept(new Observation(Signals.CLIENT_READ_OPS_PER_SEC, NODE, NOW - 1000, 4000));
+        // the baselines of the steps: latency of the node and a flat queue of every other pool
+        for (int i = 1; i <= 5; i++)
+        {
+            store.accept(new Observation(Signals.CLIENT_READ_LATENCY_P99_MICROS, NODE, NOW - i * 1000L, 1000));
+            store.accept(new Observation(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, NODE, NOW - i * 1000L, 1000));
+            for (String stage : RequestPoolActuator.STAGES.values())
+                if (!stage.equals("ReadStage"))
+                    store.accept(new Observation(Signals.POOL_PENDING_TASKS, Subject.threadPool(stage), NOW - i * 1000L, 40));
+        }
     }
 
     private void knob(String name, double value, java.util.function.Function<FakeHandle, Actuator> build)
@@ -269,7 +278,7 @@ public class LoadSpikePolicyTest
     @Test
     public void ofSeveralOpenLoadDiagnosesOnlyTheLeadGetsAPlan()
     {
-        Diagnosis read = saturated("ReadStage", Severity.CRITICAL, NOW - 10_000);
+        Diagnosis read = saturated("ReadStage", Severity.CRITICAL, NOW - 45_000);
         Diagnosis write = saturated("MutationStage", Severity.WARN, NOW - 90_000);
         view.setActiveDiagnoses(List.of(write, read));
         assertEquals("compaction_throughput", next(read));

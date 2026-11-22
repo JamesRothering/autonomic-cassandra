@@ -26,6 +26,7 @@ import org.junit.Test;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.Severity;
+import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.actuators.FakeHandle;
 import org.apache.cassandra.autonomic.execute.actuators.RequestPoolActuator;
@@ -55,8 +56,23 @@ public class RequestPoolPolicyTest
     private final RequestPoolPolicy recovery = new RequestPoolPolicy(actuators::get, name -> WINDOWS, RequestPoolPolicy.Mode.RECOVERY);
     private long ids;
 
+    /** Samples of the goal and both guards of a pool action, {@code count} of them ending 1 s before now. */
+    private void baselineSamples(String pool, int count, long fromMillis)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            long at = fromMillis + i * 1_000;
+            store.accept(new Observation(Signals.POOL_PENDING_TASKS, Subject.threadPool(pool), at, 40));
+            store.accept(new Observation(Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(), at, 1000));
+            store.accept(new Observation(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Subject.node(), at, 1000));
+        }
+    }
+
     public RequestPoolPolicyTest()
     {
+        // enough samples in the baseline window (1_000_000 - 60_000) for every pool
+        for (String pool : RequestPoolActuator.STAGES.values())
+            baselineSamples(pool, 5, 990_000);
         for (String name : RequestPoolActuator.STAGES.keySet())
         {
             FakeHandle h = new FakeHandle(10);
@@ -67,7 +83,12 @@ public class RequestPoolPolicyTest
 
     private Diagnosis diagnosis(String type, Subject subject, Map<String, String> evidence)
     {
-        return new Diagnosis(TimeUUID.atUnixMicrosWithLsbAsUUID(1_000_000L + ids++, 3L), type, subject, Severity.WARN, 1, 0, 0, "", evidence, null);
+        return diagnosis(type, subject, evidence, 0);
+    }
+
+    private Diagnosis diagnosis(String type, Subject subject, Map<String, String> evidence, long firstSeenMillis)
+    {
+        return new Diagnosis(TimeUUID.atUnixMicrosWithLsbAsUUID(1_000_000L + ids++, 3L), type, subject, Severity.WARN, 1, firstSeenMillis, 0, "", evidence, null);
     }
 
     private Diagnosis saturated(String pool)
@@ -101,6 +122,52 @@ public class RequestPoolPolicyTest
         assertEquals(2, a.verify.guards.size());
         load(0.5);
         assertEquals("12", saturation.plan(d, view).get().actions.get(0).params.get("value"));
+    }
+
+    @Test
+    public void theBaselineStartsAtTheFirstBreachingCheckAndTheProposalWaitsForSamples()
+    {
+        ObservationStore fresh = new ObservationStore(8, 8);
+        InMemoryKnowledgeView freshView = new InMemoryKnowledgeView(fresh, () -> 1_000_000L);
+        Diagnosis d = diagnosis("pool_saturation", READ_POOL, Map.of(ThresholdDetector.BREACH_SINCE, "970000"), 985_000);
+        assertEquals(970_000, Policies.problemSinceMillis(d));
+        assertFalse("no samples of the problem period yet", saturation.plan(d, freshView).isPresent());
+
+        // two samples since the problem began: still too few
+        for (int i = 0; i < 2; i++)
+        {
+            long at = 975_000 + i * 1_000;
+            fresh.accept(new Observation(Signals.POOL_PENDING_TASKS, READ_POOL, at, 40));
+            fresh.accept(new Observation(Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(), at, 1000));
+            fresh.accept(new Observation(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Subject.node(), at, 1000));
+        }
+        assertFalse(saturation.plan(d, freshView).isPresent());
+
+        // a third one, and the proposal is made with the problem's start in its spec
+        fresh.accept(new Observation(Signals.POOL_PENDING_TASKS, READ_POOL, 977_000, 40));
+        fresh.accept(new Observation(Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(), 977_000, 1000));
+        fresh.accept(new Observation(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Subject.node(), 977_000, 1000));
+        Action a = saturation.plan(d, freshView).get().actions.get(0);
+        assertEquals(970_000, a.verify.baselineSinceMillis);
+    }
+
+    @Test
+    public void withoutBreachSinceTheDiagnosisOpeningIsTheStart()
+    {
+        Diagnosis d = diagnosis("pool_saturation", READ_POOL, Map.of(), 987_000);
+        assertEquals(987_000, Policies.problemSinceMillis(d));
+        assertEquals(987_000, saturation.plan(d, view).get().actions.get(0).verify.baselineSinceMillis);
+        assertEquals(5, Policies.problemSinceMillis(diagnosis("x", READ_POOL, Map.of(ThresholdDetector.BREACH_SINCE, "garbage"), 5)));
+    }
+
+    @Test
+    public void recoveryProposalsAlsoWaitForTheBaseline()
+    {
+        handles.get("read_pool").value = 14;
+        Diagnosis d = drift("read_pool");
+        assertEquals(0, recovery.plan(d, view).get().actions.get(0).verify.baselineSinceMillis);
+        InMemoryKnowledgeView empty = new InMemoryKnowledgeView(new ObservationStore(8, 8), () -> 1_000_000L);
+        assertFalse(recovery.plan(d, empty).isPresent());
     }
 
     @Test

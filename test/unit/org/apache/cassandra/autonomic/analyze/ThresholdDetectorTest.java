@@ -145,6 +145,46 @@ public class ThresholdDetectorTest
     }
 
     @Test
+    public void breachSinceIsTheFirstBreachingCheckNotTheConfirmingOne()
+    {
+        ThresholdDetector d = new Fixture(settings(3));
+        tick(d, T1, 150);
+        long first = now;
+        tick(d, T1, 150);
+        Diagnosis opened = tick(d, T1, 150).get(0);
+        assertEquals(Long.toString(first), opened.evidence.get(ThresholdDetector.BREACH_SINCE));
+        assertEquals(now, opened.firstSeenMillis);
+        assertEquals(first, Long.parseLong(opened.evidence.get(ThresholdDetector.BREACH_SINCE)));
+        // it stays for the open diagnosis
+        assertEquals(Long.toString(first), tick(d, T1, 150).get(0).evidence.get(ThresholdDetector.BREACH_SINCE));
+        assertEquals(Long.toString(first), tick(d, T1, 90).get(0).evidence.get(ThresholdDetector.BREACH_SINCE));
+    }
+
+    @Test
+    public void aNewRunOfBreachesAfterAClearStartsFresh()
+    {
+        ThresholdDetector d = new Fixture(settings(2));
+        tick(d, T1, 150);
+        assertEquals(1, tick(d, T1, 150).size());
+        tick(d, T1, 10);
+        assertTrue(tick(d, T1, 10).isEmpty());
+        tick(d, T1, 150);
+        long second = now;
+        Diagnosis again = tick(d, T1, 150).get(0);
+        assertEquals(Long.toString(second), again.evidence.get(ThresholdDetector.BREACH_SINCE));
+
+        // a run broken by a calm check before it opens also starts again
+        ThresholdDetector e = new Fixture(settings(3));
+        tick(e, T2, 150);
+        tick(e, T2, 150);
+        tick(e, T2, 10);
+        tick(e, T2, 150);
+        long start = now;
+        tick(e, T2, 150);
+        assertEquals(Long.toString(start), tick(e, T2, 150).get(0).evidence.get(ThresholdDetector.BREACH_SINCE));
+    }
+
+    @Test
     public void exactlyAtRaiseThresholdBreaches()
     {
         ThresholdDetector d = new Fixture(settings(1));

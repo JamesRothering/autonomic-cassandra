@@ -20,12 +20,21 @@ package org.apache.cassandra.autonomic.plan.policies;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.autonomic.AutonomicConfig;
+import org.apache.cassandra.autonomic.analyze.Diagnosis;
+import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.execute.Actuator;
+import org.apache.cassandra.autonomic.execute.MetricVerifier;
+import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.plan.Policy;
+import org.apache.cassandra.autonomic.plan.VerifySpec;
 
 /**
  * The built-in policies. They are always built when the layer is enabled and do not look at actuator gates: the
@@ -34,8 +43,44 @@ import org.apache.cassandra.autonomic.plan.Policy;
  */
 public final class Policies
 {
+    private static final Logger logger = LoggerFactory.getLogger(Policies.class);
+
     private Policies()
     {
+    }
+
+    /** Reason left in the debug log when a proposal waits for samples of the problem period (ADR-044). */
+    public static final String WAITING_FOR_BASELINE = "waiting_for_baseline";
+
+    /** When the problem began: the first breaching check ({@code breach_since}) if the detector recorded it, else when the diagnosis opened. */
+    public static long problemSinceMillis(Diagnosis d)
+    {
+        String since = d.evidence.get(ThresholdDetector.BREACH_SINCE);
+        if (since != null)
+        {
+            try
+            {
+                return Long.parseLong(since.trim());
+            }
+            catch (NumberFormatException e)
+            {
+                // fall through
+            }
+        }
+        return d.firstSeenMillis;
+    }
+
+    /**
+     * The spec with its baseline taken from the problem period of the diagnosis, or empty (and a debug line
+     * {@link #WAITING_FOR_BASELINE}) if there are not yet enough samples in it.
+     */
+    static Optional<VerifySpec> forProblem(VerifySpec spec, Diagnosis diagnosis, KnowledgeView knowledge, String policy)
+    {
+        VerifySpec s = spec.withBaselineSince(problemSinceMillis(diagnosis));
+        if (MetricVerifier.baseline(s, knowledge).isPresent())
+            return Optional.of(s);
+        logger.debug("{}: {} for diagnosis {} ({}) since {}", policy, WAITING_FOR_BASELINE, diagnosis.id, diagnosis.type, s.baselineSinceMillis);
+        return Optional.empty();
     }
 
     public static List<Policy> build(AutonomicConfig config, Function<String, Actuator> actuators)

@@ -21,6 +21,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.Series;
 import org.apache.cassandra.autonomic.monitor.SignalId;
@@ -33,6 +36,8 @@ import org.apache.cassandra.autonomic.plan.VerifySpec;
  */
 public final class MetricVerifier
 {
+    private static final Logger logger = LoggerFactory.getLogger(MetricVerifier.class);
+
     /** Fewer observations than this in a window make its mean unusable. */
     public static final int MIN_SAMPLES = 3;
     /** {@code abort_tolerance}: a guard regressing by this multiple of its tolerance aborts verification early. */
@@ -74,10 +79,16 @@ public final class MetricVerifier
             out.put(key(signal, subject), mean);
     }
 
-    /** Rule 5: the baseline over {@code baselineWindowMillis}; empty if the goal or any guard lacks samples. */
+    /**
+     * Rule 5: the baseline over {@code baselineWindowMillis}, or, if the spec has a {@code baselineSinceMillis}, from then
+     * to now when that is shorter (ADR-044); empty if the goal or any guard lacks samples.
+     */
     public static Optional<Map<String, Double>> baseline(VerifySpec spec, KnowledgeView knowledge)
     {
-        Map<String, Double> means = means(spec, knowledge, spec.baselineWindowMillis);
+        long lookback = spec.baselineWindowMillis;
+        if (spec.baselineSinceMillis != VerifySpec.NO_BASELINE_SINCE)
+            lookback = Math.max(0, Math.min(lookback, knowledge.nowMillis() - spec.baselineSinceMillis));
+        Map<String, Double> means = means(spec, knowledge, lookback);
         return means.size() == expectedKeys(spec) ? Optional.of(means) : Optional.empty();
     }
 
@@ -95,7 +106,10 @@ public final class MetricVerifier
     {
         if (spec == null)
             return Verdict.INCONCLUSIVE;
-        return verdict(spec, baseline, means(spec, knowledge, spec.observationWindowMillis));
+        Map<String, Double> result = means(spec, knowledge, spec.observationWindowMillis);
+        Verdict verdict = verdict(spec, baseline, result);
+        logger.debug("Verdict {}: baseline {} (since {}), result {}", verdict, baseline, spec.baselineSinceMillis, result);
+        return verdict;
     }
 
     /**
@@ -140,7 +154,11 @@ public final class MetricVerifier
             String key = key(guard.signal, guard.subject);
             Double change = improvement(baseline, current, key, guard.lowerIsBetter);
             if (change != null && change < -ABORT_FACTOR * guard.tolerance)
+            {
+                logger.debug("Guard {} breached: baseline {} (since {}), mean since apply {} over {} ms", key, baseline.get(key),
+                             spec.baselineSinceMillis, current.get(key), sinceApplyMillis);
                 return Optional.of(key);
+            }
         }
         return Optional.empty();
     }

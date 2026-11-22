@@ -76,9 +76,19 @@ public final class VerifySpec
     public final long baselineWindowMillis;
     /** Window after apply used for the verdict. */
     public final long observationWindowMillis;
+    /** Start of the problem, epoch millis: the baseline is taken from then (at most the window); {@link #NO_BASELINE_SINCE} for the trailing window. */
+    public final long baselineSinceMillis;
+
+    public static final long NO_BASELINE_SINCE = Long.MIN_VALUE;
 
     public VerifySpec(SignalId goal, Subject goalSubject, boolean lowerIsBetter, double minImprovement, List<Guard> guards,
                       long baselineWindowMillis, long observationWindowMillis)
+    {
+        this(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, NO_BASELINE_SINCE);
+    }
+
+    public VerifySpec(SignalId goal, Subject goalSubject, boolean lowerIsBetter, double minImprovement, List<Guard> guards,
+                      long baselineWindowMillis, long observationWindowMillis, long baselineSinceMillis)
     {
         this.goal = Objects.requireNonNull(goal);
         this.goalSubject = Objects.requireNonNull(goalSubject);
@@ -87,6 +97,13 @@ public final class VerifySpec
         this.guards = List.copyOf(guards);
         this.baselineWindowMillis = baselineWindowMillis;
         this.observationWindowMillis = observationWindowMillis;
+        this.baselineSinceMillis = baselineSinceMillis;
+    }
+
+    /** A copy whose baseline starts at {@code sinceMillis} (capped at the baseline window). */
+    public VerifySpec withBaselineSince(long sinceMillis)
+    {
+        return new VerifySpec(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, sinceMillis);
     }
 
     @Override
@@ -99,18 +116,20 @@ public final class VerifySpec
         VerifySpec v = (VerifySpec) o;
         return goal.equals(v.goal) && goalSubject.equals(v.goalSubject) && lowerIsBetter == v.lowerIsBetter
                && Double.compare(minImprovement, v.minImprovement) == 0 && guards.equals(v.guards)
-               && baselineWindowMillis == v.baselineWindowMillis && observationWindowMillis == v.observationWindowMillis;
+               && baselineWindowMillis == v.baselineWindowMillis && observationWindowMillis == v.observationWindowMillis
+               && baselineSinceMillis == v.baselineSinceMillis;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis);
+        return Objects.hash(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, baselineSinceMillis);
     }
 
     @Override
     public String toString()
     {
-        return "VerifySpec{goal=" + goal + "@" + goalSubject + ", guards=" + guards + '}';
+        return "VerifySpec{goal=" + goal + "@" + goalSubject + ", guards=" + guards
+               + (baselineSinceMillis == NO_BASELINE_SINCE ? "" : ", baselineSince=" + baselineSinceMillis) + '}';
     }
 }

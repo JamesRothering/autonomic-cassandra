@@ -75,9 +75,12 @@ public class TombstoneOverloadPolicy extends KnobPolicy
             return super.plan(diagnosis, knowledge);
         if (actuators.apply(GarbageCollectActuator.NAME) == null || collectedToday(diagnosis.subject, knowledge))
             return Optional.empty();
+        Optional<VerifySpec> verify = Policies.forProblem(verify(diagnosis, knowledge, windows.apply(GarbageCollectActuator.NAME)), diagnosis, knowledge, NAME);
+        if (!verify.isPresent())
+            return Optional.empty();
         Action action = new Action(TimeUUID.Generator.nextTimeUUID().asUUID(), GarbageCollectActuator.NAME, ActionScope.NODE,
                                    diagnosis.subject, Map.of(GarbageCollectActuator.PARAM_OPTION, "ROW", KnobActuator.PARAM_DIAGNOSIS, diagnosis.id.toString()),
-                                   verify(diagnosis, knowledge, windows.apply(GarbageCollectActuator.NAME)));
+                                   verify.get());
         return Optional.of(new Plan(TimeUUID.Generator.nextTimeUUID().asUUID(), diagnosis.id, NAME, List.of(action),
                                     "tombstone_overload on " + diagnosis.subject.asString() + " is CRITICAL: garbage-collecting compaction"));
     }
