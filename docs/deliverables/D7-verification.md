@@ -58,7 +58,7 @@ Refined in D1. The authoritative task list, with files, dependencies, acceptance
 
 ## Status
 
-Done on branch `deliverable/D7-verification` (2026-11-20); awaiting owner review. T7.2 is tiered `fable` in section 13 of the overview and runs on Opus, because the owner stopped using Fable on 2026-11-17.
+Done on branch `deliverable/D7-verification` (2026-11-20; follow-ups T7.5 to T7.14 done 2026-11-22); awaiting owner review. T7.2 is tiered `fable` in section 13 of the overview and runs on Opus, because the owner stopped using Fable on 2026-11-17.
 
 - T7.1 scenario dtests (hot spot, load spike, degraded node): done. They found one bug, fixed in the same commit: `PartitionSplitPolicy`'s probe thread kept nodes from shutting down cleanly. In the hot-spot scenario the latency guards were relaxed, because a split raises in-JVM latency, so the verdict rested on the reduced share; T7.8 replaced that (see below).
 - T7.2 fault injection (six faults): done. Every fault converges to fail-static and no production change was needed. Three findings are not fail-static violations and are left for the owner:
