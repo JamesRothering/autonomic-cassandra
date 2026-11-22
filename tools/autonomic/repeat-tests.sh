@@ -90,10 +90,19 @@ case "$RUNS" in ''|*[!0-9]*|0) die "-n needs a positive integer, got '$RUNS'" ;;
 [ ${#CLASSES[@]} -gt 0 ] || { usage >&2; die "no test classes given"; }
 [ -n "$OUT" ] || OUT="$ROOT/build/repeat-tests/$(date +%Y%m%d-%H%M%S)"
 
+# run-tests.sh -t is a grep pattern over test paths: anchor a plain class name so that
+# LoadSpikeScenarioTest does not also run RealLoadSpikeScenarioTest
+pattern() {
+  case "$1" in
+    *[!A-Za-z0-9_]*) printf '%s' "$1" ;;
+    *) printf '/%s\\.java$' "$1" ;;
+  esac
+}
+
 if $DRY_RUN; then
   for ((r = 1; r <= RUNS; r++)); do
     for cls in "${CLASSES[@]}"; do
-      echo "cd $ROOT && $RUN_TESTS -s -a $TYPE -t $cls > $OUT/$cls-$r.log 2>&1"
+      echo "cd $ROOT && $RUN_TESTS -s -a $TYPE -t '$(pattern "$cls")' > $OUT/$cls-$r.log 2>&1"
     done
   done
   exit 0
@@ -105,7 +114,7 @@ for ((r = 1; r <= RUNS; r++)); do
   for cls in "${CLASSES[@]}"; do
     log="$OUT/$cls-$r.log"
     t0=$(date +%s)
-    (cd "$ROOT" && $RUN_TESTS -s -a "$TYPE" -t "$cls") > "$log" 2>&1
+    (cd "$ROOT" && $RUN_TESTS -s -a "$TYPE" -t "$(pattern "$cls")") > "$log" 2>&1
     rc=$?
     secs=$(( $(date +%s) - t0 ))
     # keep this run's JUnit report and node logs: the next run overwrites them
