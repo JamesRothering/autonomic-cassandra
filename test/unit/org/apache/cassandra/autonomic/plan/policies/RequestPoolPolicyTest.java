@@ -120,6 +120,8 @@ public class RequestPoolPolicyTest
         assertEquals("pool.pending_tasks", a.verify.goal.name);
         assertEquals(READ_POOL, a.verify.goalSubject);
         assertEquals(2, a.verify.guards.size());
+        assertEquals("client.read_ops_per_sec", a.verify.guards.get(0).trafficSignal.name);
+        assertEquals("client.write_ops_per_sec", a.verify.guards.get(1).trafficSignal.name);
         load(0.5);
         assertEquals("12", saturation.plan(d, view).get().actions.get(0).params.get("value"));
     }

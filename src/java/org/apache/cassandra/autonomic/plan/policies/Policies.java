@@ -96,7 +96,7 @@ public final class Policies
     {
         Function<String, Windows> windows = actuator -> {
             Map<String, Object> options = config.actuators == null ? null : config.actuators.get(actuator);
-            return Windows.fromOptions(options);
+            return Windows.fromOptions(options).withGuardMinOps(config.safety.guard_min_ops_per_sec);
         };
         List<Policy> out = new ArrayList<>();
         out.add(new CompactionBacklogPolicy(actuators, windows));

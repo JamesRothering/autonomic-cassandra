@@ -98,6 +98,12 @@ public class AutonomicConfig
         public DurationSpec.IntSecondsBound verify_grace = new DurationSpec.IntSecondsBound("30s");
         public DurationSpec.IntSecondsBound action_step_timeout = new DurationSpec.IntSecondsBound("30s");
         public int component_failure_threshold = 5;
+        /**
+         * A latency guard on a request class (client reads, client writes, a table's reads) is not judged where that
+         * class's baseline traffic was below this many operations per second: its p99 rests on a few operations and
+         * moves by more than the tolerance with no change in the service (ADR-045).
+         */
+        public double guard_min_ops_per_sec = 10;
         public DurationSpec.IntMillisecondsBound sensor_budget = new DurationSpec.IntMillisecondsBound("200ms");
     }
 

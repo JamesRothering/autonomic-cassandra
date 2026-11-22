@@ -63,7 +63,7 @@ public class TombstoneOverloadPolicy extends KnobPolicy
     VerifySpec verify(Diagnosis diagnosis, KnowledgeView knowledge, Windows w)
     {
         return spec(Signals.TABLE_TOMBSTONES_SCANNED_P99, diagnosis.subject, w,
-                    new VerifySpec.Guard(Signals.TABLE_READ_LATENCY_P99_MICROS, diagnosis.subject, true, LATENCY_TOLERANCE));
+                    new VerifySpec.Guard(Signals.TABLE_READ_LATENCY_P99_MICROS, diagnosis.subject, true, LATENCY_TOLERANCE, Signals.TABLE_READ_OPS_PER_SEC));
     }
 
     @Override

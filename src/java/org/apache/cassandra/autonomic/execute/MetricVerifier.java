@@ -43,6 +43,9 @@ public final class MetricVerifier
     /** {@code abort_tolerance}: a guard regressing by this multiple of its tolerance aborts verification early. */
     public static final double ABORT_FACTOR = 2.0;
 
+    /** Prefix of a guard's traffic mean in the {@code baseline} map (ADR-045). */
+    public static final String TRAFFIC_PREFIX = "traffic:";
+
     private MetricVerifier()
     {
     }
@@ -51,6 +54,24 @@ public final class MetricVerifier
     public static String key(SignalId signal, Subject subject)
     {
         return signal.name + '@' + subject.asString();
+    }
+
+    /** Key of the baseline mean of a guard's traffic signal. */
+    public static String trafficKey(SignalId signal, Subject subject)
+    {
+        return TRAFFIC_PREFIX + key(signal, subject);
+    }
+
+    /**
+     * True if the guard names a traffic signal whose baseline mean is below the spec's floor. A guard without a
+     * traffic signal, or whose baseline has no traffic samples, is judged (fail-safe).
+     */
+    public static boolean idle(VerifySpec spec, VerifySpec.Guard guard, Map<String, Double> baseline)
+    {
+        if (guard.trafficSignal == null)
+            return false;
+        Double traffic = baseline.get(trafficKey(guard.trafficSignal, guard.subject));
+        return traffic != null && traffic < spec.guardMinOpsPerSec;
     }
 
     /**
@@ -81,7 +102,9 @@ public final class MetricVerifier
 
     /**
      * Rule 5: the baseline over {@code baselineWindowMillis}, or, if the spec has a {@code baselineSinceMillis}, from then
-     * to now when that is shorter (ADR-044); empty if the goal or any guard lacks samples.
+     * to now when that is shorter (ADR-044); empty if the goal or any guard lacks samples. It also holds, under
+     * {@link #trafficKey}, the mean of each guard's traffic signal over the same period where that has enough samples;
+     * these keys are optional and not counted in {@link #expectedKeys}. Without them the guard is judged.
      */
     public static Optional<Map<String, Double>> baseline(VerifySpec spec, KnowledgeView knowledge)
     {
@@ -89,7 +112,19 @@ public final class MetricVerifier
         if (spec.baselineSinceMillis != VerifySpec.NO_BASELINE_SINCE)
             lookback = Math.max(0, Math.min(lookback, knowledge.nowMillis() - spec.baselineSinceMillis));
         Map<String, Double> means = means(spec, knowledge, lookback);
-        return means.size() == expectedKeys(spec) ? Optional.of(means) : Optional.empty();
+        if (means.size() != expectedKeys(spec))
+            return Optional.empty();
+        for (VerifySpec.Guard guard : spec.guards)
+        {
+            if (guard.trafficSignal == null)
+                continue;
+            Map<String, Double> traffic = new LinkedHashMap<>();
+            putMean(traffic, guard.trafficSignal, guard.subject, knowledge, lookback);
+            Double mean = traffic.get(key(guard.trafficSignal, guard.subject));
+            if (mean != null)
+                means.put(trafficKey(guard.trafficSignal, guard.subject), mean);
+        }
+        return Optional.of(means);
     }
 
     private static int expectedKeys(VerifySpec spec)
@@ -113,7 +148,7 @@ public final class MetricVerifier
     }
 
     /**
-     * Rule 6: REGRESSED if any guard worsened beyond its tolerance or the goal worsened by more than
+     * Rule 6, over the guards that are not idle (ADR-045): REGRESSED if any guard worsened beyond its tolerance or the goal worsened by more than
      * {@code minImprovement}; otherwise INCONCLUSIVE if any mean is missing; IMPROVED if the goal improved by at
      * least {@code minImprovement}; otherwise NEUTRAL.
      */
@@ -122,6 +157,12 @@ public final class MetricVerifier
         boolean missing = false;
         for (VerifySpec.Guard guard : spec.guards)
         {
+            if (idle(spec, guard, baseline))
+            {
+                logger.debug("Guard {} idle: baseline traffic {} below {} ops/s, not judged", key(guard.signal, guard.subject),
+                             baseline.get(trafficKey(guard.trafficSignal, guard.subject)), spec.guardMinOpsPerSec);
+                continue;
+            }
             Double change = improvement(baseline, result, key(guard.signal, guard.subject), guard.lowerIsBetter);
             if (change == null)
                 missing = true;
@@ -140,7 +181,7 @@ public final class MetricVerifier
 
     /**
      * Rule 8: the guard, if any, whose mean since apply has regressed by more than {@link #ABORT_FACTOR} times its
-     * tolerance. Guards with fewer than {@link #MIN_SAMPLES} observations since apply are not judged.
+     * tolerance. Idle guards (ADR-045) and guards with fewer than {@link #MIN_SAMPLES} observations since apply are not judged.
      */
     public static Optional<String> guardBreached(VerifySpec spec, Map<String, Double> baseline, KnowledgeView knowledge, long sinceApplyMillis)
     {
@@ -151,6 +192,8 @@ public final class MetricVerifier
             putMean(current, guard.signal, guard.subject, knowledge, sinceApplyMillis);
         for (VerifySpec.Guard guard : spec.guards)
         {
+            if (idle(spec, guard, baseline))
+                continue;
             String key = key(guard.signal, guard.subject);
             Double change = improvement(baseline, current, key, guard.lowerIsBetter);
             if (change != null && change < -ABORT_FACTOR * guard.tolerance)

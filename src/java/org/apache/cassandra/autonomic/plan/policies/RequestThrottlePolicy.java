@@ -153,7 +153,7 @@ public class RequestThrottlePolicy implements Policy
         boolean write = YieldBackgroundPolicy.writeWorse(diagnosis);
         VerifySpec spec = new VerifySpec(write ? Signals.CLIENT_WRITE_LATENCY_P99_MICROS : Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(),
                                          true, 0.10, List.of(write ? KnobPolicy.readLatencyGuard() : KnobPolicy.writeLatencyGuard()),
-                                         w.baselineMillis, w.observationMillis);
+                                         w.baselineMillis, w.observationMillis).withGuardMinOps(w.guardMinOpsPerSec);
         return target.flatMap(t -> plan(diagnosis, knowledge, knob, t, spec, "shed load: request limit " + RequestThrottleActuator.format(knob.current()) + " -> " + RequestThrottleActuator.format(t)));
     }
 
@@ -166,7 +166,7 @@ public class RequestThrottlePolicy implements Policy
         Optional<Double> target = knob.increase(observedRate(knowledge), RELEASE_FACTOR, diagnosis.id.toString());
         Windows w = windows.apply(RequestThrottleActuator.NAME);
         VerifySpec spec = new VerifySpec(Signals.CLIENT_READ_LATENCY_P99_MICROS, Subject.node(), true, 0.0,
-                                         List.of(KnobPolicy.writeLatencyGuard()), w.baselineMillis, w.observationMillis);
+                                         List.of(KnobPolicy.writeLatencyGuard()), w.baselineMillis, w.observationMillis).withGuardMinOps(w.guardMinOpsPerSec);
         return target.flatMap(t -> plan(diagnosis, knowledge, knob, t, spec, "recovery: request limit " + RequestThrottleActuator.format(knob.current())
                                                               + (t >= knob.ceiling() ? " released" : " -> " + RequestThrottleActuator.format(t))));
     }

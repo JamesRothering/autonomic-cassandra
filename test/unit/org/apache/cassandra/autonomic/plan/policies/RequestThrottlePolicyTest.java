@@ -132,6 +132,7 @@ public class RequestThrottlePolicyTest
         assertEquals("3200", a.params.get("value"));
         assertEquals("the worse operation is the goal", "client.read_latency_p99_micros", a.verify.goal.name);
         assertEquals("client.write_latency_p99_micros", a.verify.guards.get(0).signal.name);
+        assertEquals("client.write_ops_per_sec", a.verify.guards.get(0).trafficSignal.name);
         assertEquals(0.10, a.verify.minImprovement, 0);
     }
 

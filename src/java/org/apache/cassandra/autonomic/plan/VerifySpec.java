@@ -33,13 +33,25 @@ public final class VerifySpec
         public final Subject subject;
         public final boolean lowerIsBetter;
         public final double tolerance;
+        /**
+         * Operations per second of the request class this guard protects, on the guard's subject; null if the guard is
+         * always judged. A guard whose class had less than {@link VerifySpec#guardMinOpsPerSec} in the baseline is not
+         * judged (ADR-045).
+         */
+        public final SignalId trafficSignal;
 
         public Guard(SignalId signal, Subject subject, boolean lowerIsBetter, double tolerance)
+        {
+            this(signal, subject, lowerIsBetter, tolerance, null);
+        }
+
+        public Guard(SignalId signal, Subject subject, boolean lowerIsBetter, double tolerance, SignalId trafficSignal)
         {
             this.signal = signal;
             this.subject = subject;
             this.lowerIsBetter = lowerIsBetter;
             this.tolerance = tolerance;
+            this.trafficSignal = trafficSignal;
         }
 
         @Override
@@ -49,19 +61,19 @@ public final class VerifySpec
                 return false;
             Guard g = (Guard) o;
             return signal.equals(g.signal) && subject.equals(g.subject) && lowerIsBetter == g.lowerIsBetter
-                   && Double.compare(tolerance, g.tolerance) == 0;
+                   && Double.compare(tolerance, g.tolerance) == 0 && Objects.equals(trafficSignal, g.trafficSignal);
         }
 
         @Override
         public int hashCode()
         {
-            return Objects.hash(signal, subject, lowerIsBetter, tolerance);
+            return Objects.hash(signal, subject, lowerIsBetter, tolerance, trafficSignal);
         }
 
         @Override
         public String toString()
         {
-            return "Guard{" + signal + "@" + subject + ", tolerance=" + tolerance + '}';
+            return "Guard{" + signal + "@" + subject + ", tolerance=" + tolerance + (trafficSignal == null ? "" : ", traffic=" + trafficSignal) + '}';
         }
     }
 
@@ -79,7 +91,11 @@ public final class VerifySpec
     /** Start of the problem, epoch millis: the baseline is taken from then (at most the window); {@link #NO_BASELINE_SINCE} for the trailing window. */
     public final long baselineSinceMillis;
 
+    /** A guard with a traffic signal is not judged if that signal's baseline mean is below this (ops/s); {@code safety.guard_min_ops_per_sec}. */
+    public final double guardMinOpsPerSec;
+
     public static final long NO_BASELINE_SINCE = Long.MIN_VALUE;
+    public static final double DEFAULT_GUARD_MIN_OPS_PER_SEC = 10;
 
     public VerifySpec(SignalId goal, Subject goalSubject, boolean lowerIsBetter, double minImprovement, List<Guard> guards,
                       long baselineWindowMillis, long observationWindowMillis)
@@ -90,6 +106,13 @@ public final class VerifySpec
     public VerifySpec(SignalId goal, Subject goalSubject, boolean lowerIsBetter, double minImprovement, List<Guard> guards,
                       long baselineWindowMillis, long observationWindowMillis, long baselineSinceMillis)
     {
+        this(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, baselineSinceMillis,
+             DEFAULT_GUARD_MIN_OPS_PER_SEC);
+    }
+
+    public VerifySpec(SignalId goal, Subject goalSubject, boolean lowerIsBetter, double minImprovement, List<Guard> guards,
+                      long baselineWindowMillis, long observationWindowMillis, long baselineSinceMillis, double guardMinOpsPerSec)
+    {
         this.goal = Objects.requireNonNull(goal);
         this.goalSubject = Objects.requireNonNull(goalSubject);
         this.lowerIsBetter = lowerIsBetter;
@@ -98,12 +121,19 @@ public final class VerifySpec
         this.baselineWindowMillis = baselineWindowMillis;
         this.observationWindowMillis = observationWindowMillis;
         this.baselineSinceMillis = baselineSinceMillis;
+        this.guardMinOpsPerSec = guardMinOpsPerSec;
     }
 
     /** A copy whose baseline starts at {@code sinceMillis} (capped at the baseline window). */
     public VerifySpec withBaselineSince(long sinceMillis)
     {
-        return new VerifySpec(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, sinceMillis);
+        return new VerifySpec(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, sinceMillis, guardMinOpsPerSec);
+    }
+
+    /** A copy with the traffic floor below which a guard with a traffic signal is not judged. */
+    public VerifySpec withGuardMinOps(double opsPerSec)
+    {
+        return new VerifySpec(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, baselineSinceMillis, opsPerSec);
     }
 
     @Override
@@ -117,13 +147,13 @@ public final class VerifySpec
         return goal.equals(v.goal) && goalSubject.equals(v.goalSubject) && lowerIsBetter == v.lowerIsBetter
                && Double.compare(minImprovement, v.minImprovement) == 0 && guards.equals(v.guards)
                && baselineWindowMillis == v.baselineWindowMillis && observationWindowMillis == v.observationWindowMillis
-               && baselineSinceMillis == v.baselineSinceMillis;
+               && baselineSinceMillis == v.baselineSinceMillis && Double.compare(guardMinOpsPerSec, v.guardMinOpsPerSec) == 0;
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, baselineSinceMillis);
+        return Objects.hash(goal, goalSubject, lowerIsBetter, minImprovement, guards, baselineWindowMillis, observationWindowMillis, baselineSinceMillis, guardMinOpsPerSec);
     }
 
     @Override

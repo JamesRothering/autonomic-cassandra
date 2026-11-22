@@ -77,17 +77,8 @@ public class RealLoadSpikeScenarioTest extends TestBaseImpl
     private static final int RATE = 230;
     private static final int KEYS = 200;
     /**
-     * Evaluations the saturation must last before it is diagnosed: one per sample of the sensors, so about 20 s. A shorter spike is not worth
-     * acting on, and it lets the p99 of the coordinator reach its plateau. Acted on at the first sample, the baseline
-     * of the verification holds the ramp, a p99 well below the plateau, and the growth of the pool, which only
-     * keeps the p99 where it is, is aborted early as a regression of its guard (found by this scenario).
-     */
-    private static final int SUSTAINED = 4;
-    /**
      * The most requests the client has in flight, like the connections of a real client; what it cannot send is not
-     * sent. With the stage saturated the queue grows to this bound and stays there, so the coordinator's p99 reaches
-     * a plateau before the layer acts (while a queue grows, the p99 rises with it, and the verification of any
-     * action would compare the rising p99 with an earlier, lower one).
+     * sent. With the stage saturated the queue grows to this bound and stays there.
      */
     private static final int MAX_IN_FLIGHT = 40;
 
@@ -128,7 +119,7 @@ public class RealLoadSpikeScenarioTest extends TestBaseImpl
          .set("autonomic.safety.cooldown_after_commit", "1s")
          .set("autonomic.safety.max_actions_per_hour", 100)
          .set("autonomic.safety.max_actions_per_actuator_per_hour", 100)
-         .set("autonomic.detectors", Map.of("pool_saturation", Map.of("pending_tasks", 10, "for_evaluations", SUSTAINED),
+         .set("autonomic.detectors", Map.of("pool_saturation", Map.of("pending_tasks", 10, "for_evaluations", 2),
                                             "latency_slo_breach", Map.of("for_evaluations", 2)))
          // the sensors report every 5 s, so a window holds its three samples (MetricVerifier.MIN_SAMPLES) from 16 s
          .set("autonomic.actuators", Map.of("read_pool", Map.of("enabled", true, "baseline_window", "17s", "observation_window", "17s")));

@@ -159,7 +159,7 @@ public class RequestPoolPolicy implements Policy
         Windows w = windows.apply(knob.name());
         VerifySpec spec = new VerifySpec(Signals.POOL_PENDING_TASKS, Subject.threadPool(pool), true, minImprovement,
                                          List.of(KnobPolicy.readLatencyGuard(), KnobPolicy.writeLatencyGuard()),
-                                         w.baselineMillis, w.observationMillis);
+                                         w.baselineMillis, w.observationMillis).withGuardMinOps(w.guardMinOpsPerSec);
         Optional<VerifySpec> verify = Policies.forProblem(spec, diagnosis, knowledge, name());
         if (!verify.isPresent())
             return Optional.empty();

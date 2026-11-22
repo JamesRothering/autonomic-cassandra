@@ -184,4 +184,114 @@ public class MetricVerifierTest
         // mean since apply now (35*3+2)/5 = 21.4: regressed by 57%
         assertTrue(MetricVerifier.guardBreached(spec, baseline, view, 2_000).isPresent());
     }
+
+    // ADR-045: a latency guard (lower is better, 25%) with a traffic signal, floor 10 ops/s
+    private static final SignalId TRAFFIC = SignalId.of("traffic");
+    private static final String TRAFFIC_KEY = MetricVerifier.trafficKey(TRAFFIC, NODE);
+    private final VerifySpec guarded = new VerifySpec(GOAL, NODE, true, 0.10,
+                                                      List.of(new VerifySpec.Guard(GUARD, NODE, true, 0.25, TRAFFIC)), 10_000, 5_000);
+
+    private Verdict guardedVerdict(VerifySpec s, double traffic, Double goal, Double guard)
+    {
+        Map<String, Double> base = Map.of(GOAL_KEY, 100.0, GUARD_KEY, 1000.0, TRAFFIC_KEY, traffic);
+        Map<String, Double> result = new java.util.HashMap<>();
+        if (goal != null)
+            result.put(GOAL_KEY, goal);
+        if (guard != null)
+            result.put(GUARD_KEY, guard);
+        return MetricVerifier.verdict(s, base, result);
+    }
+
+    @Test
+    public void idleGuardIsNotJudged()
+    {
+        assertEquals(Verdict.IMPROVED, guardedVerdict(guarded, 0.5, 50.0, 2000.0));   // +100% p99 on an idle class
+        assertEquals(Verdict.IMPROVED, guardedVerdict(guarded, 0.5, 50.0, null));     // and missing p99 is not missing
+        assertEquals(Verdict.NEUTRAL, guardedVerdict(guarded, 0.5, 95.0, 2000.0));
+        assertEquals(Verdict.REGRESSED, guardedVerdict(guarded, 0.5, 111.0, 1000.0)); // the goal is still judged
+        assertEquals(Verdict.IMPROVED, guardedVerdict(guarded, 9.99, 50.0, 2000.0));
+    }
+
+    @Test
+    public void busyGuardIsJudged()
+    {
+        assertEquals(Verdict.REGRESSED, guardedVerdict(guarded, 10.0, 50.0, 1300.0)); // at the floor: judged
+        assertEquals(Verdict.REGRESSED, guardedVerdict(guarded, 500.0, 50.0, 1300.0));
+        assertEquals(Verdict.IMPROVED, guardedVerdict(guarded, 500.0, 50.0, 1200.0));
+        // busy before, idle after: the p99 is missing, so it cannot be judged
+        assertEquals(Verdict.INCONCLUSIVE, guardedVerdict(guarded, 500.0, 50.0, null));
+    }
+
+    @Test
+    public void guardWithoutTrafficSignalOrSamplesIsJudged()
+    {
+        VerifySpec plain = new VerifySpec(GOAL, NODE, true, 0.10, List.of(new VerifySpec.Guard(GUARD, NODE, true, 0.25)), 10_000, 5_000);
+        assertEquals(Verdict.REGRESSED, guardedVerdict(plain, 0.0, 50.0, 2000.0));
+        // a baseline without traffic samples: the guard is judged (fail-safe)
+        Map<String, Double> noTraffic = Map.of(GOAL_KEY, 100.0, GUARD_KEY, 1000.0);
+        assertEquals(Verdict.REGRESSED, MetricVerifier.verdict(guarded, noTraffic, Map.of(GOAL_KEY, 50.0, GUARD_KEY, 2000.0)));
+        assertEquals(Verdict.INCONCLUSIVE, MetricVerifier.verdict(guarded, noTraffic, Map.of(GOAL_KEY, 50.0)));
+    }
+
+    @Test
+    public void floorIsConfigurable()
+    {
+        assertEquals(Verdict.IMPROVED, guardedVerdict(guarded.withGuardMinOps(100), 50.0, 50.0, 2000.0));
+        assertEquals(Verdict.REGRESSED, guardedVerdict(guarded.withGuardMinOps(1), 50.0, 50.0, 2000.0));
+        assertEquals(Verdict.REGRESSED, guardedVerdict(guarded.withGuardMinOps(0), 0.0, 50.0, 2000.0));
+        assertEquals(10.0, guarded.guardMinOpsPerSec, 0);
+        assertEquals(100.0, guarded.withGuardMinOps(100).withBaselineSince(5).guardMinOpsPerSec, 0);
+    }
+
+    @Test
+    public void baselineRecordsTheTrafficMeanWhereThereAreSamples()
+    {
+        AtomicLong now = new AtomicLong(100_000);
+        ObservationStore store = new ObservationStore(100, 100);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, now::get);
+        for (int i = 1; i <= 3; i++)
+        {
+            store.accept(new Observation(GOAL, NODE, now.get() - i * 1000, 100));
+            store.accept(new Observation(GUARD, NODE, now.get() - i * 1000, 1000));
+        }
+        // no traffic samples: the baseline is complete and carries no traffic key
+        Map<String, Double> b = MetricVerifier.baseline(guarded, view).get();
+        assertEquals(2, b.size());
+        // two traffic samples are too few
+        store.accept(new Observation(TRAFFIC, NODE, now.get() - 1000, 4));
+        store.accept(new Observation(TRAFFIC, NODE, now.get() - 2000, 6));
+        assertFalse(MetricVerifier.baseline(guarded, view).get().containsKey(TRAFFIC_KEY));
+        store.accept(new Observation(TRAFFIC, NODE, now.get() - 3000, 8));
+        b = MetricVerifier.baseline(guarded, view).get();
+        assertEquals(6.0, b.get(TRAFFIC_KEY), 1e-9);
+        assertTrue(MetricVerifier.idle(guarded, guarded.guards.get(0), b));
+        // means (the result map) does not carry traffic
+        assertFalse(MetricVerifier.means(guarded, view, 10_000).containsKey(TRAFFIC_KEY));
+    }
+
+    @Test
+    public void earlyAbortSkipsIdleGuards()
+    {
+        AtomicLong now = new AtomicLong(100_000);
+        ObservationStore store = new ObservationStore(100, 100);
+        InMemoryKnowledgeView view = new InMemoryKnowledgeView(store, now::get);
+        for (int i = 0; i < 3; i++)
+            store.accept(new Observation(GUARD, NODE, 99_000 + i, 3000));
+        Map<String, Double> idle = Map.of(GOAL_KEY, 100.0, GUARD_KEY, 1000.0, TRAFFIC_KEY, 2.0);
+        Map<String, Double> busy = Map.of(GOAL_KEY, 100.0, GUARD_KEY, 1000.0, TRAFFIC_KEY, 200.0);
+        assertFalse(MetricVerifier.guardBreached(guarded, idle, view, 2_000).isPresent());
+        assertTrue(MetricVerifier.guardBreached(guarded, busy, view, 2_000).isPresent());
+    }
+
+    @Test
+    public void trafficSignalIsPartOfTheGuardsIdentity()
+    {
+        VerifySpec.Guard a = new VerifySpec.Guard(GUARD, NODE, true, 0.25, TRAFFIC);
+        assertEquals(a, new VerifySpec.Guard(GUARD, NODE, true, 0.25, TRAFFIC));
+        assertEquals(a.hashCode(), new VerifySpec.Guard(GUARD, NODE, true, 0.25, TRAFFIC).hashCode());
+        assertFalse(a.equals(new VerifySpec.Guard(GUARD, NODE, true, 0.25)));
+        assertTrue(a.toString().contains("traffic=" + TRAFFIC));
+        assertFalse(new VerifySpec.Guard(GUARD, NODE, true, 0.25).toString().contains("traffic"));
+        assertFalse(guarded.equals(guarded.withGuardMinOps(11)));
+    }
 }

@@ -157,6 +157,8 @@ public class PoliciesTest
             assertEquals(guards[i], spec.guards.get(i).signal.name);
             assertTrue(spec.guards.get(i).lowerIsBetter);
             assertEquals(0.25, spec.guards.get(i).tolerance, 0);
+            // ADR-045: each latency guard names the traffic of its request class
+            assertEquals(guards[i].replace("latency_p99_micros", "ops_per_sec"), spec.guards.get(i).trafficSignal.name);
         }
     }
 
@@ -373,6 +375,16 @@ public class PoliciesTest
         // other actuators keep the defaults
         Diagnosis g = diagnosis("gc_pressure", NODE, Severity.WARN);
         assertEquals(Windows.DEFAULT_OBSERVATION_MILLIS, only(built.get(2).plan(g, view), g, "gc_pressure").verify.observationWindowMillis);
+    }
+
+    @Test
+    public void buildPassesTheGuardTrafficFloorFromTheConfig()
+    {
+        Diagnosis d = diagnosis("compaction_backlog", NODE, Severity.WARN);
+        assertEquals(10.0, only(Policies.build(new AutonomicConfig(), actuators::get).get(0).plan(d, view), d, "compaction_backlog").verify.guardMinOpsPerSec, 0);
+        AutonomicConfig config = new AutonomicConfig();
+        config.safety.guard_min_ops_per_sec = 25;
+        assertEquals(25.0, only(Policies.build(config, actuators::get).get(0).plan(d, view), d, "compaction_backlog").verify.guardMinOpsPerSec, 0);
     }
 
     @Test

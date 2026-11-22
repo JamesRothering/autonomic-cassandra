@@ -19,6 +19,7 @@ package org.apache.cassandra.autonomic.plan.policies;
 
 import java.util.Map;
 
+import org.apache.cassandra.autonomic.plan.VerifySpec;
 import org.apache.cassandra.config.DurationSpec;
 
 /** Baseline and observation windows of a policy's {@link org.apache.cassandra.autonomic.plan.VerifySpec}. */
@@ -31,11 +32,24 @@ public final class Windows
 
     public final long baselineMillis;
     public final long observationMillis;
+    /** Traffic floor of latency guards ({@code safety.guard_min_ops_per_sec}); travels with the windows into every spec. */
+    public final double guardMinOpsPerSec;
 
     public Windows(long baselineMillis, long observationMillis)
     {
+        this(baselineMillis, observationMillis, VerifySpec.DEFAULT_GUARD_MIN_OPS_PER_SEC);
+    }
+
+    public Windows(long baselineMillis, long observationMillis, double guardMinOpsPerSec)
+    {
         this.baselineMillis = baselineMillis;
         this.observationMillis = observationMillis;
+        this.guardMinOpsPerSec = guardMinOpsPerSec;
+    }
+
+    public Windows withGuardMinOps(double opsPerSec)
+    {
+        return new Windows(baselineMillis, observationMillis, opsPerSec);
     }
 
     public static Windows defaults()

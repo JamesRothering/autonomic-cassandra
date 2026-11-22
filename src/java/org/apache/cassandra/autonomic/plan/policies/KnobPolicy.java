@@ -135,17 +135,17 @@ abstract class KnobPolicy implements Policy
 
     static VerifySpec.Guard readLatencyGuard()
     {
-        return new VerifySpec.Guard(Signals.CLIENT_READ_LATENCY_P99_MICROS, NODE, true, LATENCY_TOLERANCE);
+        return new VerifySpec.Guard(Signals.CLIENT_READ_LATENCY_P99_MICROS, NODE, true, LATENCY_TOLERANCE, Signals.CLIENT_READ_OPS_PER_SEC);
     }
 
     static VerifySpec.Guard writeLatencyGuard()
     {
-        return new VerifySpec.Guard(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, NODE, true, LATENCY_TOLERANCE);
+        return new VerifySpec.Guard(Signals.CLIENT_WRITE_LATENCY_P99_MICROS, NODE, true, LATENCY_TOLERANCE, Signals.CLIENT_WRITE_OPS_PER_SEC);
     }
 
     static VerifySpec spec(SignalId goal, Subject subject, Windows w, VerifySpec.Guard... guards)
     {
-        return new VerifySpec(goal, subject, true, 0.10, List.of(guards), w.baselineMillis, w.observationMillis);
+        return new VerifySpec(goal, subject, true, 0.10, List.of(guards), w.baselineMillis, w.observationMillis).withGuardMinOps(w.guardMinOpsPerSec);
     }
 
     static List<Step> steps(Object... actuatorAndDirection)
