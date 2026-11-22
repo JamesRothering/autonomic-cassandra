@@ -182,6 +182,13 @@ public class AutonomicConfig
         public double min_point_op_fraction = 0.8;
         /** The share of the table's operations a bucket should stay below when the number of buckets is chosen. */
         public double target_share = 0.05;
+        /**
+         * ADR-043: after a probe whose result did not qualify (small, no_spread, too_large, backfill_too_long, disk) the
+         * partition is probed again when its cheap size ({@code partition.size_bytes}) has doubled. A key with no size
+         * signal (a sensor that did not run, a proposer that is not a replica) is probed again this long after its last
+         * probe instead, so a growing partition is never judged by a stale probe for ever. 0 disables the periodic fallback.
+         */
+        public DurationSpec.IntSecondsBound reprobe_interval = new DurationSpec.IntSecondsBound("30m");
         /** How long the profiler counts the shape of the key's operations before the policy decides. */
         public DurationSpec.IntMillisecondsBound profile_window = new DurationSpec.IntMillisecondsBound("5m");
         /** Operations the profile, and each evaluation window of design 7.3, needs before it is judged. */

@@ -148,6 +148,7 @@ public final class Signals
     public static final SignalId PARTITION_WRITE_SHARE = def("partition.write_share", "fraction", "Share (0 to 1) of the table's writes in the last sampling window that hit this partition");
     public static final SignalId PARTITION_READ_OPS_PER_SEC = def("partition.read_ops_per_sec", "ops/s", "Estimated reads per second of this partition in the last sampling window");
     public static final SignalId PARTITION_WRITE_OPS_PER_SEC = def("partition.write_ops_per_sec", "ops/s", "Estimated writes per second of this partition in the last sampling window");
+    public static final SignalId PARTITION_SIZE_BYTES = def("partition.size_bytes", "bytes", "Cheap on-disk size of this partition on this replica: its sstable fragments by index position plus its memtable rows (ADR-043); an upper bound of the live data until compaction. A trigger for the split probe, not a measurement of it");
     // ---- HotPartitionSensor (subject TABLE): the denominators of the shares, so that shares can be added up over windows ----
     public static final SignalId SAMPLED_TABLE_READS = def("partition.sampled_table_reads", "ops", "Reads of the table counted for the last sampling window, the denominator of its partitions' read_share (subject TABLE)");
     public static final SignalId SAMPLED_TABLE_WRITES = def("partition.sampled_table_writes", "ops", "Writes of the table counted for the last sampling window, the denominator of its partitions' write_share (subject TABLE)");

@@ -47,6 +47,7 @@ import org.apache.cassandra.autonomic.execute.ActionRecord;
 import org.apache.cassandra.autonomic.execute.ActionState;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.knowledge.Series;
 import org.apache.cassandra.autonomic.layout.Eligibility;
 import org.apache.cassandra.autonomic.layout.KeyState;
 import org.apache.cassandra.autonomic.layout.LayoutAnnotations;
@@ -104,6 +105,12 @@ public class PartitionSplitPolicy implements Policy
     public static final int MAX_BUCKETS = 32;
     /** An estimate at or above this is a large partition: a split bounds its size even where it moves no load. */
     public static final long LARGE_PARTITION_BYTES = 100L * 1024 * 1024;
+    /** ADR-043: the cheap size undercounts the probe's byte estimate (in-memory units) by up to this factor, for narrow rows. */
+    public static final double SIZE_UNDERCOUNT = 2.5;
+    /** ADR-043: fewest serialized bytes a row can take on disk (flags, a clustering value, one cell); the spike's narrowest rows took 21.5. */
+    public static final long MIN_ROW_DISK_BYTES = 8;
+    /** ADR-043: after a probe that did not qualify, the next one waits until the cheap size is this many times the size at that probe. */
+    public static final double REPROBE_GROWTH = 2.0;
     static final long LOOKBACK_MILLIS = 24L * 3_600_000;
     private static final long STATE_TTL_MILLIS = 3_600_000;
     private static final Set<String> SATURATION = Set.of(PoolSaturationDetector.NAME, CompactionBacklogDetector.NAME,
@@ -157,6 +164,13 @@ public class PartitionSplitPolicy implements Policy
         Future<PartitionProbe.Result> probe;
         PartitionProbe.Result probed;
         long profileStartMillis;
+        /** Cheap size when the probe was started; NaN if there was no size signal. */
+        double sizeAtProbe = Double.NaN;
+        long probeStartMillis;
+        /** The last result of the probe was refused for a reason that depends on the partition's size. */
+        boolean sizeRefused;
+        /** The reason of that refusal. */
+        String refusal = "small_by_size";
     }
 
     private final AutonomicConfig config;
@@ -288,12 +302,25 @@ public class PartitionSplitPolicy implements Policy
         if (coolingDown(knowledge, target))
             return no(subject, "cooldown");
 
-        // 2. row-count probe
+        // 2. row-count probe, run only when the cheap size makes a qualifying result plausible (ADR-043)
+        OptionalDouble cheap = cheapSize(knowledge, subject);
+        double trigger = probeTrigger(lc, spreadsLoad(cm, ksm));
+        if (st.probed != null && st.sizeRefused && reprobeDue(st, cheap, trigger, lc, now))
+        {
+            st.probed = null;
+            st.probe = null;
+            st.sizeRefused = false;
+        }
         if (st.probed == null)
         {
             if (st.probe == null)
             {
+                if (cheap.isPresent() && cheap.getAsDouble() < nextProbeSize(st, trigger))
+                    return no(subject, st.refusal + sizeDetail(st, cheap, trigger));
+                st.sizeAtProbe = cheap.isPresent() ? cheap.getAsDouble() : Double.NaN;
+                st.probeStartMillis = now;
                 st.probe = env.probe(table, key, lc.max_probe_rows);
+                LayoutAnnotations.set(subject, "probing");
                 return Optional.empty();
             }
             if (!st.probe.isDone())
@@ -312,9 +339,10 @@ public class PartitionSplitPolicy implements Policy
         }
         PartitionProbe.Result probed = st.probed;
         if (probed.rows < lc.min_rows_for_split)
-            return no(subject, "small");
+            return sizeRefusal(st, subject, "small", cheap, trigger);
         if (probed.hitMax)
-            return no(subject, "too_large");
+            return sizeRefusal(st, subject, "too_large", cheap, trigger);
+        st.sizeRefused = false;
 
         // 3. shape profile
         long window = lc.profile_window.toMilliseconds();
@@ -355,7 +383,7 @@ public class PartitionSplitPolicy implements Policy
         if (!spreadsLoad(cm, ksm))
         {
             if (probed.estimatedBytes() < LARGE_PARTITION_BYTES)
-                return no(subject, "no_spread");
+                return sizeRefusal(st, subject, "no_spread", cheap, trigger);
             sizeOnly = true;
         }
 
@@ -365,13 +393,70 @@ public class PartitionSplitPolicy implements Policy
         double throughput = lc.backfill_throughput.toBytesPerSecond();
         long deadline = PartitionSplitActuator.backfillWindowMillis(lc, table.params.gcGraceSeconds);
         if (throughput > 0 && bytes * rf * 1000.0 / throughput > deadline)
-            return no(subject, "backfill_too_long");
+            return sizeRefusal(st, subject, "backfill_too_long", cheap, trigger);
         OptionalDouble free = knowledge.latest(Signals.DISK_FREE_BYTES, Subject.node());
         if (free.isPresent() && free.getAsDouble() < 2.0 * bytes)
-            return no(subject, "disk");
+            return sizeRefusal(st, subject, "disk", cheap, trigger);
 
         LayoutAnnotations.set(subject, "proposed(buckets=" + buckets + ')');
         return Optional.of(plan(diagnosis, target, table, buckets, profile, p, share, sizeOnly, probed));
+    }
+
+    /**
+     * ADR-043: the cheap size from which a probe can qualify. It needs {@code min_rows_for_split} rows, and a row takes at
+     * least {@link #MIN_ROW_DISK_BYTES} on disk; where the buckets would land on the same nodes it also needs
+     * {@link #LARGE_PARTITION_BYTES} of the probe's units, which the cheap size reaches at that over {@link #SIZE_UNDERCOUNT}.
+     */
+    static double probeTrigger(AutonomicConfig.LayoutConfig lc, boolean spreadsLoad)
+    {
+        double byRows = (double) lc.min_rows_for_split * MIN_ROW_DISK_BYTES;
+        return spreadsLoad ? byRows : Math.max(byRows, LARGE_PARTITION_BYTES / SIZE_UNDERCOUNT);
+    }
+
+    /** The smallest cheap size at which the next probe is started: the trigger, and double the size at the last probe. */
+    private static double nextProbeSize(State st, double trigger)
+    {
+        return Double.isNaN(st.sizeAtProbe) ? trigger : Math.max(trigger, REPROBE_GROWTH * st.sizeAtProbe);
+    }
+
+    /** With a size signal: it has grown enough. Without one: {@code reprobe_interval} has passed since the last probe. */
+    private static boolean reprobeDue(State st, OptionalDouble cheap, double trigger, AutonomicConfig.LayoutConfig lc, long now)
+    {
+        if (cheap.isPresent())
+            return cheap.getAsDouble() >= nextProbeSize(st, trigger);
+        long interval = lc.reprobe_interval.toMilliseconds();
+        return interval > 0 && now - st.probeStartMillis >= interval;
+    }
+
+    /** The newest {@code partition.size_bytes} of the key, if a sensor reported it recently enough. */
+    private OptionalDouble cheapSize(KnowledgeView knowledge, Subject subject)
+    {
+        AutonomicConfig.SamplingConfig sc = config.sampling;
+        long maxAge = 3 * (sc.interval.toMilliseconds() + sc.window.toMilliseconds());
+        Series series = knowledge.series(Signals.PARTITION_SIZE_BYTES, subject, maxAge);
+        return series.isEmpty() ? OptionalDouble.empty() : OptionalDouble.of(series.values[series.size() - 1]);
+    }
+
+    private Optional<Plan> sizeRefusal(State st, Subject subject, String reason, OptionalDouble cheap, double trigger)
+    {
+        st.sizeRefused = true;
+        st.refusal = reason;
+        return no(subject, reason + sizeDetail(st, cheap, trigger));
+    }
+
+    /** What the operator needs to see why nothing happens: the sizes; empty without a size signal. */
+    private String sizeDetail(State st, OptionalDouble cheap, double trigger)
+    {
+        if (cheap.isPresent())
+        {
+            StringBuilder sb = new StringBuilder();
+            if (!Double.isNaN(st.sizeAtProbe))
+                sb.append(",size_at_probe=").append((long) st.sizeAtProbe);
+            return sb.append(",size_now=").append((long) cheap.getAsDouble())
+                     .append(",probe_at=").append((long) Math.ceil(nextProbeSize(st, trigger))).toString();
+        }
+        // no size signal: the periodic fallback, which needs no detail
+        return "";
     }
 
     private Plan plan(Diagnosis diagnosis, Subject target, TableMetadata table, int buckets, LayoutProfiler.Shape profile, double p,

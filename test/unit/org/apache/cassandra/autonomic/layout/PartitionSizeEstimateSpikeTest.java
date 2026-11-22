@@ -73,9 +73,10 @@ public class PartitionSizeEstimateSpikeTest extends CQLTester
     @Before
     public void setUpSpike() throws IOException
     {
-        Assume.assumeTrue("spike code, set SPIKE_PARTITION_SIZE to run", System.getenv("SPIKE_PARTITION_SIZE") != null);
+        // spike-only switches, read from the environment on purpose
+        Assume.assumeTrue("spike code, set SPIKE_PARTITION_SIZE to run", System.getenv("SPIKE_PARTITION_SIZE") != null); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
         originalFormat = DatabaseDescriptor.getSelectedSSTableFormat().name();
-        String path = System.getenv().getOrDefault("SPIKE_OUT", "build/test/spike-partition-size.txt");
+        String path = System.getenv().getOrDefault("SPIKE_OUT", "build/test/spike-partition-size.txt"); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
         out = new PrintWriter(new FileWriter(path, true));
     }
 

@@ -100,6 +100,7 @@ public class HotPartitionDetector extends ThresholdDetector
         put(evidence, Signals.PARTITION_WRITE_SHARE, subject, knowledge);
         put(evidence, Signals.PARTITION_READ_OPS_PER_SEC, subject, knowledge);
         put(evidence, Signals.PARTITION_WRITE_OPS_PER_SEC, subject, knowledge);
+        put(evidence, Signals.PARTITION_SIZE_BYTES, subject, knowledge);
         evidence.put("key_hex", PartitionKeys.hex(subject));
         evidence.put("table", subject.keyspace + '.' + subject.table);
         String layout = LayoutAnnotations.get(subject);

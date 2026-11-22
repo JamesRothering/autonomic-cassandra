@@ -133,6 +133,97 @@ public class HotPartitionSensorTest extends CQLTester
         assertTrue(sink.of(Signals.PARTITION_READ_SHARE).isEmpty());
     }
 
+    private Subject topOf(RecordingSink sink, org.apache.cassandra.autonomic.monitor.SignalId signal)
+    {
+        Observation top = null;
+        for (Observation o : sink.of(signal))
+            if (top == null || o.value > top.value)
+                top = o;
+        return top.subject;
+    }
+
+    @Test
+    public void everyReportedKeyAlsoReportsItsCheapSizeFromTheMemtable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, c int, v text, PRIMARY KEY (k, c))");
+        HotPartitionSensor sensor = new HotPartitionSensor();
+        RecordingSink sink = new RecordingSink();
+        sensor.start();
+        sensor.collect(sink, T0);
+        for (int i = 0; i < 20; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (1, ?, 'x')", i);
+        sensor.collect(sink, T0 + 1_000);
+        for (int i = 0; i < 190; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, ?)", i, "value-" + i);
+        for (int i = 0; i < 10; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (8, ?, 'y')", i);
+        drainSampler();
+        sensor.collect(sink, T0 + 1_000 + WINDOW_MILLIS);
+
+        Subject hot = topOf(sink, Signals.PARTITION_WRITE_SHARE);
+        Double big = sink.value(Signals.PARTITION_SIZE_BYTES, hot);
+        assertTrue("the memtable rows are counted: " + big, big != null && big >= 190 * 8);
+        Double small = sink.value(Signals.PARTITION_SIZE_BYTES, Subject.partition(keyspace(), currentTable(), ByteBufferUtil.bytesToHex(Int32Type.instance.decompose(8))));
+        assertTrue("a smaller partition is smaller: " + small, small != null && small > 0 && small < big);
+        assertEquals("one size per reported key and window", sink.of(Signals.PARTITION_WRITE_SHARE).size(), sink.of(Signals.PARTITION_SIZE_BYTES).size());
+        assertEquals(Subject.Kind.PARTITION, sink.of(Signals.PARTITION_SIZE_BYTES).get(0).subject.kind);
+    }
+
+    @Test
+    public void theCheapSizeIsTheSstableFragmentsAndSumsAcrossFlushes() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, c int, v text, PRIMARY KEY (k, c))");
+        for (int i = 0; i < 2000; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, ?)", i, "value-" + i);
+        flush();
+        HotPartitionSensor sensor = new HotPartitionSensor();
+        RecordingSink sink = new RecordingSink();
+        sensor.start();
+        sensor.collect(sink, T0);
+        for (int i = 0; i < 20; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, 'z')", 5000 + i);
+        sensor.collect(sink, T0 + 1_000);
+        for (int i = 0; i < 180; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, 'z')", 6000 + i);
+        drainSampler();
+        flush();
+        sensor.collect(sink, T0 + 1_000 + WINDOW_MILLIS);
+        Subject hot = topOf(sink, Signals.PARTITION_WRITE_SHARE);
+        double two = sink.value(Signals.PARTITION_SIZE_BYTES, hot);
+        // 2000 rows of about 12 bytes of value in one sstable and 200 rows in another: well above 2000 * 8
+        assertTrue("size " + two, two > 2000 * 8 && two < 2200 * 100);
+
+        // a second window: the key now overwrites the same rows, which the sum over fragments counts again
+        sink.clear();
+        for (int i = 0; i < 20; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, 'z')", i);
+        sensor.collect(sink, T0 + 2_000 + WINDOW_MILLIS);
+        for (int i = 0; i < 180; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (7, ?, 'z')", i);
+        drainSampler();
+        flush();
+        sensor.collect(sink, T0 + 2_000 + 2 * WINDOW_MILLIS);
+        assertTrue("overwrites add up before compaction", sink.value(Signals.PARTITION_SIZE_BYTES, hot) > two);
+    }
+
+    @Test
+    public void aKeyThatIsNotReportedGetsNoSizeMeasured() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, v int)");
+        HotPartitionSensor sensor = new HotPartitionSensor();
+        RecordingSink sink = new RecordingSink();
+        arm(sensor, sink);
+        writes(7, 400);
+        // 100 distinct keys of 1 operation each stay below MIN_EMIT_SHARE
+        for (int k = 1000; k < 1100; k++)
+            execute("INSERT INTO %s (k, v) VALUES (?, 1)", k);
+        drainSampler();
+        sensor.collect(sink, T0 + 1_000 + WINDOW_MILLIS);
+        assertEquals(sink.of(Signals.PARTITION_WRITE_SHARE).size(), sink.of(Signals.PARTITION_SIZE_BYTES).size());
+        assertTrue(sink.of(Signals.PARTITION_SIZE_BYTES).size() <= HotPartitionSensor.TOP_K);
+        assertTrue(new HotPartitionSensor().signals().contains(Signals.PARTITION_SIZE_BYTES));
+    }
+
     @Test
     public void concentratedReadsReportTheKey() throws Throwable
     {

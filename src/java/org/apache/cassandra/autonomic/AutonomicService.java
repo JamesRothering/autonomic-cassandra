@@ -76,6 +76,7 @@ import org.apache.cassandra.autonomic.knowledge.InMemoryKnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeStore;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.ObservationStore;
+import org.apache.cassandra.autonomic.layout.LayoutAnnotations;
 import org.apache.cassandra.autonomic.layout.LayoutService;
 import org.apache.cassandra.autonomic.monitor.ObservationSink;
 import org.apache.cassandra.autonomic.monitor.Sensor;
@@ -1875,6 +1876,10 @@ public class AutonomicService implements AutonomicServiceMBean
         m.put("first_seen", String.valueOf(d.firstSeenMillis));
         m.put("last_seen", String.valueOf(d.lastSeenMillis));
         m.put("summary", d.summary == null ? "" : d.summary);
+        // why the layout policy did not split a hot partition (T7.12), with the sizes it waits on; not in system_views alone
+        String layout = d.evidence.get(LayoutAnnotations.KEY);
+        if (layout != null)
+            m.put(LayoutAnnotations.KEY, layout);
         return m;
     }
 }

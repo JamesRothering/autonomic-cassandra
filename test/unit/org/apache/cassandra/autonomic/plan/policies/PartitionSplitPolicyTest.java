@@ -653,6 +653,7 @@ public class PartitionSplitPolicyTest
         record(target, ActionState.ROLLED_BACK, now[0] - base - 1000);
         record(target, ActionState.FAILED, now[0] - base - 1000);
         policy = new PartitionSplitPolicy(config, env);
+        LayoutAnnotations.clearAll();
         d = open();
         assertNoPlan("cooldown", d);
 
@@ -663,7 +664,7 @@ public class PartitionSplitPolicyTest
         LayoutAnnotations.clearAll();
         d = open();
         assertEquals(Optional.empty(), tick(d));
-        assertNull(note());
+        assertEquals("not cooling down: the probe started", "probing", note());
     }
 
     @Test
@@ -726,6 +727,186 @@ public class PartitionSplitPolicyTest
         LayoutAnnotations.clearAll();
         Diagnosis again = open();
         assertTrue(qualify(again, rows(20_000), profileWithPointFraction(0.95)).isPresent());
+    }
+
+    // ---- ADR-043 (T7.12): the cheap size triggers the probe and the re-probe, and decides nothing ----
+
+    private void size(double bytes)
+    {
+        put(Signals.PARTITION_SIZE_BYTES, subject(), bytes);
+    }
+
+    private void completeLastProbe(PartitionProbe.Result result)
+    {
+        env.probes.get(env.probes.size() - 1).setSuccess(result);
+    }
+
+    private Optional<Plan> profileAndDecide(Diagnosis d, LayoutProfiler.Shape profile)
+    {
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("profiling", note());
+        now[0] += WINDOW;
+        env.shape = profile;
+        return tick(d);
+    }
+
+    @Test
+    public void aKeyThatIsTooSmallThenGrowsPastTheTriggerIsReprobedAndProposed()
+    {
+        // 3 nodes, RF 2: the buckets spread, so only min_rows_for_split (10000 rows x 8 bytes) matters: trigger 80000 bytes
+        Diagnosis d = open();
+        size(10_000);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("no probe while the cheap size cannot make 10000 rows", 0, env.probesStarted);
+        assertEquals("not_applicable(small_by_size,size_now=10000,probe_at=80000)", note());
+
+        size(100_000);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(1, env.probesStarted);
+        assertEquals("probing", note());
+        completeLastProbe(rows(9_999));
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("not_applicable(small,size_at_probe=100000,size_now=100000,probe_at=200000)", note());
+
+        size(199_999);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("not doubled yet", 1, env.probesStarted);
+        assertEquals("not_applicable(small,size_at_probe=100000,size_now=199999,probe_at=200000)", note());
+
+        size(200_000);
+        assertEquals("doubled: probed again", Optional.empty(), tick(d));
+        assertEquals(2, env.probesStarted);
+        completeLastProbe(rows(20_000));
+        Plan plan = profileAndDecide(d, profileWithPointFraction(0.95)).get();
+        assertEquals("split", plan.actions.get(0).params.get("mode"));
+        assertEquals("proposed(buckets=8)", note());
+    }
+
+    @Test
+    public void theTriggerWhereNothingSpreadsIsTheLargePartitionThresholdOverTheUndercount()
+    {
+        rf = 3;
+        rebuildSchema();
+        long trigger = (long) (PartitionSplitPolicy.LARGE_PARTITION_BYTES / PartitionSplitPolicy.SIZE_UNDERCOUNT);
+        assertEquals(41_943_040L, trigger);
+        Diagnosis d = open();
+        size(trigger - 1);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(0, env.probesStarted);
+        assertEquals("not_applicable(small_by_size,size_now=41943039,probe_at=41943040)", note());
+        size(trigger);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(1, env.probesStarted);
+        // narrow rows: 100 MiB in the probe's units is 40 MiB on disk, so the probe sees a large partition
+        completeLastProbe(new PartitionProbe.Result(2_000_000, false, 53));
+        assertTrue(profileAndDecide(d, profileWithPointFraction(0.95)).isPresent());
+    }
+
+    @Test
+    public void theTriggerWithRowsAboveTheThresholdIsTheRowFloorWhenMinRowsIsRaised()
+    {
+        config.layout.min_rows_for_split = 1_000_000;
+        assertEquals(8_000_000.0, PartitionSplitPolicy.probeTrigger(config.layout, true), 0);
+        assertEquals(41_943_040.0, PartitionSplitPolicy.probeTrigger(config.layout, false), 0);
+        config.layout.min_rows_for_split = 10_000_000;
+        assertEquals(80_000_000.0, PartitionSplitPolicy.probeTrigger(config.layout, false), 0);
+    }
+
+    @Test
+    public void withoutASizeSignalTheKeyIsProbedAtOnceAndAgainAfterTheReprobeInterval()
+    {
+        assertEquals("the default", 30 * 60_000L, config.layout.reprobe_interval.toMilliseconds());
+        Diagnosis d = open();
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(1, env.probesStarted);
+        completeLastProbe(rows(9_999));
+        assertNoPlan("small", d);
+        now[0] += 29 * 60_000;
+        assertNoPlan("small", d);
+        assertEquals("not yet", 1, env.probesStarted);
+        now[0] += 2 * 60_000;
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("the fallback re-probes: the original bug cannot recur", 2, env.probesStarted);
+        completeLastProbe(rows(20_000));
+        assertTrue(profileAndDecide(d, profileWithPointFraction(0.95)).isPresent());
+    }
+
+    @Test
+    public void aStaleSizeSignalIsNoSignalAndTheFallbackApplies()
+    {
+        Diagnosis d = open();
+        size(1_000);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("fresh and small: no probe", 0, env.probesStarted);
+        // older than three sampling cycles, within the policy's one hour state
+        now[0] += 10 * 60_000;
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("the signal is ten minutes old: probe as without a sensor", 1, env.probesStarted);
+        completeLastProbe(rows(9_999));
+        assertNoPlan("small", d);
+        now[0] += 31 * 60_000;
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(2, env.probesStarted);
+    }
+
+    @Test
+    public void aZeroReprobeIntervalDisablesTheFallback()
+    {
+        config.layout.reprobe_interval = new org.apache.cassandra.config.DurationSpec.IntSecondsBound("0s");
+        Diagnosis d = open();
+        assertEquals(Optional.empty(), tick(d));
+        completeLastProbe(rows(9_999));
+        assertNoPlan("small", d);
+        now[0] += 24 * 3_600_000L;
+        assertNoPlan("small", d);
+        assertEquals(1, env.probesStarted);
+    }
+
+    @Test
+    public void theCheapSizeAloneNeverMakesAKeyQualify()
+    {
+        // a huge cheap size (heavily overwritten rows) only starts the probe; the probe's own rows decide
+        size(10L * 1024 * 1024 * 1024);
+        Diagnosis d = open();
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals(1, env.probesStarted);
+        completeLastProbe(rows(9_999));
+        assertNoPlan("small,size_at_probe=10737418240,size_now=10737418240,probe_at=21474836480", d);
+
+        // the byte checks keep the probe's units: 2 MB by the probe is no_spread whatever the cheap size says
+        policy = new PartitionSplitPolicy(config, env);
+        LayoutAnnotations.clearAll();
+        rf = 3;
+        rebuildSchema();
+        env.probes.clear();
+        env.probesStarted = 0;
+        Diagnosis again = open();
+        assertEquals(Optional.empty(), qualify(again, rows(20_000), profileWithPointFraction(0.95)));
+        assertEquals("not_applicable(no_spread,size_at_probe=10737418240,size_now=10737418240,probe_at=21474836480)", note());
+    }
+
+    @Test
+    public void aKeyRefusedForNoSpreadIsReprobedWhenItsSizeDoubles()
+    {
+        rf = 3;
+        rebuildSchema();
+        size(50_000_000);
+        Diagnosis d = open();
+        assertEquals(Optional.empty(), qualify(d, rows(20_000), profileWithPointFraction(0.95)));
+        assertTrue(note(), note().startsWith("not_applicable(no_spread,size_at_probe=50000000,"));
+        assertEquals(1, env.probesStarted);
+        size(99_999_999);
+        assertEquals(Optional.empty(), tick(d));
+        now[0] += WINDOW;
+        env.shape = profileWithPointFraction(0.95);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("not doubled yet: same probe", 1, env.probesStarted);
+        assertTrue(note(), note().startsWith("not_applicable(no_spread,size_at_probe=50000000,size_now=99999999,"));
+        size(100_000_000);
+        assertEquals(Optional.empty(), tick(d));
+        assertEquals("doubled: the second probe", 2, env.probesStarted);
+        completeLastProbe(new PartitionProbe.Result(2_000_000, false, 100));
+        assertTrue(profileAndDecide(d, profileWithPointFraction(0.95)).isPresent());
     }
 
     @Test
