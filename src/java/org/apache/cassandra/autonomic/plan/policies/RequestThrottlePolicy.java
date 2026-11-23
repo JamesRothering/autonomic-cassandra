@@ -27,6 +27,7 @@ import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.detectors.BaselineDriftDetector;
 import org.apache.cassandra.autonomic.analyze.detectors.LatencySloBreachDetector;
 import org.apache.cassandra.autonomic.execute.Actuator;
+import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.execute.actuators.RequestThrottleActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.Series;
@@ -94,6 +95,21 @@ public class RequestThrottlePolicy implements Policy
     public Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge)
     {
         return mode == Mode.BREACH ? breach(diagnosis, knowledge) : recovery(diagnosis, knowledge);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.CLIENT_READ_OPS_PER_SEC, Signals.CLIENT_WRITE_OPS_PER_SEC, Signals.CLIENT_CAS_READ_OPS_PER_SEC,
+                      Signals.CLIENT_CAS_WRITE_OPS_PER_SEC, Signals.POOL_PENDING_TASKS,
+                      Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_LATENCY_P99_MICROS);
+    }
+
+    /** A breach lowers the limit (engaging the limiter is the first step down); recovery raises and releases it. */
+    @Override
+    public Set<String> actuations()
+    {
+        return Set.of(Policy.actuation(RequestThrottleActuator.NAME, (mode == Mode.BREACH ? KnobActuator.Direction.DOWN : KnobActuator.Direction.UP).name()));
     }
 
     private RequestThrottleActuator knob()

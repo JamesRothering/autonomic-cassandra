@@ -18,6 +18,7 @@
 package org.apache.cassandra.autonomic.plan.policies;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -91,6 +92,19 @@ abstract class KnobPolicy implements Policy
     {
         return handles;
     }
+
+    /** Each step of the list, as {@link Policy#actuation}. */
+    @Override
+    public Set<String> actuations()
+    {
+        Set<String> out = new LinkedHashSet<>();
+        for (Step step : steps)
+            out.add(Policy.actuation(step.actuator, step.direction.name()));
+        return out;
+    }
+
+    @Override
+    public abstract Set<SignalId> inputs();
 
     /** What the action must achieve and must not harm, over the given windows. */
     abstract VerifySpec verify(Diagnosis diagnosis, KnowledgeView knowledge, Windows windows);

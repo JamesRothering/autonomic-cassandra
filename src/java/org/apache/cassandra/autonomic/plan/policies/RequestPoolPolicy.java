@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.plan.policies;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -30,6 +31,7 @@ import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.execute.actuators.RequestPoolActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
@@ -85,6 +87,27 @@ public class RequestPoolPolicy implements Policy
     public Set<String> handles()
     {
         return Set.of(mode == Mode.SATURATION ? PoolSaturationDetector.NAME : BaselineDriftDetector.TYPE);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.OS_LOAD_PER_PROCESSOR, Signals.POOL_PENDING_TASKS, Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_READ_OPS_PER_SEC,
+                      Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_OPS_PER_SEC);
+    }
+
+    /** Saturation: a step up, or back towards the configured size while the CPUs are saturated. Recovery: back. */
+    @Override
+    public Set<String> actuations()
+    {
+        Set<String> out = new LinkedHashSet<>();
+        for (String actuator : RequestPoolActuator.STAGES.keySet())
+        {
+            if (mode == Mode.SATURATION)
+                out.add(Policy.actuation(actuator, KnobActuator.Direction.UP.name()));
+            out.add(Policy.actuation(actuator, KnobActuator.Direction.DOWN.name()));
+        }
+        return out;
     }
 
     /** The pool actuator of a pool name, for example {@code ReadStage}. */

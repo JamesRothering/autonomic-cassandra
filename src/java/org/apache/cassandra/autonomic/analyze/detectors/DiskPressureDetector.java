@@ -18,10 +18,12 @@
 package org.apache.cassandra.autonomic.analyze.detectors;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 
@@ -45,6 +47,12 @@ public class DiskPressureDetector extends ThresholdDetector
     public static DiskPressureDetector fromConfig(Map<String, Object> options)
     {
         return new DiskPressureDetector(Settings.fromConfig(options, THRESHOLD_KEY, DEFAULT_THRESHOLD, DEFAULT_CLEAR_FRACTION));
+    }
+
+    @Override
+    public Set<SignalId> requires()
+    {
+        return Set.of(Signals.DISK_USED_FRACTION, Signals.DISK_FREE_BYTES, Signals.DISK_TOTAL_BYTES);
     }
 
     @Override

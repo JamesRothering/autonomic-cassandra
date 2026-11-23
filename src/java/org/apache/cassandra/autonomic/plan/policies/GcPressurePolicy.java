@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.plan.policies;
 
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -24,6 +25,7 @@ import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.actuators.CacheCapacityActuator;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator.Direction;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
 
@@ -41,6 +43,12 @@ public class GcPressurePolicy extends KnobPolicy
               steps(CacheCapacityActuator.ROW, Direction.DOWN, CacheCapacityActuator.COUNTER, Direction.DOWN,
                     CacheCapacityActuator.KEY, Direction.DOWN),
               actuators, windows);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.GC_TIME_FRACTION, Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_READ_OPS_PER_SEC);
     }
 
     @Override

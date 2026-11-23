@@ -26,6 +26,7 @@ import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.analyze.detectors.RepairOverdueDetector;
 import org.apache.cassandra.autonomic.execute.actuators.RepairPriorityActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
@@ -60,6 +61,19 @@ public class RepairOverduePolicy implements Policy
     public Set<String> handles()
     {
         return Set.of(RepairOverdueDetector.NAME);
+    }
+
+    /** The goal is nominal: the cluster actuator verifies its own action (see {@code ClusterActuator}). */
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(RepairOverdueDetector.OVERDUE_RATIO);
+    }
+
+    @Override
+    public Set<String> actuations()
+    {
+        return Set.of(Policy.actuation(RepairPriorityActuator.NAME, Policy.APPLY));
     }
 
     @Override

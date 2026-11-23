@@ -18,10 +18,12 @@
 package org.apache.cassandra.autonomic.analyze.detectors;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 
@@ -41,6 +43,12 @@ public class GcPressureDetector extends ThresholdDetector
     public static GcPressureDetector fromConfig(Map<String, Object> options)
     {
         return new GcPressureDetector(Settings.fromConfig(options, THRESHOLD_KEY, DEFAULT_THRESHOLD));
+    }
+
+    @Override
+    public Set<SignalId> requires()
+    {
+        return Set.of(Signals.GC_TIME_FRACTION, Signals.GC_HEAP_USED_FRACTION, Signals.GC_TIME_MILLIS_DELTA);
     }
 
     @Override

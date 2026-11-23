@@ -28,6 +28,10 @@ public interface Detector
 {
     String name();
 
+    /**
+     * Every signal this detector reads from knowledge, for its condition or its evidence. A signal it derives itself
+     * is not listed. {@code InputCoverageTest} checks that a sensor emits each one and that the code reads no other.
+     */
     Set<SignalId> requires();
 
     /** Returns the conditions currently true, after hysteresis. */

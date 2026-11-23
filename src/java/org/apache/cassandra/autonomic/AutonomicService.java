@@ -19,6 +19,7 @@ package org.apache.cassandra.autonomic;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -950,6 +951,31 @@ public class AutonomicService implements AutonomicServiceMBean
     public void registerSensor(Sensor sensor)
     {
         sensors.add(sensor);
+    }
+
+    /** The sensors, detectors, policies and actuators of the last start, without those tests registered (InputCoverageTest). */
+    @VisibleForTesting
+    List<Sensor> sensors()
+    {
+        return List.copyOf(sensors);
+    }
+
+    @VisibleForTesting
+    List<Detector> builtinDetectors()
+    {
+        return builtinDetectors;
+    }
+
+    @VisibleForTesting
+    List<Policy> builtinPolicies()
+    {
+        return builtinPolicies;
+    }
+
+    @VisibleForTesting
+    Collection<Actuator> actuators()
+    {
+        return actuatorRegistry.all();
     }
 
     /** As {@link #registerSensor}: lets a distributed test replace a production sensor with an injected one. */

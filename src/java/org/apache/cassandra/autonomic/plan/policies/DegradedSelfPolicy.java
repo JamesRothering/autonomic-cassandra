@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.plan.policies;
 
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -46,6 +47,13 @@ public class DegradedSelfPolicy extends KnobPolicy
               steps(CompactionThroughputActuator.NAME, Direction.DOWN, StreamThroughputActuator.NAME, Direction.DOWN,
                     HintThrottleActuator.NAME, Direction.DOWN, AdvertisedSeverityActuator.NAME, Direction.UP),
               actuators, windows);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_READ_OPS_PER_SEC,
+                      Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_OPS_PER_SEC);
     }
 
     /** Evidence is {@code "<value> us (slo <slo> us)"}; the ratio to the SLO, or 0 if absent or unparsable. */
