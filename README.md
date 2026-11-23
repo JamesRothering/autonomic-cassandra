@@ -21,6 +21,8 @@
 # Autonomic Cassandra
 
 > **[ASSESS.md](ASSESS.md)**: project assessment through D6: code produced, team-effort equivalent, tokens and cost, and what was built.
+>
+> **Sprint 1 close-out (2026-11-23):** what was missed and why, in the [postmortem](docs/postmortems/2026-11-22-cache-and-memory-near-miss.md) and the [observability coverage audit](docs/audits/observability-coverage.md); the plan for increment 2 in [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md); the rules every session now follows in [docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md).
 
 Autonomic Cassandra re-envisions Cassandra from first principles as a self-healing, self-correcting, self-diagnosing database. If demand spikes, it adapts elastically. If a hot spot develops, it changes the schema on the fly to mitigate it while keeping clients that depend on the old schema satisfied, at least eventually. The goal is a database that operators can leave running with less hand-tuning, without giving up the safety and predictability that operators expect from Cassandra.
 

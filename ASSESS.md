@@ -190,7 +190,7 @@ In one week this fork went from an empty idea to a working, formally modelled au
   - overdue repair
 
   A rules-based correlator links these to their root causes and explains them in language an operator can act on.
-- **Self-healing.** Actuators tune compaction throughput and concurrency, cache sizes, and tombstone-driven compaction, each in an apply, verify and roll-back loop. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
+- **Self-healing.** Actuators tune compaction throughput and concurrency, cache sizes (correction, 2026-11-23: caches are only shrunk, under GC pressure; growing them was planned but never wired, see the postmortem), and tombstone-driven compaction, each in an apply, verify and roll-back loop. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
 - **Elasticity.** Under a load spike a node first adapts itself, by resizing thread pools and applying adaptive throttling and backpressure. Beyond that, a scale-out provider interface adds nodes only with manual approval. It comes with a simulated provider and a Kubernetes stub.
 - **On-the-fly schema adaptation.** This was the hardest item in the vision, and it is now working. When a wide partition becomes hot, the fork hash-splits only that partition into a companion table.
   - **Rewriting:** coordinators rewrite queries at the `StorageProxy` boundary, fanning reads out and merging the results, and routing writes and deletes to the right copy.
