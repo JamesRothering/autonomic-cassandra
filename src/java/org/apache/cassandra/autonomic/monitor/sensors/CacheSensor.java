@@ -45,7 +45,9 @@ import static org.apache.cassandra.autonomic.monitor.sensors.SensorSupport.perSe
  * hit rate per lookup. The row cache defaults to {@code row_cache_size: 0MiB} and is skipped by capacity.
  * {@code ChunkCache.instance} is null when the chunk cache is disabled. The key cache is only used by the BIG
  * sstable format: BTI readers do not implement {@code KeyCacheSupport}, so on BTI the key cache has capacity but no
- * requests, and emits a requests rate of about 0 and no hit rate.
+ * requests, and emits a requests rate of about 0 and no hit rate. The chunk cache is off by default
+ * ({@code file_cache_enabled: false}, so {@code ChunkCache.instance} is null): on BTI with the defaults no cache is
+ * observed at all.
  */
 public class CacheSensor implements Sensor
 {

@@ -171,6 +171,24 @@ public class LoadSpikePolicyTest
     }
 
     @Test
+    public void aLatencyBreachCausedByCacheMissesStillLeadsBecauseNothingActsOnTheCache()
+    {
+        Diagnosis cache = diagnosis("cache_miss_pressure", NODE, Severity.WARN, NOW - 60_000, null, Map.of());
+        Diagnosis latency = breach(Severity.CRITICAL, cache.id);
+        view.setActiveDiagnoses(List.of(cache, latency));
+        assertEquals("compaction_throughput", next(latency));
+    }
+
+    @Test
+    public void aLatencyBreachCausedByGcDoesNotLead()
+    {
+        Diagnosis gc = diagnosis("gc_pressure", NODE, Severity.WARN, NOW - 60_000, null, Map.of());
+        Diagnosis latency = breach(Severity.CRITICAL, gc.id);
+        view.setActiveDiagnoses(List.of(gc, latency));
+        assertEquals(null, next(latency));
+    }
+
+    @Test
     public void stepsAreProposedInTheFixedOrderYieldPoolsThrottleThenScaleOut()
     {
         Diagnosis pool = saturated("ReadStage", Severity.CRITICAL, NOW - 60_000);

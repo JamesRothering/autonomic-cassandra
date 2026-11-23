@@ -213,6 +213,68 @@ public class CacheMissPressureDetectorTest
     }
 
     @Test
+    public void aNoisyDropWithinTheHoldBandIsNotLearned()
+    {
+        feed(ticksPerHour() + 5, 0.8);
+        assertEquals(1, feed(3, 0.55).size());
+        // alternating drops of 0.25 and 0.18: the second is inside the hold band (clear 0.16, raise 0.2)
+        List<Diagnosis> out = null;
+        for (int i = 0; i < 4 * ticksPerHour(); i++)
+            out = feed(1, i % 2 == 0 ? 0.55 : 0.62);
+        assertEquals(1, out.size());
+        assertEquals("0.8000", out.get(0).evidence.get("reference_hit_rate"));
+    }
+
+    @Test
+    public void aNoisyDropStillRelearnsAfterRelearnAfter()
+    {
+        feed(ticksPerHour() + 5, 0.8);
+        assertEquals(1, feed(3, 0.55).size());
+        List<Diagnosis> out = null;
+        for (int i = 0; i < 27 * ticksPerHour(); i++)
+            out = feed(1, i % 2 == 0 ? 0.55 : 0.62);
+        assertTrue(out.isEmpty());
+    }
+
+    @Test
+    public void aSingleSampleAfterALongGapIsNotAReference()
+    {
+        feed(ticksPerHour() + 5, 0.8);
+        now += 2 * HOUR;
+        feed(1, 0.99);
+        for (int i = 0; i < 3 * ticksPerHour(); i++)
+            assertTrue("tick " + i, feed(1, 0.75).isEmpty());
+    }
+
+    @Test
+    public void everyBreachingCacheIsInTheEvidence()
+    {
+        for (int i = 0; i < ticksPerHour() + 5; i++)
+        {
+            now += TICK;
+            put(Signals.CACHE_KEY_HIT_RATE, 0.9);
+            put(Signals.CACHE_CHUNK_HIT_RATE, 0.9);
+            detector.analyze(view);
+        }
+        List<Diagnosis> out = null;
+        for (int i = 0; i < 3; i++)
+        {
+            now += TICK;
+            put(Signals.CACHE_KEY_HIT_RATE, 0.6);
+            put(Signals.CACHE_CHUNK_HIT_RATE, 0.65);
+            out = detector.analyze(view);
+        }
+        assertEquals(1, out.size());
+        Map<String, String> e = out.get(0).evidence;
+        assertEquals("key", e.get("cache"));
+        assertEquals("key,chunk", e.get("caches"));
+        assertEquals("0.6000", e.get("cache.key_hit_rate"));
+        assertEquals("0.6500", e.get("cache.chunk_hit_rate"));
+        assertEquals("0.9000", e.get("cache.key_reference_hit_rate"));
+        assertEquals("0.9000", e.get("cache.chunk_reference_hit_rate"));
+    }
+
+    @Test
     public void referenceWindowIsConfigurable()
     {
         Map<String, Object> options = new HashMap<>();

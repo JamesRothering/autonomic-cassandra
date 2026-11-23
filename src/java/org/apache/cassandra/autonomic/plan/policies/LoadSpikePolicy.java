@@ -68,6 +68,20 @@ import org.apache.cassandra.autonomic.plan.Policy;
 public class LoadSpikePolicy implements Policy
 {
     public static final String NAME = "load_spike";
+    /**
+     * Causes no policy acts on (ADR-046): naming one never removes an action the layer took before it was named, so a
+     * lead whose root cause is of one of these types is treated as having no root cause.
+     */
+    static final Set<String> DIAGNOSE_ONLY_CAUSES = Set.of("cache_miss_pressure");
+
+    private static boolean isDiagnoseOnly(java.util.UUID rootCause, KnowledgeView knowledge)
+    {
+        for (Diagnosis d : knowledge.activeDiagnoses())
+            if (d.id.equals(rootCause))
+                return DIAGNOSE_ONLY_CAUSES.contains(d.type);
+        return false;
+    }
+
     static final Set<String> LEADS = Set.of(PoolSaturationDetector.NAME, LatencySloBreachDetector.NAME, "degraded_self");
     static final long LOOKBACK_MILLIS = TimeUnit.HOURS.toMillis(6);
 
@@ -216,7 +230,7 @@ public class LoadSpikePolicy implements Policy
             return Optional.empty();
         List<Diagnosis> leads = new ArrayList<>();
         for (Diagnosis d : knowledge.activeDiagnoses())
-            if (LEADS.contains(d.type) && d.rootCause == null)
+            if (LEADS.contains(d.type) && (d.rootCause == null || isDiagnoseOnly(d.rootCause, knowledge)))
                 leads.add(d);
         leads.sort(LEAD_ORDER);
         for (Diagnosis lead : leads)

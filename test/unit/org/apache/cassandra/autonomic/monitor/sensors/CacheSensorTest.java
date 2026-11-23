@@ -111,7 +111,7 @@ public class CacheSensorTest
         keyHits = 500;
         keyRequests = 1000;
         s.collect(sink, 1_000);
-        keyHits = 10;      // the cache was cleared and its metrics replaced
+        keyHits = 10;      // the counters were reset (AbstractCacheMetrics.reset; InstrumentingCache.clear does not reset them)
         keyRequests = 20;
         s.collect(sink, 6_000);
         assertNull(sink.value(Signals.CACHE_KEY_HIT_RATE, NODE));

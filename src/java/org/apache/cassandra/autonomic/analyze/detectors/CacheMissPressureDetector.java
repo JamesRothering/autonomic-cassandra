@@ -25,6 +25,7 @@ import java.util.OptionalDouble;
 import java.util.Set;
 
 import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
+import org.apache.cassandra.autonomic.execute.MetricVerifier;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
 import org.apache.cassandra.autonomic.knowledge.Series;
 import org.apache.cassandra.autonomic.monitor.SignalId;
@@ -54,6 +55,9 @@ public class CacheMissPressureDetector extends ThresholdDetector
     public static final double DEFAULT_DROP = 0.2;
     public static final long DEFAULT_REFERENCE_WINDOW_MILLIS = 3_600_000;
     public static final long DEFAULT_RELEARN_AFTER_MILLIS = 86_400_000;
+
+    /** Fewest points a reference is made of: at least the verifier's minimum, and not fewer than ten. */
+    static final int MIN_REFERENCE_POINTS = Math.max(MetricVerifier.MIN_SAMPLES, 10);
 
     private static final String[] CACHES = { "key", "row", "chunk" };
     private static final SignalId[] HIT_RATES = { Signals.CACHE_KEY_HIT_RATE, Signals.CACHE_ROW_HIT_RATE, Signals.CACHE_CHUNK_HIT_RATE };
@@ -153,14 +157,17 @@ public class CacheMissPressureDetector extends ThresholdDetector
                 lastPoint[c] = s.times[i];
                 OptionalDouble ref = reference(c);
                 lastReference[c] = ref;
-                boolean breaching = ref.isPresent() && ref.getAsDouble() - s.values[i] >= settings().raise;
-                if (!breaching)
+                double drop = ref.isPresent() ? ref.getAsDouble() - s.values[i] : Double.NEGATIVE_INFINITY;
+                // A breach runs from the first point with a drop of at least raise until a point below clear; the
+                // points of the hold band in between are part of it, so a noisy drop is not learned.
+                boolean inBreach = breachStart[c] != Long.MIN_VALUE;
+                if (inBreach ? drop < settings().clear : drop < settings().raise)
                 {
                     breachStart[c] = Long.MIN_VALUE;
                     history[c].addLast(new double[]{ s.times[i], s.values[i] });
                     continue;
                 }
-                if (breachStart[c] == Long.MIN_VALUE)
+                if (!inBreach)
                     breachStart[c] = s.times[i];
                 // After relearn_after_ms of continuous breach the new level is taken as normal (ADR-046)
                 if (s.times[i] - breachStart[c] >= relearnAfterMillis)
@@ -176,7 +183,7 @@ public class CacheMissPressureDetector extends ThresholdDetector
 
     /**
      * Mean of the last {@code reference_window_ms} of the cache's history, ending at its newest point, if the history
-     * reaches back a whole window. The history holds only points that did not breach (until a breach has lasted
+     * reaches back a whole window and holds enough points over at least half of it. The history holds only points that did not breach (until a breach has lasted
      * {@code relearn_after_ms}), so during a drop its newest point is the last one before it and the reference stays
      * at the level from before the drop however long the drop lasts. Only points older than that window are dropped,
      * keeping one before its start so the reach-back stays known.
@@ -194,13 +201,18 @@ public class CacheMissPressureDetector extends ThresholdDetector
             return OptionalDouble.empty();
         double sum = 0;
         int n = 0;
+        double first = Double.MAX_VALUE;
         for (double[] p : h)
             if (p[0] >= start)
             {
                 sum += p[1];
                 n++;
+                first = Math.min(first, p[0]);
             }
-        return n == 0 ? OptionalDouble.empty() : OptionalDouble.of(sum / n);
+        // a reference needs enough samples spread over at least half the window: one stale sample is not a level
+        if (n < MIN_REFERENCE_POINTS || end - first < referenceWindowMillis / 2)
+            return OptionalDouble.empty();
+        return OptionalDouble.of(sum / n);
     }
 
     private static double secondTime(ArrayDeque<double[]> h)
@@ -234,8 +246,20 @@ public class CacheMissPressureDetector extends ThresholdDetector
         Reading r = worst;
         if (r == null)
             return;
+        StringBuilder names = new StringBuilder();
+        for (int c = 0; c < CACHES.length; c++)
+        {
+            Reading o = current[c];
+            if (o == null || (o != r && o.drop() < settings().clear))
+                continue;
+            if (names.length() > 0)
+                names.append(',');
+            names.append(CACHES[c]);
+            evidence.put(HIT_RATES[c].name, format(o.hitRate));
+            evidence.put("cache." + CACHES[c] + "_reference_hit_rate", format(o.reference));
+        }
         evidence.put("cache", CACHES[r.cache]);
-        evidence.put(HIT_RATES[r.cache].name, format(r.hitRate));
+        evidence.put("caches", names.toString());
         evidence.put("reference_hit_rate", format(r.reference));
         evidence.put("drop", format(r.drop()) + " (raise " + format(settings().raise) + ", clear " + format(settings().clear) + ')');
         latestWithin(REQUESTS[r.cache], subject, knowledge).ifPresent(v -> evidence.put(REQUESTS[r.cache].name, format(v)));
