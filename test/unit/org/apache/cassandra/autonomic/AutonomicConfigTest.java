@@ -60,6 +60,8 @@ public class AutonomicConfigTest
     "    action_step_timeout: 30s\n" +
     "    sensor_budget: 200ms\n" +
     "    guard_min_ops_per_sec: 25\n" +
+    "  cache:\n" +
+    "    min_requests_per_sec: 4\n" +
     "  coordination:\n" +
     "    lease: 10m\n" +
     "    lease_safety_margin: 60s\n" +
@@ -91,6 +93,7 @@ public class AutonomicConfigTest
         assertEquals(50, c.slo.read_latency_p99.toMilliseconds());
         assertEquals("manual", c.safety.cluster_approval);
         assertEquals(10.0, c.safety.guard_min_ops_per_sec, 0.0);
+        assertEquals(10.0, c.cache.min_requests_per_sec, 0.0);
         assertFalse((Boolean) c.actuators.get("scale_out").get("enabled"));
         assertEquals(10000, c.layout.fanout_eager_rows);
         assertEquals(1000, c.layout.fanout_chunk_rows);
@@ -117,6 +120,7 @@ public class AutonomicConfigTest
         assertEquals(6 * 3600, c.safety.cooldown_max.toSeconds());
         assertEquals(200, c.safety.sensor_budget.toMilliseconds());
         assertEquals(25.0, c.safety.guard_min_ops_per_sec, 0.0);
+        assertEquals(4.0, c.cache.min_requests_per_sec, 0.0);
         assertEquals(60, c.coordination.lease_safety_margin.toSeconds());
         assertFalse((Boolean) c.detectors.get("compaction_backlog").get("enabled"));
         assertEquals(4, ((Number) c.detectors.get("hot_partition").get("for_evaluations")).intValue());

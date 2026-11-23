@@ -134,6 +134,14 @@ public final class Signals
     public static final SignalId GC_TIME_MILLIS_DELTA = def("gc.time_millis_delta", "ms", "Accumulated GC time since the previous collection, all collectors");
     public static final SignalId GC_HEAP_USED_FRACTION = def("gc.heap_used_fraction", "fraction", "Used heap divided by max heap (committed when max is undefined)");
 
+    // ---- CacheSensor (subject NODE) ----
+    public static final SignalId CACHE_KEY_HIT_RATE = def("cache.key_hit_rate", "fraction", "Key cache hits divided by requests since the previous collection; absent below cache.min_requests_per_sec");
+    public static final SignalId CACHE_ROW_HIT_RATE = def("cache.row_hit_rate", "fraction", "Row cache hits divided by requests since the previous collection; absent below cache.min_requests_per_sec");
+    public static final SignalId CACHE_CHUNK_HIT_RATE = def("cache.chunk_hit_rate", "fraction", "Chunk cache hits divided by requests since the previous collection; absent below cache.min_requests_per_sec");
+    public static final SignalId CACHE_KEY_REQUESTS_PER_SEC = def("cache.key_requests_per_sec", "ops/s", "Key cache lookups per second");
+    public static final SignalId CACHE_ROW_REQUESTS_PER_SEC = def("cache.row_requests_per_sec", "ops/s", "Row cache lookups per second");
+    public static final SignalId CACHE_CHUNK_REQUESTS_PER_SEC = def("cache.chunk_requests_per_sec", "ops/s", "Chunk cache lookups per second");
+
     // ---- CpuSensor (subject NODE) ----
     public static final SignalId OS_LOAD_PER_PROCESSOR = def("os.load_per_processor", "ratio", "One-minute system load average divided by the available processors; absent where the platform has no load average");
 

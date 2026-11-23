@@ -47,6 +47,7 @@ public class AutonomicConfig
     public final SloConfig slo = new SloConfig();
     public final SamplingConfig sampling = new SamplingConfig();
     public final SafetyConfig safety = new SafetyConfig();
+    public final CacheConfig cache = new CacheConfig();
     public final CoordinationConfig coordination = new CoordinationConfig();
 
     /** Detector name to options; all enabled when the layer is enabled. */
@@ -72,6 +73,15 @@ public class AutonomicConfig
         public DurationSpec.IntSecondsBound interval = new DurationSpec.IntSecondsBound("60s");
         public int min_ops_per_sec = 100;
         public int capacity = 256;
+    }
+
+    public static class CacheConfig
+    {
+        /**
+         * A cache's hit rate is reported (signals {@code cache.<name>_hit_rate}) only for a sensor interval in which
+         * it had at least this many requests per second: a rate over a handful of requests is noise (ADR-046).
+         */
+        public double min_requests_per_sec = 10;
     }
 
     public static class SafetyConfig
