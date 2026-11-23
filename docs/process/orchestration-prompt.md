@@ -20,7 +20,7 @@
 
 # Standing orchestration prompt
 
-Written after the postmortem `docs/postmortems/2026-11-22-cache-and-memory-near-miss.md` (R13). The orchestrator loads it at the start of every session on this project, and every worker brief repeats the rules that apply to the worker. It adds to the owner's original brief; it does not replace it.
+Written after the postmortem `docs/postmortems/2026-11-22-cache-and-memory-near-miss.md` (R13). It is imported by the repository's `CLAUDE.md`, so every session on this project loads it, and every worker brief repeats the rules that apply to the worker. It adds to the owner's original brief; it does not replace it.
 
 ---
 
