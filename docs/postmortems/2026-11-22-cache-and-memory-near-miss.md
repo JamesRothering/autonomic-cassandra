@@ -27,6 +27,8 @@
 
 ## Summary
 
+*Part 1 (below) covers the cache and memory near-miss. Part 2, added after the coverage audit, covers the wider failure of method it exposed.*
+
 While adding a cache hit-rate signal (ADR-046, T7.15), the orchestrator wrote that the layer should not resize caches because "the right size depends on memory the layer does not own", and told the owner the same. The owner challenged it: the layer must observe everything down to the metal and act on what it knows.
 
 The investigation shows the statement was not only an untested assumption, it was **contradicted by the project's own code and design**:
@@ -89,9 +91,70 @@ Contributing: tests drive policies with injected signals, so a policy whose real
 - The design had recorded the intent (knob table 8.1), which made the gap traceable.
 - The verification loop limits the cost of finding 3: an ineffective cache step is rolled back, not kept.
 
-## Proposed order of work
+## Part 2: the wider failure (added 2026-11-23, after the audit)
 
-1. R1 audit, with R2's automated check, reported to the owner with the gaps and a proposed scope for D7.1.
-2. R7 and the review of T7.15's uncommitted partial work, then T7.15.
-3. ADR-047 and T7.16: the memory sensor, cache resizing in both directions with measured headroom, and the fix for finding 3 (R5).
-4. R3 reconciliation and the R6 scenarios agreed in step 1, then D7.1 for owner review.
+The audit (`docs/audits/observability-coverage.md`, `5fc8f27`) showed that the cache gap was one case of a general failure: 23 gaps where a planned or existing action or diagnosis lacks its input, 18 where the layer cannot name a cause, and four wrong assumptions about how Cassandra and the JVM behave. Among them is a live defect on JDK 21: `gc.time_fraction` adds the time of every collector (`GcSensor.java:75`), and Cassandra's JDK 21 options select generational ZGC (`conf/jvm21-server.options:31`), whose concurrent cycles do not stop requests (measured: 3330 ms of cycles against 2 ms of pauses). `gc_pressure` can fire with no pause pressure and shrink caches.
+
+Part 1's root causes explain how individual items slipped through. They do not explain why the method let so many through. This part does.
+
+### The brief
+
+The owner's initial prompt (2026-11-12, kept at `~/autonomic-cassandra-original-prompt.txt`) asked for "a fork of Cassandra which re-envisions the database **from first principles**, as a self-healing, self-correcting, self-diagnosing database". The same prompt asked the orchestrator to "complete the entire specification with **maximum quality** while minimizing **unnecessary** token usage". The phrase "first principles" appears in the README (line 25) and nowhere in the design method.
+
+### What first principles would have required
+
+Starting from first principles means starting from what can go wrong with a database node and a cluster, and deriving from that what must be observed, what must be diagnosed and what may be done:
+
+1. A catalogue of failure modes and degradations: resource exhaustion (CPU, each memory tier, disk space and I/O, network, file descriptors), internal back-pressure (stages, commit log, memtables, compaction, hints, streaming, messaging), JVM behaviour (pauses by collector, allocation stalls), data shape (hot and large partitions, tombstones), peers and topology, and the layer's own faults.
+2. For each failure mode: the observations that detect it, the ones that tell it apart from look-alikes (a GC pause from a load spike from a cache miss), and the physical facts it depends on (which memory is on-heap, what a counter actually measures).
+3. Only then: which existing Cassandra metrics and setters provide those, and where new sensors are needed.
+
+### What was done instead
+
+The design was built **bottom-up from what the base already offered**:
+
+- The design's first substantive section is "What the base already provides (verified)" (overview section 2). The knob table (8.1) lists the runtime setters that exist. T2.5 is "Sensors over existing metrics". Observation was scoped by what was cheap to wrap, and actions by which setters existed.
+- No failure-mode catalogue exists anywhere in the project (searched: overview, adaptive-schema, deliverables, ADRs).
+- The 13 questions put to the owner at the D1 gate (D1-architecture.md, "Questions put to the project owner") were about safety, compatibility and scope of actions. None asked which failure modes the layer must handle, or what it may leave unobserved. Observation scope was decided silently.
+- The design's evidence rule ("Verified means the file was read at the pinned commit") verified that paths and setters **exist**, not what they **mean**. That is how GC time was taken for pause time, the load average for CPU saturation, and the row cache for on-heap memory.
+- The design's goals and non-goals (overview 1.1, 1.2) contain no completeness goal for observation. Goal 6, "Cheap rebases: core is touched only at the hook points", reasonably limited changes to Cassandra, but it also pulled the design toward metrics already exposed.
+
+### Root causes of the wider failure
+
+| # | Root cause | Evidence |
+|---|---|---|
+| W1 | **The design method was bottom-up, not first principles.** It started from available metrics and setters, so anything Cassandra did not already expose conveniently was never considered. | Overview section 2 and 8.1, T2.5; no failure-mode catalogue anywhere |
+| W2 | **Cost pressure displaced verification, and the orchestrator chose the cut.** The brief said "minimizing *unnecessary* token usage"; on 2026-11-14 the owner asked to minimise Fable spend. The orchestrator met both by narrowing reviews (workers test and commit, the orchestrator reads "the key diff") and by keeping sensor scope to cheap wrappers. Coverage analysis was necessary work, not unnecessary, and was never weighed explicitly or put to the owner as a trade-off. | Working notes of 2026-11-14; review notes of every deliverable read diffs, none reconciles the design |
+| W3 | **Completeness was never an acceptance criterion.** Task criteria were local ("emits the expected signal", "returns the expected action"). Deliverable criteria (D3: diagnoses exist; D4: actions exist) defined capability, not coverage. A deliverable could pass every criterion while missing whole resource classes. | Overview section 13; D3 to D7 acceptance criteria |
+| W4 | **Scope by omission.** What the layer would not observe was never written down, so it was never decided. The owner was asked to rule on what the layer does, never on what it ignores. | D1 owner questions 1 to 13 |
+| W5 | **One mind designed, reviewed and accepted.** The orchestrator wrote the design, "spot-checked" it (D1 review notes), briefed the workers from it and reviewed their output against it. Workers were checked against briefs that inherited the design's gaps. No independent reviewer ever asked what was missing. | D1 review notes; worker briefs |
+| W6 | **Tests confirmed, they did not falsify.** Policies are tested with injected signals, so a policy whose real input does not exist still passes. Only one scenario (T7.9) used real load. Nothing ran on JDK 21, the configuration where the GC defect lives; the toolchain chosen in ADR-003 is JDK 17 only. | Test suites; ADR-003; `~/.local/opt` has no JDK 21 |
+| W7 | **Closure pressure.** The most visible single error (ADR-046) was written while closing D7, reasoning from belief to finish quickly. | Part 1 timeline |
+
+### Five whys on the JDK 21 GC defect
+
+1. Why can `gc_pressure` fire falsely? `GcSensor` adds the collection time of every collector bean.
+2. Why does that matter? On ZGC some beans report concurrent cycles, not pauses.
+3. Why was that not known? The design verified that `GarbageCollectorMXBean` exists, not what each bean measures under each collector.
+4. Why was it not caught by tests? Tests inject `gc.time_fraction`, and the build and tests run on JDK 17 with G1 only.
+5. Why did no review ask? No step asked "what does this number physically mean, and on which configurations?" (W1, W5, W6).
+
+### Additional recommendations
+
+R1 to R7 stand. Add:
+
+| # | Recommendation | Addresses |
+|---|---|---|
+| R8 | **Failure-mode catalogue first.** Before more features, write `docs/architecture/failure-modes.md`: every failure mode and degradation of a node and a cluster, the observations that detect it and that tell it apart from look-alikes, the physical facts it relies on, and the action (or explicit "diagnose only" or "out of scope", decided by the owner). The coverage audit (R1) becomes its observation column. Every future sensor, detector and policy cites a row. | W1, W3, W4 |
+| R9 | **Cost cuts are the owner's call, never verification.** The orchestrator may save tokens on execution (model tier, reuse of workers) but never by skipping coverage analysis, independent review or semantic checks. Where quality and cost conflict, it says so and asks. | W2 |
+| R10 | **Completeness criteria at every level.** Each deliverable's acceptance criteria include coverage: the failure-mode rows it closes, and a design-versus-built reconciliation with no unrecorded gap. | W3 |
+| R11 | **Independent review at every gate.** A reviewer that wrote neither the design nor the code checks the catalogue rows, the reconciliation and a sample of semantic claims before the owner is asked to approve. | W5 |
+| R12 | **Run the supported configurations.** Add JDK 21 (ZGC) to the toolchain and run the scenario and fault suites on it, since it is a supported runtime with different GC behaviour. | W6 |
+| R13 | **A standing orchestration prompt.** The rules above are written as an instruction the orchestrator loads every session (`docs/process/orchestration-prompt.md`), so they do not depend on memory. | All |
+
+## Proposed order of work (revised 2026-11-23)
+
+1. The owner reviews this part, the prompt and the estimate.
+2. R8, the failure-mode catalogue, built from the audit, with the owner deciding each row's action or out-of-scope status. It replaces the audit's task list as the source of D7.1's scope.
+3. T7.17 (pause-only GC signal) early: a live defect on JDK 21. R12 alongside it.
+4. The remaining D7.1 tasks derived from the catalogue, each with an independent review (R11), then R3 and R10 at the D7.1 gate.
