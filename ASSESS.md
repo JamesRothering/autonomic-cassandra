@@ -188,6 +188,58 @@ What has already changed: a standing prompt that every session loads ([docs/proc
 
 Increment 2 (D7.1) starts with a failure-mode catalogue that sets its scope, fixes the JDK 21 defect, adds the missing observation, decides the unbuilt design items, proves each resource class under real pressure, and closes with a full gate. It is estimated at about one weekly usage budget. The plan, with tiers, estimates and the owner's decisions per step, is [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md).
 
+## 10. Could the owner have caught it at the first review?
+
+The owner asked this after the close-out. The experiment was to give a general direction and let Claude run with it, so the first review point was not read closely. The question is whether enough was presented there to catch the failures of section 8 up front.
+
+The first review point was the D1 gate on 13 November: the architecture overview, the adaptive-schema design, and 13 questions plus three scope calls (recorded in ADR-024). The evidence below is the D1 version of the overview (`git show 2e79542:docs/architecture/overview.md`; line numbers refer to that version) and the messages sent to the owner at the gate.
+
+**Verdict: mostly not from what was shown, but yes from the spec the owner was pointed to.** The clues were in the 1,000-line overview. The chat summary and the questions steered attention away from them, and that is the orchestrator's failure, not the owner's.
+
+### What the owner was shown
+
+The gate message summarised the hot-spot design and asked 13 questions and three scope calls. Eleven questions were about partition splitting, two about cluster-wide actions. None asked what the layer would watch or what could go wrong with a node. Self-healing was described in one line: node actions "run automatically, are checked, and are rolled back if they don't help." Nothing in the messages would have raised the problem.
+
+### The clues in the spec
+
+Visible without Cassandra knowledge:
+
+1. **Actions depended on readings nothing supplied.** The knob table (section 8.1) planned to grow request pools "when CPU is not saturated" (line 699), grow caches "on low hit rate with heap headroom" (line 702), and lower in-flight request bytes "under heap pressure" (line 701). The table of what the layer reads (section 4.2, line 354) had no CPU reading, no cache hit rate and no heap headroom. Comparing the two tables would have shown three planned actions with no input, which is the cache gap the owner caught on 22 November.
+2. **The method was stated in the headings.** Section 2 is "What the base already provides" (line 66), section 4.2 is "Core APIs read", and the sensor task T2.5 is "Sensors over existing metrics" (line 941). The overview had no list of what can go wrong with a node. The adaptive-schema design had one for its own mechanism ("Failure scenarios", its section 4.11); the self-healing design did not. The brief asked for first principles; the headings show the bottom-up method.
+3. **Scope was set without asking.** "Memtable, heap, and GC settings are not runtime-tunable and are out of scope" (line 710): left out because no setter existed, not because the owner decided. The non-goal "anything outside the Cassandra process" (line 52) was about managing, but was later read as a reason not to observe the operating system.
+4. **The tests could not catch a missing input.** Scenario tests were to use synthetic signals "without generating real load" (line 899), and performance benchmarks were out of the MVP (line 64). The tests checked logic, never that a reading existed under real pressure (postmortem R6).
+5. **Nobody looked for blind spots.** The risk register (section 12, line 904) had 11 risks; none was "the layer cannot see X" or "a reading means something other than we think". "Verified" was defined as "the file was read" (line 31): existence, not meaning.
+
+Visible only with domain expertise:
+
+6. **Cassandra.** The row cache was planned to shrink "under GC pressure" (line 702). The default row cache is off the heap, so shrinking it does not relieve garbage collection (postmortem finding 3).
+7. **JVM.** GC time was to be read from `GarbageCollectorMXBean` "directly" (line 363), with nothing about pause time versus concurrent time, or about JDK 21 and ZGC. This is one line and needs JVM expertise to spot.
+8. **Not visible at D1.** Judging CPU by the load average was designed in D5; D1 only said "CPU is not saturated" without a source.
+
+### Which failures were catchable at D1
+
+| Failure found later | Catchable at D1? |
+|---|---|
+| Blind spots: memory, CPU, disk I/O, write stalls and the rest of the audit | **Yes**, from clues 1 to 3, without domain knowledge |
+| Caches could not grow (the owner's catch) | **Yes**, from clue 1 |
+| Tests that cannot fail for a missing input | **Yes**, from clue 4 |
+| Off-heap row cache shrunk for heap pressure | With Cassandra expertise (clue 6) |
+| GC signal wrong on JDK 21 | Barely: one line, with JVM expertise (clue 7) |
+| CPU judged by the load average | No: designed later, in D5 |
+
+### Conclusion
+
+The information was there but buried: finding it meant reading the whole spec and comparing two tables about 345 lines apart, while the questions pointed at partition splitting. Delegating that review was a fair test of the experiment, and the brief already asked for first principles. Catching this was the orchestrator's job, not the reviewer's.
+
+For anyone reviewing an AI-written design, four questions would have exposed most of it at the first gate, without reading the whole spec:
+
+1. What can go wrong, and which of it does the design cover?
+2. Does every action's input have a source?
+3. What is out of scope, and who decided?
+4. How do the tests prove an input exists?
+
+The first question is the failure-mode catalogue that starts increment 2 (`docs/architecture/failure-modes.md`, step 1 of [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md)). The other three are now gate rules in the standing prompt ([docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md), sections 3, 5 and 6).
+
 ## Bottom line
 
 In 11 days and about $535, the sprint produced a working, formally modelled autonomic layer inside Cassandra, of a size a conventional team would need 18 to 24 months to write. It is not yet the database the brief described: it sees and acts on what Cassandra made easy to read, not on everything that can go wrong. The method that caused that has been changed, and the gap is measured and planned for.
