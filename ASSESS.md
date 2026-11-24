@@ -89,7 +89,7 @@ Lines added by period:
 | D6 Adaptive schema, including T6.17 (D6.1) | 16,788 | 24,408 | 3,245 |
 | D7 Verification (T7.1 to T7.14) | 1,064 | 4,511 | 1,273 |
 
-It took **10 days**, from the first message on 2026-11-12 at 20:19 UTC to the D7 tag on 2026-11-22 at 23:11 UTC. Across all sessions, the transcripts show about **57 hours of active time**, counting every period in which the sessions were working and the gaps between events were under 30 minutes. That is an upper bound on the owner's own time, because much of it was agents working on their own.
+It took **10 days**, from the first message on 2026-11-12 at 20:19 UTC to the D7 tag on 2026-11-22 at 23:11 UTC. Across all sessions, the transcripts show about **57 hours with a session active**, counting every period with gaps between events under 30 minutes. That is machine time, mostly agents working unattended, not human time. The owner's own time was about **6 hours** (section 5.3).
 
 Verification at the end of D7 (5 runs per test): the six fault-injection tests passed 30 of 30, the degraded-node and both load-spike scenarios 5 of 5, and the hot-spot scenario 4 of 5 (one borderline latency verdict, still open).
 
@@ -106,7 +106,11 @@ Lines of code are a rough proxy for effort, but they are the measure most estima
 
 **Estimate: about 150–225 person-months (12–19 person-years)**, for a team of **7–9 senior engineers** working for **18–24 months**.
 
-The estimate could also be off in the usual ways: LLM-written code and tests tend to be wordier than hand-written ones (the estimate may be too high), and a real team would spend time on review, rework and failures in real clusters that no line count shows (it may be too low).
+The estimate could be off in two directions:
+- **Too high.** LLM-written code tends to be wordier than hand-written code. If it is 1.5× wordier, COCOMO effort falls by about 36% (1.5 to the power 1.10). Schedule falls only about 13%, because schedule grows with roughly effort to the power 0.32. Section 5 shows this discount as the low end of each factor; it hits hours and cash, and barely touches calendar time.
+- **Too low.** A real team would spend time on review, rework and failures in real clusters that no line count shows.
+
+The comparison is for the **scope as built**: the team estimate is sized from the code that exists, not from the full brief. What the brief still needs is in section 8.
 
 ## 4. Tokens and cost
 
@@ -131,13 +135,13 @@ These figures come from the Claude Code transcripts of every session in the proj
 
 This is the experiment as it was run: the owner gave a general direction and trusted the result. It assumes nothing went wrong.
 
-| Basis | Conventional team | This sprint | Factor |
-|---|---|---|---|
-| Calendar time | 18–24 months | 10 days | **~55–70×** |
-| Human hours | 150–225 person-months, about 22,500–34,000 hours | at most ~57 hours of active session time | **~400–600×** |
-| Cash spend | ~$3.0–4.5 M, at ~$20k per fully loaded senior engineer-month | ~$515 in tokens, plus the owner's time | **~5,800–8,800×** |
+| Basis | Conventional team | This sprint | Factor | With the 1.5× verbosity discount |
+|---|---|---|---|---|
+| Calendar time | 18–24 months | 10 days | **~55–70×** | ~47–63× |
+| Human hours | 150–225 person-months, about 22,500–34,000 hours | ~6.2 hours of the owner's own time (section 5.3) | **~3,600–5,500×** | ~2,300–3,500× |
+| Cash spend | ~$3.0–4.5 M, at ~$20k per fully loaded senior engineer-month | ~$515 in tokens, plus the owner's time | **~5,800–8,800×** | ~3,700–5,600× |
 
-The calendar factor is the most conservative and the easiest to defend.
+Calendar time is the most robust: code verbosity moves it least (section 3). The owner's hours are the most striking figure, and the 6.2 hours are the owner's own estimate, episode by episode (section 5.3).
 
 ### 5.2 The cost of autonomy
 
@@ -147,12 +151,12 @@ The cost of autonomy is the **rework**: work that was done wrong and has to be f
 - work the sprint never attempted, which is most of the 130 failure modes in the catalogue;
 - design items that were planned but never built.
 
-Both are scope still to deliver. A supervised sprint would have spent the same budget, aimed differently, and would not have delivered them either.
+Both are scope still to deliver, and neither is in the team estimate, which is sized from the code that was built (section 3). A supervised sprint would have spent the same budget, aimed differently, and would not have delivered them either.
 
 | Item | Cost |
 |---|---|
 | **Finding the problem** after the D7 tag: the coverage audit, both parts of the postmortem, `InputCoverageTest` and the standing prompt | ~$15–25 of the ~$28 spent between the tag and the close-out commit; the rest went on the cache signal (T7.15) and the sprint report |
-| **Redoing the wrong parts** in increment 2: the GC signal on ZGC (T7.17), the CPU gate (part of T7.18), the cache shrink order (part of T7.16), the correlator fixes (T7.27), and checking the built code against the catalogue | ~30–60 units, ~$15–50 at $0.50–0.85 per unit |
+| **Redoing the wrong parts** in increment 2: the GC signal on ZGC (T7.17), the CPU gate (part of T7.18), the cache shrink order (part of T7.16), the correlator fixes (T7.27), and checking the built code against the catalogue | ~30–60 units, ~$15–50 at $0.50–0.85 per unit (units defined below) |
 | **Total** | **~$30–75, or 6–15% on top of the sprint**, plus about 1–3 days of calendar time |
 
 With that cost included:
@@ -160,10 +164,57 @@ With that cost included:
 | Basis | Factor |
 |---|---|
 | Calendar time | **~40–65×** |
-| Human hours | about **~400–600×**, roughly unchanged: the owner's time spent catching the problem is about what the first-gate review would have taken |
+| Human hours | **~2,600–3,900×** (~1,650–2,500× with the verbosity discount), counting ~2.5 hours of the owner's time on the catch and the postmortem (section 5.3) |
 | Cash | **~5,100–8,300×** |
 
 Running without supervision cost a few percent of the sprint, not an order of magnitude.
+
+**Units.** A unit is the project's measure of model spend: tokens weighted by each model's relative list price, the measure `docs/NEXT-STEPS.md` uses to size tasks. One weekly usage budget is about 350 units, or about $170–300 at list prices, so one unit is about $0.50–0.85.
+
+### 5.3 The owner's time
+
+The owner estimated each episode of their own time, from a list built out of the session transcripts. An episode is a run of the owner's messages less than an hour apart. Between episodes the owner was usually elsewhere, with the sessions left running; they returned to answer questions and decide. Times are Pacific.
+
+| # | When (PT) | What the owner did | Time |
+|---|---|---|---|
+| 1 | Thu 12 Nov 12:19 | Kickoff prompt, setup answers, GitHub login | 15 min |
+| 2 | Thu 12 Nov 23:41 | D1 gate: answered the 13 design questions | 15 min |
+| 3 | Fri 13 Nov 11:32 | Continue after a limit reset | 1 min |
+| 4 | Fri 13 Nov 13:04 | Asked for limit resets in Pacific time | 1 min |
+| 5 | Fri 13 Nov 17:20 | Checked usage, continue | 1 min |
+| 6 | Sat 14 Nov 00:53 | Approved D2; push rule; cheaper model for D3–D5 | 15 min |
+| 7 | Sat 14 Nov 09:29 | Switched model, approved D3 | 15 min |
+| 8 | Sat 14 Nov 13:51 | Picked an option, approved D4, go on T5.4 | 15 min |
+| 9 | Sat 14 Nov 17:09 | Answered two questions | 15 min |
+| 10 | Sat 14 Nov 23:47 | Restarted the orchestrator with a new prompt | 15 min |
+| 11 | Sun 15 Nov 23:46 | "Keep going until D6 is ready" | 15 min |
+| 12 | Mon 16 Nov 08:21 | Continue after a reset | 1 min |
+| 13 | Mon 16 Nov 10:03 | Resumed the session | 1 min |
+| 14 | Mon 16 Nov 15:33 | One instruction | 15 min |
+| 15 | Mon 16 Nov 20:38 | Switched model, continue | 15 min |
+| 16 | Tue 17 Nov 01:26 | "No more Fable, use Opus" | 1 min |
+| 17 | Tue 17 Nov 11:38 | Progress check; ran the TLA+ checker | 15 min |
+| 18 | Tue 17 Nov 13:57 | Reran the TLA+ checker | 15 min |
+| 19 | Wed 18 Nov 00:15 | Merge D6 without review | 15 min |
+| 20 | Wed 18 Nov 11:23 | D6 decisions | 15 min |
+| 21 | Wed 18 Nov 13:35 | Accepted the remaining recommendations | 15 min |
+| 22 | Wed 18 Nov 15:18 | "Start" | 15 min |
+| 23 | Wed 18 Nov 16:33 | Accepted all recommendations for T6.17 | 15 min |
+| 24 | Wed 18 Nov 22:09 | "Ok" | 1 min |
+| 25 | Thu 19 Nov 02:12 | Asked for a code-size assessment | 15 min |
+| 26–38 | Thu 19 Nov 10:27 to Sun 22 Nov 15:11 | The first assessment, D7 start and its findings, ADR-043 and ADR-044, the guard floor, approval of D7 | about 1.5 h in all, of which episodes 27, 30, 31 and 35 were 1 min each |
+| | | **Sprint total** | **about 6.2 h** |
+
+After the D7 tag, estimated from message times and not yet confirmed by the owner:
+
+| When (PT) | What the owner did | Time | Counted as |
+|---|---|---|---|
+| Sun 22 Nov 15:22 | The catch, 11 minutes after the tag: "why can't you get the memory?" | ~15 min | cost of autonomy |
+| Sun 22 Nov 23:45 to Mon 23 Nov 01:04 | The postmortem findings, "you took the easy path", the standing prompt, the wrap-up | ~1.5 h | cost of autonomy |
+| Mon 23 Nov 21:13 to 21:52 | Started the failure-mode catalogue; asked for the first-review addendum | ~45 min | cost of autonomy |
+| Tue 24 Nov 08:35 to 09:53 | Corrections to this assessment | ~1.5 h | assessment, not counted |
+
+The ~57 hours with a session active (section 2) are not human time: they include agents running unattended.
 
 ## 6. The token restrictions
 
@@ -268,4 +319,4 @@ In 10 days, one owner and a team of AI agents built what a conventional team wou
 
 ## Bottom line
 
-In 10 days and about $515, the sprint produced a working, formally modelled autonomic layer inside Cassandra, of a size a conventional team would need 18 to 24 months to write: about 55–70× faster in calendar time and several thousand times cheaper. Running it without supervision let the design start from what Cassandra made easy to read rather than from everything that can go wrong. Fixing the parts that were done wrong costs about $30–75 and a few days, 6–15% of the sprint. A few hours of plain review at the first gate would have avoided it. The method has been changed, and the scope still to deliver is catalogued and planned.
+In 10 days, with about 6 hours of the owner's time and about $515 in tokens, the sprint produced a working, formally modelled autonomic layer inside Cassandra, of a size a conventional team would need 18 to 24 months to write: about 55–70× faster in calendar time and several thousand times cheaper. Running it without supervision let the design start from what Cassandra made easy to read rather than from everything that can go wrong. Fixing the parts that were done wrong costs about $30–75 and a few days, 6–15% of the sprint. A few hours of plain review at the first gate would have avoided it. The method has been changed, and the scope still to deliver is catalogued and planned.
