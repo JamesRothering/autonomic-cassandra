@@ -18,11 +18,12 @@
 #
 -->
 
-# Assessment: D0 to D6, before verification
 
-*Written 2026-11-19, before D7 (Verification) starts. All measurements are taken at commit `7e021e2` on `deliverable/D6-adaptive-schema`, which includes the T6.17 reverse migration.*
+# Assessment: sprint 1 (D0 to D7 and the close-out)
 
-This document covers what the project set out to do, how much it produced, what the same work would have cost a conventional engineering team, and what it actually cost in model tokens. It ends with what was built.
+*Revised 2026-11-24 to cover the whole sprint, 12 to 23 November 2026. The first version, written on 2026-11-19 before D7, covered D0 to D6 only and is in the history of this file (`git show a98c229:ASSESS.md`). Measurements are taken at commit `1132535` on `deliverable/D7-verification`; the D7 tag on `main` is `f12f9cc`. The figures match the owner's sprint report.*
+
+This document covers what the project set out to do, how much it produced, what the same work would have cost a conventional engineering team, what it actually cost in model tokens, what was built, and where it falls short of the brief. Section 8, on the shortcomings, changes how the earlier sections should be read.
 
 ## 1. How it started
 
@@ -61,145 +62,132 @@ The owner later tightened the cost rules twice:
 
 The owner acted as product owner and reviewer throughout. Every design decision is recorded as an ADR in [docs/DECISIONS.md](docs/DECISIONS.md).
 
+One thing in the brief matters more than this assessment first recognised. It asked for a database re-envisioned **from first principles**, and for **maximum quality** while minimising **unnecessary** token usage. Section 8 shows that the design was not built from first principles, and that the token economy cut into work that was necessary.
+
 ## 2. What was produced
 
-The fork point is upstream Apache Cassandra trunk `2249e37`, dated 2026-11-12. From there to `7e021e2`, the work came to 103 commits touching 399 files, adding **84,868 lines** and removing **1**.
+The fork point is upstream Apache Cassandra trunk `2249e37`, dated 2026-11-12. From there to `1132535` the work came to 160 commits.
 
 | Area | Files | Lines added | Code only (no blank or comment lines) |
 |---|---|---|---|
-| Production Java (`src/java`) | 185 | 36,349 | **~26,100** |
-| Tests (`test/`) | 142 Java, plus nodetool help fixtures | 41,172 Java, plus ~1,100 fixture lines | **~32,800** |
+| Production Java (`src/java`) | 188 | 37,991 | **~27,300** in the 175 new files |
+| Tests (`test/`) | 188 | 47,698 | **~37,100** in the 160 new files |
 | TLA+ specifications and TLC model configurations | 3 + 24 | ~1,700 | — |
-| Documentation (ADRs, deliverables, architecture, operations) | 16 | 4,318 | — |
-| Other (yaml, scripts) | 4 | ~370 | — |
+| Documentation (ADRs, deliverables, design, operations, spike, postmortem, audit, process) | 54 | 8,255 | — |
 
-There is more test code than production code, about 1.25 lines of test for every line of production code.
+There is more test code than production code, about 1.35 lines of test for every line of production code: 140 test classes and 942 test methods. Almost everything is in new files under `org.apache.cassandra.autonomic`; about 20 existing upstream files were modified, so rebasing on newer upstream code stays cheap (ADR-011, ADR-022).
 
-Only 13 existing upstream files were modified, with 42 lines added between them. Almost everything is in new files under `org.apache.cassandra.autonomic`, so rebasing on newer upstream code stays cheap (ADR-011, ADR-022).
+Lines added by period:
 
-Lines added by deliverable:
-
-| Deliverable | Production | Tests | Docs |
+| Period | Production | Tests | Docs |
 |---|---|---|---|
-| D0 Foundation | 0 | 0 | 624 |
-| D1 Architecture | 0 | 0 | 2,115 |
+| D0 Foundation and D1 Architecture | 0 | 0 | 2,739 |
 | D2 Framework | 12,566 | 9,811 | 73 |
 | D3 Self-diagnosis | 1,857 | 1,406 | 28 |
 | D4 Self-healing | 2,291 | 2,375 | 43 |
 | D5 Elasticity | 2,912 | 4,145 | 30 |
-| D6 Adaptive schema, including T6.17 | 16,788 | 24,408 | 3,245 |
+| D6 Adaptive schema, including T6.17 (D6.1) | 16,788 | 24,408 | 3,245 |
+| D7 Verification (T7.1 to T7.14) | 1,064 | 4,511 | 1,273 |
+| Close-out (T7.15, the input check, postmortem, audit, prompt) | 755 | 1,118 | 675 |
 
-It took **7 calendar days**: the first message was on 2026-11-12 at 20:19 UTC, and T6.17 was finished on 2026-11-19. Across all sessions, the transcripts show about **41.5 hours of active time**. That counts every period in which the sessions were working and the gaps between events were under 30 minutes. It is an upper bound on the owner's own time, because much of it was agents working on their own.
+It took **11 calendar days**, from the first message on 2026-11-12 at 20:19 UTC to the close-out on 2026-11-23. Across all sessions, the transcripts show about **56 hours of active time**, counting every period in which the sessions were working and the gaps between events were under 30 minutes. That is an upper bound on the owner's own time, because much of it was agents working on their own.
+
+Verification at the end of D7 (5 runs per test): the six fault-injection tests passed 30 of 30, the degraded-node and both load-spike scenarios 5 of 5, and the hot-spot scenario 4 of 5 (one borderline latency verdict, still open).
 
 ## 3. What a team would have needed without LLMs
 
-Lines of code are a rough proxy for effort, but they are the measure most estimation models use, so this section uses two of them and checks one against the other.
+Lines of code are a rough proxy for effort, but they are the measure most estimation models use, so this section uses two of them and checks one against the other. The method is the same as in the first version; only the size has changed, from 26.1 to 27.3 KSLOC.
 
 | Method | Result |
 |---|---|
-| COCOMO II on 26 KSLOC of production code, nominal settings | ~105 person-months |
-| COCOMO II with the cost drivers adjusted for distributed-database internals (very high complexity, high reliability, data movement that must never lose a write) | ~160–210 person-months |
-| Cross-check: 26,000 lines at 8–12 net lines per engineer-day (typical for Cassandra internals, including design, review and tests) | ~130–180 person-months |
+| COCOMO II on 27.3 KSLOC of production code, nominal settings | ~112 person-months |
+| COCOMO II with the cost drivers adjusted for distributed-database internals (very high complexity, high reliability, data movement that must never lose a write) | ~170–220 person-months |
+| Cross-check: 27,300 lines at 8–12 net lines per engineer-day (typical for Cassandra internals, including design, review and tests) | ~135–190 person-months |
 | Additional work on top: TLA+ modelling by a formal-methods specialist, writing the ADRs, design reviews | +10–20 person-months |
 
-**Estimate: about 150–220 person-months (12–18 person-years).** In practice that means a team of **7–9 senior engineers** working for **18–24 months**, with Cassandra internals experience and one formal-methods specialist among them.
+**Estimate: about 155–230 person-months (13–19 person-years)**, for a team of **7–9 senior engineers** working for **18–24 months**.
 
-The estimate could be off in either direction:
+This measures what was **built**, not what the brief **asked for**. Section 8 shows that part of the scope the code appears to cover lacks the inputs it needs. A conventional team's design reviews would probably have caught some of those gaps early, so the estimate is for a comparable amount of code, not for a finished product.
 
-- **It may be too high.** Code written by LLMs, and especially their tests, tends to be wordier than what a team would write by hand. That makes the lower end of the range the safer figure.
-- **It may be too low.** A real team would also spend time on code review, rework, and hard-to-reproduce failures in real clusters, none of which appears in a line count.
+The estimate could also be off in the usual ways: LLM-written code and tests tend to be wordier than hand-written ones (the estimate may be too high), and a real team would spend time on review, rework and failures in real clusters that no line count shows (it may be too low).
 
 ## 4. Tokens and cost
 
-These figures come from the Claude Code transcripts of every session in the project: 7 orchestrator sessions and 40 worker (subagent) transcripts. This assessment session is included. Each API response is counted once.
+These figures come from the Claude Code transcripts of every session in the project, orchestrators and workers, each API response counted once, up to the close-out on 2026-11-23.
 
-| Model | Calls | Input | Cache writes | Cache reads | Output | Cost at API list price |
-|---|---|---|---|---|---|---|
-| Opus 5.5 | 1,520 | 3,396 | 16.6 M | 392.0 M | 1.48 M | $196 |
-| Fable 5.2 | 694 | 1,524 | 8.0 M | 121.6 M | 1.30 M | $170 |
-| Sonnet 5.5 | 1,705 | 3,540 | 8.3 M | 318.9 M | 1.80 M | $72 |
-| Haiku 5.5 | 543 | 1,102 | 1.2 M | 77.4 M | 0.37 M | ~$1 |
-| **Total** | **4,462** | **9.6 K** | **34.1 M** | **909.9 M** | **4.95 M** | **~$439** |
+| Model | Calls | Cache writes | Cache reads | Output | Cost at API list price |
+|---|---|---|---|---|---|
+| Opus 5.5 | 2,697 | 20.6 M | 601.2 M | 2.34 M | $280 |
+| Fable 5.2 (until 2026-11-17) | 694 | 8.0 M | 121.6 M | 1.30 M | $170 |
+| Sonnet 5.5 | 2,176 | 9.9 M | 368.3 M | 2.11 M | $84 |
+| Haiku 5.5 | 585 | 1.3 M | 79.8 M | 0.41 M | ~$1 |
+| **Total** | **6,152** | **39.8 M** | **1,170.9 M** | **6.16 M** | **~$535** |
 
-- **Total tokens processed: about 949 million.** About 96% of that is cache reads, which are context the model re-reads at a tenth of the normal input price. Excluding cache reads, the total is about 39 million.
-- **List prices used** are per million tokens, as input / output / cache read:
-  - Fable 5.2: $8 / $40 / $0.20
-  - Opus 5.5: $4 / $20 / $0.20
-  - Sonnet 5.5: $2 / $10 / $0.10
-  - Haiku 5.5: $0.10 / $0.50 / $0.01
-- **Cache writes** are priced at 1.25× the input price for the 5-minute cache and 2× for the 1-hour cache.
-- **These are API-equivalent figures.** What was actually billed depends on the account's plan.
-- **Haiku may be slightly undercounted.** Haiku's price rises for prompts over 100K tokens, which these figures do not apply. That could raise the Haiku line by a few dollars at most.
+- **About 1.2 billion tokens processed**, 96% of them cache reads.
+- **By period:** about $441 up to D6.1, $67 for D7 and $42 for the close-out, including this revision.
+- **List prices used** are per million tokens, as input / output / cache read: Fable 5.2 $8 / $40 / $0.20; Opus 5.5 $4 / $20 / $0.20; Sonnet 5.5 $2 / $10 / $0.10; Haiku 5.5 $0.10 / $0.50 / $0.01. Cache writes are priced at 1.25× the input price for the 5-minute cache and 2× for the 1-hour cache.
+- **These are API-equivalent figures.** What was billed depends on the plan. Against the plan's limits, the sprint used about **three weekly usage budgets**: the weekly limit was reached on 15 November and again on 23 November, with one free reset between.
 
 ## 5. The productivity factor
 
-| Basis | Conventional team | This project | Factor |
+| Basis | Conventional team | This sprint | Factor |
 |---|---|---|---|
-| Calendar time | 18–24 months | 7 days | **~80–100×** |
-| Human hours | 150–220 person-months, about 23,000–33,000 hours | at most ~41.5 hours of active session time | **~550–800×** |
-| Cost | ~$3.0–4.4 M, at ~$20k per fully loaded senior engineer-month | ~$439 in tokens, plus the owner's time | **~7,000–10,000×** on cash spend |
+| Calendar time | 18–24 months | 11 days | **~50–65×** |
+| Human hours | 155–230 person-months, about 23,000–35,000 hours | at most ~56 hours of active session time | **~400–600×** |
+| Cash spend | ~$3.1–4.6 M, at ~$20k per fully loaded senior engineer-month | ~$535 in tokens, plus the owner's time | **~5,800–8,600×** |
 
-The calendar factor is the most conservative and the easiest to defend. The cost factor leaves out the owner's own time, the machine, and the verification work still ahead in D7.
+**These factors overstate the result**, for three reasons:
 
-## 6. Revision: removing the token restrictions
+1. They compare against a team building the same amount of code, but part of that code's apparent scope is not delivered (section 8).
+2. They leave out the next increment, which the shortcomings require: about one weekly usage budget, roughly $170–300 at list prices, and one to two weeks of calendar time, most of it machine time for tests (see [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md)).
+3. They leave out the owner's review effort, which caught the main shortcoming.
 
-The project ran under deliberate token economy:
+Counting the next increment, the calendar factor falls to roughly **20–40×**. The cost factor stays above three orders of magnitude either way. The calendar factor is still the most conservative and the easiest to defend.
 
-- cheaper models wherever possible
-- no Fable after 2026-11-17
-- an orchestrator on a cheaper tier for D3 to D5
-- short, capped worker reports
-- warm workers reused for related tasks
-- the orchestrator spot-checking work rather than redoing it
+## 6. Revision: the token restrictions
 
-The question here is what the work would have cost with those restrictions lifted.
+The project ran under deliberate token economy: cheaper models wherever possible, no Fable after 2026-11-17, a cheaper orchestrator for D3 to D5, short capped worker reports, warm workers reused, and the orchestrator reading only the key part of each diff.
 
-- **Same tokens, all on Fable 5.2.** Repricing every token measured above at Fable 5.2 rates gives **~$749**, against $439 actually spent, or 1.7×.
-- **More tokens as well.** Without the restrictions, the work would also have used more tokens: fresh agents instead of reused ones, full-length reports, an independent top-tier review of every task, and more parallel exploration. A reasonable assumption is 1.5–2.5× the token volume, which puts the unrestricted cost at **about $1,100–1,900**.
-- **Time.** The time saved would have been modest, perhaps 20–30%. The slowest steps were builds, tests and TLC model checking on a 4-core, 5 GB machine, plus the owner's review gates. Token rules did not hold those up.
+The first version of this assessment estimated that the restrictions saved about $700–1,500 and cost a day or two of calendar time. The close-out shows a cost that estimate missed: the restrictions narrowed reviews and sensor scope, and no one weighed that against quality or put it to the owner (postmortem root cause W2). Part of the next increment, about $170–300 and one to two weeks, is the price of that. The standing prompt now forbids saving tokens on verification: savings come only from how work is executed.
 
-| | Actual (restricted) | Unrestricted, estimated |
+| | Restricted, as run | Unrestricted, estimated |
 |---|---|---|
-| Token cost | ~$439 | ~$1,100–1,900 |
-| Calendar time | 7 days | ~5–6 days |
-| Cost factor against a conventional team | ~7,000–10,000× | ~1,600–4,000× |
+| Token cost of sprint 1 | ~$535 | ~$1,300–2,300 (1.7× for top-tier pricing, 1.5–2.5× for volume) |
+| Rework the restrictions caused | ~$170–300 and 1–2 weeks (increment 2) | likely much less, though not zero |
+| Calendar time | 11 days | ~8–10 days |
 
-Even unrestricted, the token bill is less than a single week of one senior engineer's fully loaded cost. On these numbers, the restrictions saved roughly $700–1,500 and cost about a day or two of calendar time.
+On these numbers the restrictions saved money on the sprint itself, but most of that saving is spent again in increment 2, and the calendar time is lost.
 
 ## 7. What was built
 
-In one week this fork went from an empty idea to a working, formally modelled autonomic layer inside one of the most demanding distributed databases in production use. It is off by default and touches only 42 lines of upstream code.
+- **An in-database autonomic control loop.** Each node runs its own MAPE-K loop (monitor, analyze, plan, execute, over shared knowledge) on three dedicated threads. It reads Cassandra's existing metrics and adds no instrumentation to the request path, which is also the root of its main shortcoming (section 8).
+- **Safety guardrails.** Dry-run mode, a cluster-wide kill switch, rate and blast-radius limits, cooldowns, a circuit breaker and operator approval for risky actions. An action is kept only if verification shows an improvement without breaking a guard; otherwise it is rolled back (ADR-008). Guards are not judged on request classes with too little traffic to measure (ADR-045).
+- **Self-diagnosis.** Detectors for hot partitions, latency SLO breaches, pool saturation, tombstone overload, compaction backlog, disk pressure, GC pressure, node imbalance, degraded peers, overdue repair and, since T7.15, cache misses. A rules-based correlator links them to root causes in language an operator can act on.
+- **Self-healing.** Actuators tune compaction throughput and concurrency, shrink caches under GC pressure, and run tombstone-driven compaction, each in an apply, verify and roll-back loop. Growing caches was designed but not wired. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
+- **Elasticity.** Under a load spike a node first resizes its thread pools and applies adaptive throttling. Beyond that, a scale-out provider interface adds nodes, only with manual approval, with a simulated provider and a Kubernetes stub.
+- **On-the-fly schema adaptation.** A hot wide partition is hash-split into a companion table while clients of the old schema keep getting the same results: coordinators rewrite queries at the `StorageProxy` boundary, a migration engine runs dual-write, backfill, verification, cutover and rollback through all-node epoch acknowledgement, and T6.17 undoes a split once the hot spot cools. This was the hardest item in the vision.
+- **Formally modelled.** Three TLA+ specifications, checked by 24 TLC configurations, including deliberate negative tests that remove one safety rule and show that the checker finds the violation.
+- **Operable, with caveats.** `nodetool autonomic` has 23 subcommands, the `cassandra.yaml` additions are documented, and an operator guide covers configuration, the kill switch, rollback and the split demo. The operator cannot yet see much of what the layer cannot see (section 8).
+- **Every decision written down.** 46 ADRs, two measurement spikes, a postmortem and a coverage audit.
+- **Tested in depth, within limits.** About 37,100 lines of test code: unit, in-JVM distributed, end-to-end, failure-injection, compatibility and repeatability suites, all on one 4-core, 5 GB machine, on JDK 17 only.
 
-- **An in-database autonomic control loop.** Each node runs its own MAPE-K loop (monitor, analyze, plan, execute, over shared knowledge) on three dedicated threads. The loop takes its signals from Cassandra's existing metrics, so it adds no instrumentation to the request path. The loop's knowledge is kept in three tiers: memory, a node-local `system_autonomic` keyspace, and a cluster-wide ledger in Transactional Cluster Metadata (TCM). Operators can query that knowledge through `system_views.autonomic_*` virtual tables.
-- **Safety guardrails.** Every action runs under the same safety rules:
-  - dry-run mode
-  - a cluster-wide kill switch
-  - rate limits
-  - blast-radius limits
-  - operator approval for risky actions
+## 8. Where it falls short of the brief
 
-  Each action is committed only when verification shows an improvement. Otherwise it is rolled back and the node stays as it was (ADR-008).
-- **Self-diagnosis.** Detectors cover:
-  - hot partitions
-  - latency SLO breaches
-  - tombstone overload
-  - compaction backlog
-  - disk pressure
-  - GC pressure
-  - node imbalance
-  - overdue repair
+The owner found the main shortcoming on 2026-11-22, while D7's follow-up work was being closed out. The postmortem ([docs/postmortems/2026-11-22-cache-and-memory-near-miss.md](docs/postmortems/2026-11-22-cache-and-memory-near-miss.md)) and the coverage audit ([docs/audits/observability-coverage.md](docs/audits/observability-coverage.md)) set out the evidence.
 
-  A rules-based correlator links these to their root causes and explains them in language an operator can act on.
-- **Self-healing.** Actuators tune compaction throughput and concurrency, cache sizes (correction, 2026-11-23: caches are only shrunk, under GC pressure; growing them was planned but never wired, see the postmortem), and tombstone-driven compaction, each in an apply, verify and roll-back loop. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
-- **Elasticity.** Under a load spike a node first adapts itself, by resizing thread pools and applying adaptive throttling and backpressure. Beyond that, a scale-out provider interface adds nodes only with manual approval. It comes with a simulated provider and a Kubernetes stub.
-- **On-the-fly schema adaptation.** This was the hardest item in the vision, and it is now working. When a wide partition becomes hot, the fork hash-splits only that partition into a companion table.
-  - **Rewriting:** coordinators rewrite queries at the `StorageProxy` boundary, fanning reads out and merging the results, and routing writes and deletes to the right copy.
-  - **Migration:** a migration engine moves the partition through dual-write, backfill from every replica, verification, cutover and rollback. Each phase is agreed through all-node epoch acknowledgement in cluster metadata.
-  - **Compatibility:** clients using the old schema get the same results before, during and after the migration. A compatibility catalogue checks this, including against nodes one version behind.
-  - **Reverse migration:** T6.17 undoes a split once the hot spot has cooled. Unsplitting can be started by a command, an MBean, a policy, or detectors for pending and orphaned splits. It handles tombstone deadlines, purge timing, and in-flight hints correctly.
-- **Formally modelled.** TLA+ specifications cover the forward and reverse migrations, checked by 24 TLC configurations. Several are deliberate negative tests that remove one safety rule (C1, O1, the drain, the deadline, the purge window) to show that the checker then finds a violation. The ordering rules these models check are recorded in ADR-033 to ADR-036.
-- **Fully operable.** `nodetool autonomic` has 23 subcommands for status, pause and resume, history, events, approve and reject, dry-run, kill, and actuator, cluster and layout control. Layout control covers split, unsplit, abort and resume. The `cassandra.yaml` additions are documented, and an operator guide for adaptive schema is in `docs/operations/`.
-- **Every decision written down.** Thirty-seven ADRs record each architectural choice, the alternatives considered, and the owner's rulings at each review gate.
-- **Tested in depth.** There are 32,800 lines of test code: unit tests, in-JVM distributed tests, end-to-end and failure-injection suites, and compatibility tests. It runs as targeted suites on a 4-core, 5 GB machine.
+- **Not from first principles.** The design started from the metrics and settings Cassandra already exposed (overview section 2, "What the base already provides"), not from a catalogue of what can go wrong. No such catalogue exists yet.
+- **Blind spots.** The audit found 23 places where an existing or planned action or diagnosis lacks the signal it needs, and 18 where the layer cannot name a cause. Memory beyond heap use, real CPU use, disk I/O, messaging between nodes, the write path, hints and streaming are not observed.
+- **Wrong assumptions about Cassandra.** GC time is taken as pause time, a live defect on JDK 21, where ZGC's concurrent cycles count as pressure. The off-heap row cache is shrunk to relieve the heap. The load average is taken as CPU use.
+- **Planned but never built.** Growing caches, fewer compaction threads, a client in-flight-bytes knob, pools below their configured size, and recovery of throttled hints and streams.
+- **Test limits.** In-JVM clusters of one to three nodes, JDK 17 only, no performance benchmarks, no real cluster. The hot-spot scenario fails about one run in five.
+- **Why it happened** (postmortem part 2): a bottom-up method; cost pressure that displaced verification without the owner deciding it; no completeness criterion at any level; scope decided by omission; one agent designing, reviewing and accepting its own work; tests that fed made-up signals; and closure pressure.
 
-That is roughly the scope of a full engineering team's 18-month roadmap. It took one week of calendar time and less in tokens than one day of a single senior engineer's fully loaded cost. D7 now puts it through end-to-end scenario testing.
+What has already changed: a standing prompt that every session loads ([docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md)), an automated test that fails when an action lacks its input (`InputCoverageTest`), an evidence rule for every claimed limitation, and an independent review before anything ships. T7.15 was the first task under these rules; its independent review found two defects before it shipped.
+
+## 9. What comes next
+
+Increment 2 (D7.1) starts with a failure-mode catalogue that sets its scope, fixes the JDK 21 defect, adds the missing observation, decides the unbuilt design items, proves each resource class under real pressure, and closes with a full gate. It is estimated at about one weekly usage budget. The plan, with tiers, estimates and the owner's decisions per step, is [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md).
+
+## Bottom line
+
+In 11 days and about $535, the sprint produced a working, formally modelled autonomic layer inside Cassandra, of a size a conventional team would need 18 to 24 months to write. It is not yet the database the brief described: it sees and acts on what Cassandra made easy to read, not on everything that can go wrong. The method that caused that has been changed, and the gap is measured and planned for.

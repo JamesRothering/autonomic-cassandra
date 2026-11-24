@@ -20,7 +20,7 @@
 
 # Autonomic Cassandra
 
-> **[ASSESS.md](ASSESS.md)**: project assessment through D6: code produced, team-effort equivalent, tokens and cost, and what was built.
+> **[ASSESS.md](ASSESS.md)**: assessment of sprint 1 (D0 to D7 and the close-out): code produced, team-effort equivalent, tokens and cost, what was built, and where it falls short of the brief.
 >
 > **Sprint 1 close-out (2026-11-23):** what was missed and why, in the [postmortem](docs/postmortems/2026-11-22-cache-and-memory-near-miss.md) and the [observability coverage audit](docs/audits/observability-coverage.md); the plan for increment 2 in [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md); the rules every session now follows in [docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md).
 
