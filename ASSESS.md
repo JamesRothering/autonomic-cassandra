@@ -62,7 +62,7 @@ The owner later tightened the cost rules twice:
 
 The owner acted as product owner and reviewer throughout. Every design decision is recorded as an ADR in [docs/DECISIONS.md](docs/DECISIONS.md).
 
-One thing in the brief matters more than this assessment first recognised. It asked for a database re-envisioned **from first principles**, and for **maximum quality** while minimising **unnecessary** token usage. Section 8 shows that the design was not built from first principles, and that the token economy cut into work that was necessary.
+One thing in the brief matters more than this assessment first recognised. It asked for a database re-envisioned **from first principles**, and for **maximum quality** while minimising **unnecessary** token usage. Section 7 shows that the design was not built from first principles, and that the token economy cut into work that was necessary.
 
 ## 2. What was produced
 
@@ -141,7 +141,7 @@ The calendar factor is the most conservative and the easiest to defend.
 
 ### 5.2 The cost of autonomy
 
-The owner barely reviewed the design, so it could start from what Cassandra already exposes instead of from what can go wrong (section 8). Section 10 shows that a short review at the first gate would have caught this, had the clues been put plainly.
+The owner barely reviewed the design, so it could start from what Cassandra already exposes instead of from what can go wrong (section 7). Section 9 shows that a short review at the first gate would have caught this, had the clues been put plainly.
 
 The cost of autonomy is the **rework**: work that was done wrong and has to be found and redone. Two other kinds of work are **not** counted:
 - work the sprint never attempted, which is most of the 130 failure modes in the catalogue;
@@ -182,20 +182,7 @@ The project ran under deliberate token economy:
 
 The restrictions saved about $800–1,700 and cost a day or two. They also narrowed reviews and sensor scope, and no one weighed that against quality or put it to the owner (postmortem root cause W2). That is one of the causes priced in section 5.2. The standing prompt now forbids saving tokens on verification: savings come only from how work is executed.
 
-## 7. What was built
-
-- **An in-database autonomic control loop.** Each node runs its own MAPE-K loop (monitor, analyze, plan, execute, over shared knowledge) on three dedicated threads. It reads Cassandra's existing metrics and adds no instrumentation to the request path, which is also the root of its main shortcoming (section 8).
-- **Safety guardrails.** Dry-run mode, a cluster-wide kill switch, rate and blast-radius limits, cooldowns, a circuit breaker and operator approval for risky actions. An action is kept only if verification shows an improvement without breaking a guard; otherwise it is rolled back (ADR-008). Guards are not judged on request classes with too little traffic to measure (ADR-045).
-- **Self-diagnosis.** Detectors for hot partitions, latency SLO breaches, pool saturation, tombstone overload, compaction backlog, disk pressure, GC pressure, node imbalance, degraded peers, and overdue repair. A cache-miss detector (T7.15) was added after the sprint. A rules-based correlator links them to root causes in language an operator can act on.
-- **Self-healing.** Actuators tune compaction throughput and concurrency, shrink caches under GC pressure, and run tombstone-driven compaction, each in an apply, verify and roll-back loop. Growing caches was designed but not wired. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
-- **Elasticity.** Under a load spike a node first resizes its thread pools and applies adaptive throttling. Beyond that, a scale-out provider interface adds nodes, only with manual approval, with a simulated provider and a Kubernetes stub.
-- **On-the-fly schema adaptation.** A hot wide partition is hash-split into a companion table while clients of the old schema keep getting the same results: coordinators rewrite queries at the `StorageProxy` boundary, a migration engine runs dual-write, backfill, verification, cutover and rollback through all-node epoch acknowledgement, and T6.17 undoes a split once the hot spot cools. This was the hardest item in the vision.
-- **Formally modelled.** Three TLA+ specifications, checked by 24 TLC configurations, including deliberate negative tests that remove one safety rule and show that the checker finds the violation.
-- **Operable, with caveats.** `nodetool autonomic` has 23 subcommands, the `cassandra.yaml` additions are documented, and an operator guide covers configuration, the kill switch, rollback and the split demo. The operator cannot yet see much of what the layer cannot see (section 8).
-- **Every decision written down.** 46 ADRs and two measurement spikes.
-- **Tested in depth, within limits.** About 36,200 lines of test code: unit, in-JVM distributed, end-to-end, failure-injection, compatibility and repeatability suites, all on one 4-core, 5 GB machine, on JDK 17 only.
-
-## 8. Where it falls short of the brief
+## 7. Where it falls short of the brief
 
 The owner found the main shortcoming on 2026-11-22, while tying up loose ends at the end of the sprint. The postmortem ([docs/postmortems/2026-11-22-cache-and-memory-near-miss.md](docs/postmortems/2026-11-22-cache-and-memory-near-miss.md)) and the coverage audit ([docs/audits/observability-coverage.md](docs/audits/observability-coverage.md)) set out the evidence.
 
@@ -208,13 +195,13 @@ The owner found the main shortcoming on 2026-11-22, while tying up loose ends at
 
 What has changed since: a standing prompt that every session loads ([docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md)), an automated test that fails when an action lacks its input (`InputCoverageTest`), an evidence rule for every claimed limitation, and an independent review before anything ships. T7.15 was the first task under these rules; its independent review found two defects before it shipped.
 
-## 9. What comes next
+## 8. What comes next
 
 Increment 2 (D7.1) starts with a failure-mode catalogue that sets its scope, fixes the JDK 21 defect, adds the missing observation, decides the unbuilt design items, proves each resource class under real pressure, and closes with a full gate. The catalogue puts it at about 380–690 units, or 1.1–2.0 weekly usage budgets, depending on 52 owner decisions. Most of that is new scope; section 5.2 prices the part that is rework. The plan, with tiers, estimates and the owner's decisions per step, is [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md).
 
-## 10. Could the owner have caught it at the first review?
+## 9. Could the owner have caught it at the first review?
 
-The owner asked this after the sprint. The experiment was to give a general direction and let Claude run with it, so the first review point was not read closely. The question is whether enough was presented there to catch the failures of section 8 up front.
+The owner asked this after the sprint. The experiment was to give a general direction and let Claude run with it, so the first review point was not read closely. The question is whether enough was presented there to catch the failures of section 7 up front.
 
 The first review point was the D1 gate on 13 November: the architecture overview, the adaptive-schema design, and 13 questions plus three scope calls (recorded in ADR-024). The evidence below is the D1 version of the overview (`git show 2e79542:docs/architecture/overview.md`; line numbers refer to that version) and the messages sent to the owner at the gate.
 
@@ -263,6 +250,21 @@ For anyone reviewing an AI-written design, four questions would have exposed mos
 4. How do the tests prove an input exists?
 
 The first question is the failure-mode catalogue that starts increment 2 (`docs/architecture/failure-modes.md`, step 1 of [docs/NEXT-STEPS.md](docs/NEXT-STEPS.md)). The other three are now gate rules in the standing prompt ([docs/process/orchestration-prompt.md](docs/process/orchestration-prompt.md), sections 3, 5 and 6).
+
+## 10. What was built
+
+In 10 days, one owner and a team of AI agents built what a conventional team would need 18 to 24 months to write. Here is what it does.
+
+- **An in-database autonomic control loop.** Each node runs its own MAPE-K loop (monitor, analyze, plan, execute, over shared knowledge) on three dedicated threads. It reads Cassandra's existing metrics and adds no instrumentation to the request path, which is also the root of its main shortcoming (section 7).
+- **Safety guardrails.** Dry-run mode, a cluster-wide kill switch, rate and blast-radius limits, cooldowns, a circuit breaker and operator approval for risky actions. An action is kept only if verification shows an improvement without breaking a guard; otherwise it is rolled back (ADR-008). Guards are not judged on request classes with too little traffic to measure (ADR-045).
+- **Self-diagnosis.** Detectors for hot partitions, latency SLO breaches, pool saturation, tombstone overload, compaction backlog, disk pressure, GC pressure, node imbalance, degraded peers, and overdue repair. A cache-miss detector (T7.15) was added after the sprint. A rules-based correlator links them to root causes in language an operator can act on.
+- **Self-healing.** Actuators tune compaction throughput and concurrency, shrink caches under GC pressure, and run tombstone-driven compaction, each in an apply, verify and roll-back loop. Growing caches was designed but not wired. The fork drives Cassandra's built-in auto-repair rather than adding a second repair scheduler.
+- **Elasticity.** Under a load spike a node first resizes its thread pools and applies adaptive throttling. Beyond that, a scale-out provider interface adds nodes, only with manual approval, with a simulated provider and a Kubernetes stub.
+- **On-the-fly schema adaptation.** A hot wide partition is hash-split into a companion table while clients of the old schema keep getting the same results: coordinators rewrite queries at the `StorageProxy` boundary, a migration engine runs dual-write, backfill, verification, cutover and rollback through all-node epoch acknowledgement, and T6.17 undoes a split once the hot spot cools. This was the hardest item in the vision.
+- **Formally modelled.** Three TLA+ specifications, checked by 24 TLC configurations, including deliberate negative tests that remove one safety rule and show that the checker finds the violation.
+- **Operable, with caveats.** `nodetool autonomic` has 23 subcommands, the `cassandra.yaml` additions are documented, and an operator guide covers configuration, the kill switch, rollback and the split demo. The operator cannot yet see much of what the layer cannot see (section 7).
+- **Every decision written down.** 46 ADRs and two measurement spikes.
+- **Tested in depth, within limits.** About 36,200 lines of test code: unit, in-JVM distributed, end-to-end, failure-injection, compatibility and repeatability suites, all on one 4-core, 5 GB machine, on JDK 17 only.
 
 ## Bottom line
 
