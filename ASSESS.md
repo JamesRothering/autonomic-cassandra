@@ -210,7 +210,7 @@ The owner estimated each episode of their own time, from a list built out of the
 | 26–38 | Thu 19 Nov 10:27 to Sun 22 Nov 15:11 | The first assessment, D7 start and its findings, ADR-043 and ADR-044, the guard floor, approval of D7 | about 1.5 h in all, of which episodes 27, 30, 31 and 35 were 1 min each |
 | | | **Sprint total** | **about 6.1 h** |
 
-After the D7 tag, estimated from message times and not yet confirmed by the owner:
+After the D7 tag, estimated from message times and confirmed by the owner (about 2.5 hours on the catch and the postmortem):
 
 | When (PT) | What the owner did | Time | Counted as |
 |---|---|---|---|
