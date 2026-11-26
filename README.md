@@ -20,13 +20,15 @@
 
 # Autonomic Cassandra
 
+A fork of [Apache Cassandra](https://github.com/apache/cassandra) trunk at commit [`2249e37`](https://github.com/apache/cassandra/commit/2249e37b51af9fd2a72865bbb56c1197e0d0d1ed) (2026-11-12). All upstream history and Apache licensing are kept; the autonomic layer is added on top.
+
 > **[ASSESS.md](ASSESS.md)**: project assessment through D6: code produced, team-effort equivalent, tokens and cost, and what was built.
 
 Autonomic Cassandra re-envisions Cassandra from first principles as a self-healing, self-correcting, self-diagnosing database. If demand spikes, it adapts elastically. If a hot spot develops, it changes the schema on the fly to mitigate it while keeping clients that depend on the old schema satisfied, at least eventually. The goal is a database that operators can leave running with less hand-tuning, without giving up the safety and predictability that operators expect from Cassandra.
 
 ## Status
 
-Pre-alpha. This is a research fork. Its base is Apache Cassandra trunk at commit `2249e37b51af9fd2a72865bbb56c1197e0d0d1ed` (dated 2026-11-12). Nothing here is supported for production use. All autonomic features are off by default.
+Pre-alpha research fork. Nothing here is supported for production use. All autonomic features are off by default.
 
 ## How it works
 
