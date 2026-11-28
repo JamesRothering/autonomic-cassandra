@@ -40,4 +40,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod bridge;
 mod error;
 pub mod exports;
+#[cfg(feature = "ffm-probe")]
+mod ffm_probe;
 mod handles;

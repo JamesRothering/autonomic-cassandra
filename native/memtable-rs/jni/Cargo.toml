@@ -15,3 +15,5 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # Use mimalloc as the library's global allocator (see docs/spike/rust-memtable.md, "flush cost").
 mimalloc = ["dep:mimalloc"]
+# Adds the FFM-versus-JNI benchmark probes for bench/ffm/FfmProbe.java (one unsafe block; see ffm_probe.rs).
+ffm-probe = []

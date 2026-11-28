@@ -40,9 +40,14 @@ benchmarks). Nothing in Cassandra uses it unless a caller loads it.
 ## Build
 
 ```bash
-source ~/.cargo/env                 # Rust 1.85+ (edition 2024); tested with 1.100.1
+source ~/.cargo/env                 # Rust 1.88+ (edition 2024, let-chains); tested with 1.100.1
 cd native/memtable-rs
-cargo build --release               # target/release/libmemtable_jni.so
+cargo build --release               # target/release/libmemtable_jni.so (system allocator)
+
+# Optional features of the jni crate:
+#   mimalloc   - mimalloc as the library's global allocator (frees a flushed memtable ~3x faster; see the write-up)
+#   ffm-probe  - adds the C-ABI probes used by bench/ffm/FfmProbe.java (JDK 25 FFM vs JNI call cost)
+cargo build --release --features mimalloc -p memtable-jni --target-dir target/mimalloc
 ```
 
 ## Test
@@ -83,7 +88,15 @@ native/memtable-rs/bench/run-java-bench.sh ~/.local/opt/jdk-17 g1 2g overhead
 native/memtable-rs/bench/run-java-bench.sh ~/.local/opt/jdk-17 g1 2g -Dbench.memtable=trie throughput rust 4 10
 BENCH_JVM_OPTS="-Xlog:gc*:file=/tmp/gc.log" \
   native/memtable-rs/bench/run-java-bench.sh ~/.local/opt/jdk-21 zgc 2g gc rust 60
-native/memtable-rs/bench/gc-suite.sh     # the full GC matrix used in the write-up
+native/memtable-rs/bench/throughput-suite.sh   # 1/2/4 writers, Java vs Rust, 3 repeats
+native/memtable-rs/bench/gc-suite.sh           # the GC matrix: JDK 17 + G1 and JDK 21 + generational ZGC, 3 repeats
+native/memtable-rs/bench/mutants.sh            # mutation check of the differential test
+
+# FFM (JDK 25) versus JNI per-call cost, standalone
+cargo build --release --features ffm-probe -p memtable-jni --target-dir target/ffm
+~/.local/opt/jdk-25/bin/javac -d /tmp/ffm native/memtable-rs/bench/ffm/FfmProbe.java
+~/.local/opt/jdk-25/bin/java --enable-native-access=ALL-UNNAMED -cp /tmp/ffm FfmProbe \
+  native/memtable-rs/target/ffm/release/libmemtable_jni.so
 ```
 
 ## Conventions

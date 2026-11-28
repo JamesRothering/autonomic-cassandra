@@ -449,26 +449,20 @@ fn merge_cells(existing: Vec<Cell>, update: Vec<Cell>) -> Vec<Cell> {
     let mut out = Vec::with_capacity(existing.len() + update.len());
     let mut existing = existing.into_iter().peekable();
     let mut update = update.into_iter().peekable();
-    loop {
-        let next = match (existing.peek(), update.peek()) {
-            (None, None) => break,
-            (Some(_), None) => existing.next(),
-            (None, Some(_)) => update.next(),
-            (Some(e), Some(u)) => match e.column.cmp(&u.column) {
-                Ordering::Less => existing.next(),
-                Ordering::Greater => update.next(),
-                Ordering::Equal => {
-                    let (e, u) = (existing.next(), update.next());
-                    match (e, u) {
-                        (Some(e), Some(u)) => Some(if Cell::existing_wins(&e, &u) { e } else { u }),
-                        // Both were just peeked as present.
-                        _ => unreachable!("peeked cells vanished"),
-                    }
+    while let (Some(e), Some(u)) = (existing.peek(), update.peek()) {
+        match e.column.cmp(&u.column) {
+            Ordering::Less => out.extend(existing.next()),
+            Ordering::Greater => out.extend(update.next()),
+            Ordering::Equal => {
+                if let (Some(e), Some(u)) = (existing.next(), update.next()) {
+                    out.push(if Cell::existing_wins(&e, &u) { e } else { u });
                 }
-            },
-        };
-        out.extend(next);
+            }
+        }
     }
+    // At most one side has cells left.
+    out.extend(existing);
+    out.extend(update);
     out.shrink_to_fit();
     out
 }

@@ -18,6 +18,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use jni::Env;
 use jni::errors::ErrorPolicy;
@@ -115,6 +116,11 @@ impl<T: Default> ErrorPolicy<T, BoundaryError> for ThrowJavaException {
             .map(|s| (*s).to_owned())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "non-string panic payload".to_owned());
+        // A payload's own Drop may panic; contain that and leak the second
+        // payload rather than unwind into the JVM (as jni's own policy does).
+        if let Err(second) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+            std::mem::forget(second);
+        }
         if !env.exception_check() {
             let _ = env.throw_new(
                 jni_str!("java/lang/RuntimeException"),

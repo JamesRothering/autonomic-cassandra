@@ -65,8 +65,8 @@ The only `unsafe` in non-test code is `#[unsafe(no_mangle)]` on the 14 exported 
    - Copy-in/copy-out through `byte[]` instead of direct `ByteBuffer`s: I chose it so there is never a Rust slice
      over memory Java can mutate concurrently. Is there a sound zero-copy alternative you would trust (e.g.
      `GetPrimitiveArrayCritical` for the input), and is it worth it?
-   - `with_env` + `resolve` measured at about 57 ns per call on top of a 12 ns bare JNI transition; the handle
-     lookup adds about 35 ns. Is that expected for `jni` 0.22, and is hand-rolling on `jni-sys` a reasonable
+   - `with_env` + `resolve` measured at about 58 ns per call on top of a 12 ns bare JNI transition; the handle
+     lookup adds about 30 ns. Is that expected for `jni` 0.22, and is hand-rolling on `jni-sys` a reasonable
      trade for a hot path?
    - Panics: a panic inside a shard's write lock poisons that `RwLock`, and every later call on that shard returns
      an error (I treat a half-merged partition as unrecoverable). The handle tables instead recover from poisoning
