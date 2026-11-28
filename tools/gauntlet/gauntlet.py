@@ -468,6 +468,7 @@ def main():
 
 
 if __name__ == "__main__":
+    rc = 1
     try:
         rc = main()
     finally:

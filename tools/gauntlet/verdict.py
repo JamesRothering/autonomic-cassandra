@@ -20,7 +20,7 @@
 """Verdict rules of the gauntlet (docs/plan/eval-harness.md, "Verdicts").
 
 The service level comes from the run's own baseline phase: per 10 s interval of the probe, p99 latency at most
-max(3 x baseline p99, 20 ms) and errors below 0.5% of the interval's operations.
+max(3 x baseline p99, 20 ms), the baseline p99 being the median of the baseline phase's per-interval p99s, and errors below 0.5% of the interval's operations.
 """
 
 INTERVAL_S = 10
@@ -47,8 +47,19 @@ def evaluate(rows, tl, ledger, end_state, misconfig, recovery_deadline_s, tail_s
     total = tl["total"]
     fault_end = total if misconfig else fault_start + tl["fault"]
 
+    # Baseline p99: the median of the baseline phase's per-interval p99s, so that one start-up spike in one interval
+    # does not loosen the service level for the whole run (smoke run S0: 115 ms over all baseline operations, 26 ms
+    # steady). The p99 over all baseline operations is kept for the report.
     base = [r for r in rows if w <= r[0] < fault_start]
-    base_p99 = percentile([r[3] for r in base], 0.99)
+    base_p99_all = percentile([r[3] for r in base], 0.99)
+    base_iv = []
+    t = w
+    while t + INTERVAL_S <= fault_start + 1e-9:
+        rs = [r[3] for r in base if t <= r[0] < t + INTERVAL_S]
+        if rs:
+            base_iv.append(percentile(rs, 0.99))
+        t += INTERVAL_S
+    base_p99 = percentile(base_iv, 0.5) if base_iv else base_p99_all
     threshold = max(P99_FACTOR * base_p99, P99_FLOOR_MS)
 
     intervals = []
@@ -105,6 +116,7 @@ def evaluate(rows, tl, ledger, end_state, misconfig, recovery_deadline_s, tail_s
         "verdict": verdict,
         "reasons": reasons,
         "baseline_p99_ms": round(base_p99, 1),
+        "baseline_p99_all_ops_ms": round(base_p99_all, 1),
         "p99_threshold_ms": round(threshold, 1),
         "worst_p99_ms": max([iv["p99_ms"] for iv in after], default=0.0),
         "worst_p99_baseline_phase_ms": max([iv["p99_ms"] for iv in intervals if iv["phase"] == "baseline"], default=0.0),
