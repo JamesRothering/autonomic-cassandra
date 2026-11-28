@@ -37,6 +37,7 @@
 //! increasing by column; the decoder rejects anything else, and every value
 //! Java could not have built (see the `is_valid` methods in [`crate::model`]).
 
+use std::borrow::Borrow;
 use std::fmt;
 
 use crate::model::{Cell, DeletionTime, LivenessInfo, Row, RowDeletion};
@@ -190,7 +191,10 @@ impl<'a> Reader<'a> {
         let mut cells = Vec::with_capacity(count.min(self.buf.len() / 28));
         for _ in 0..count {
             let cell = self.cell()?;
-            if cells.last().is_some_and(|prev: &Cell| prev.column >= cell.column) {
+            if cells
+                .last()
+                .is_some_and(|prev: &Cell| prev.column >= cell.column)
+            {
                 return Err(DecodeError::CellsOutOfOrder);
             }
             cells.push(cell);
@@ -305,11 +309,11 @@ fn put_row(out: &mut Vec<u8>, clustering: &[u8], row: &Row) -> Result<(), TooLar
 /// # Errors
 /// Returns [`TooLarge`] if a length exceeds `u32::MAX`; `out` then holds a
 /// partial record and the caller must discard it.
-pub fn encode_partition<'a>(
+pub fn encode_partition<'a, R: Borrow<Row>>(
     out: &mut Vec<u8>,
     key: &[u8],
     deletion: DeletionTime,
-    rows: impl IntoIterator<Item = (&'a [u8], &'a Row)>,
+    rows: impl IntoIterator<Item = (&'a [u8], R)>,
 ) -> Result<(), TooLarge> {
     put_bytes(out, key)?;
     put_deletion(out, deletion);
@@ -317,7 +321,7 @@ pub fn encode_partition<'a>(
     out.extend_from_slice(&[0; 4]);
     let mut count = 0usize;
     for (clustering, row) in rows {
-        put_row(out, clustering, row)?;
+        put_row(out, clustering, row.borrow())?;
         count += 1;
     }
     let count = u32::try_from(count).map_err(|_| TooLarge)?.to_be_bytes();

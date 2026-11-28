@@ -47,6 +47,7 @@
 //! is poisoned and every later access to that shard returns
 //! [`MemtableError::Poisoned`]: a half-merged partition is never served.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
@@ -100,6 +101,18 @@ struct Partition {
     rows: BTreeMap<Box<[u8]>, Row>,
 }
 
+impl Partition {
+    /// The rows as reads and flushes see them: filtered by the partition
+    /// deletion, as Java's memtable does on read (see [`Row::visible_under`]).
+    fn visible<'a>(
+        &self,
+        rows: impl Iterator<Item = (&'a Box<[u8]>, &'a Row)>,
+    ) -> impl Iterator<Item = (&'a [u8], Cow<'a, Row>)> {
+        let deletion = self.deletion;
+        rows.filter_map(move |(c, r)| r.visible_under(deletion).map(|r| (&**c, r)))
+    }
+}
+
 #[derive(Debug, Default)]
 struct Shard {
     frozen: bool,
@@ -151,9 +164,7 @@ impl Memtable {
         if boundaries.windows(2).any(|w| w[0] >= w[1]) {
             return Err(MemtableError::BadBoundaries);
         }
-        let shards = (0..=boundaries.len())
-            .map(|_| RwLock::default())
-            .collect();
+        let shards = (0..=boundaries.len()).map(|_| RwLock::default()).collect();
         Ok(Self {
             boundaries: boundaries.into_boxed_slice(),
             shards,
@@ -201,7 +212,8 @@ impl Memtable {
     ///
     /// The partition deletion is merged as `MutableDeletionInfo.add`
     /// (`MutableDeletionInfo.java:110-114`). It does not remove the rows it
-    /// shadows: neither does Java's memtable, which applies it on read.
+    /// shadows: neither does Java's memtable, which applies it on read and
+    /// flush (as [`Memtable::read`] and [`FlushIter`] do here).
     /// A new row is inserted as given, without filtering by its own deletion
     /// (`BTreePartitionUpdater.insert`, `partitions/BTreePartitionUpdater.java:160-168`);
     /// an existing row is merged by [`Row::merge`].
@@ -271,14 +283,13 @@ impl Memtable {
         let result = match end {
             // `BTreeMap::range` panics on an inverted range; such a slice is
             // simply empty.
-            Some(end) if end <= start => encode_partition(out, key, partition.deletion, []),
+            Some(end) if end <= start => encode_partition::<&Row>(out, key, partition.deletion, []),
             _ => {
                 let upper = end.map_or(Bound::Unbounded, Bound::Excluded);
                 let rows = partition
                     .rows
-                    .range::<[u8], _>((Bound::Included(start), upper))
-                    .map(|(c, r)| (&**c, r));
-                encode_partition(out, key, partition.deletion, rows)
+                    .range::<[u8], _>((Bound::Included(start), upper));
+                encode_partition(out, key, partition.deletion, partition.visible(rows))
             }
         };
         if result.is_err() {
@@ -359,7 +370,11 @@ impl FlushIter {
     ///
     /// # Errors
     /// [`MemtableError::Poisoned`] or [`MemtableError::TooLarge`].
-    pub fn next_batch(&mut self, out: &mut Vec<u8>, max_bytes: usize) -> Result<usize, MemtableError> {
+    pub fn next_batch(
+        &mut self,
+        out: &mut Vec<u8>,
+        max_bytes: usize,
+    ) -> Result<usize, MemtableError> {
         let start_len = out.len();
         let mut count = 0;
         while self.shard < self.memtable.shards.len() {
@@ -368,9 +383,7 @@ impl FlushIter {
                 .after
                 .as_deref()
                 .map_or(Bound::Unbounded, Bound::Excluded);
-            let mut range = shard
-                .partitions
-                .range::<[u8], _>((lower, Bound::Unbounded));
+            let mut range = shard.partitions.range::<[u8], _>((lower, Bound::Unbounded));
             loop {
                 let Some((key, p)) = range.next() else {
                     drop(range);
@@ -380,8 +393,7 @@ impl FlushIter {
                     break;
                 };
                 let mark = out.len();
-                let rows = p.rows.iter().map(|(c, r)| (&**c, r));
-                if let Err(e) = encode_partition(out, key, p.deletion, rows) {
+                if let Err(e) = encode_partition(out, key, p.deletion, p.visible(p.rows.iter())) {
                     out.truncate(mark);
                     return Err(e.into());
                 }

@@ -22,6 +22,7 @@
 //! The rules are copied, not reinterpreted: where the Java is asymmetric or
 //! surprising, so is this code, and the comment says why.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::mem::size_of;
 
@@ -392,6 +393,54 @@ impl Row {
     }
 }
 
+impl Row {
+    /// The row as a read or flush sees it under the partition deletion
+    /// `active`, or `None` if nothing of it remains.
+    ///
+    /// Java's memtable stores rows unfiltered by the partition deletion and
+    /// filters them on every read and flush: memtable partitions report
+    /// `canHaveShadowedData`, so `AbstractBTreePartition.merge`
+    /// (`partitions/AbstractBTreePartition.java:199-208`) builds a
+    /// `RowAndDeletionMergeIterator` that calls
+    /// `row.filter(selection, partitionDeletion, false, metadata)`
+    /// (`rows/RowAndDeletionMergeIterator.java:180-184`). This is that
+    /// filter (`rows/BTreeRow.java:343-395`) with a select-all column filter
+    /// and no dropped columns:
+    ///
+    /// * it acts only if `active` is not live and the row's own deletion does
+    ///   not supersede it (`BTreeRow.java:349`);
+    /// * then the liveness is cleared if `active` covers its timestamp, the
+    ///   row deletion is dropped (`setActiveDeletionToRow` is false), and the
+    ///   cells `active` deletes are dropped (`BTreeRow.java:356-389`);
+    /// * a row left with no liveness, no deletion and no cells disappears
+    ///   (`BTreeRow.java:536-537`).
+    #[must_use]
+    pub fn visible_under(&self, active: DeletionTime) -> Option<Cow<'_, Row>> {
+        if active.is_live() || self.deletion.time.supersedes(active) {
+            return Some(Cow::Borrowed(self));
+        }
+        let liveness = if active.deletes_liveness(self.liveness) {
+            LivenessInfo::EMPTY
+        } else {
+            self.liveness
+        };
+        let cells: Vec<Cell> = self
+            .cells
+            .iter()
+            .filter(|c| !active.deletes_cell(c))
+            .cloned()
+            .collect();
+        if liveness.timestamp == NO_TIMESTAMP && cells.is_empty() {
+            return None;
+        }
+        Some(Cow::Owned(Row {
+            liveness,
+            deletion: RowDeletion::LIVE,
+            cells,
+        }))
+    }
+}
+
 /// Sorted merge of two cell lists, each strictly increasing by column.
 fn merge_cells(existing: Vec<Cell>, update: Vec<Cell>) -> Vec<Cell> {
     if update.is_empty() {
@@ -488,21 +537,39 @@ mod tests {
         assert!(!Cell::existing_wins(&live(0, 5, b"zz"), &t));
         assert!(!Cell::existing_wins(&expiring(0, 5, 3, 99, b"zz"), &t));
         // An expiring cell beats a live one regardless of value (CASSANDRA-14592).
-        assert!(Cell::existing_wins(&expiring(0, 5, 3, 1, b""), &live(0, 5, b"zz")));
+        assert!(Cell::existing_wins(
+            &expiring(0, 5, 3, 1, b""),
+            &live(0, 5, b"zz")
+        ));
     }
 
     #[test]
     fn same_timestamp_expiring_ties() {
         // Later expiry wins; at equal expiry the lower TTL wins; then the value.
-        assert!(Cell::existing_wins(&expiring(0, 5, 9, 20, b"a"), &expiring(0, 5, 1, 19, b"z")));
-        assert!(Cell::existing_wins(&expiring(0, 5, 1, 20, b"a"), &expiring(0, 5, 9, 20, b"z")));
-        assert!(!Cell::existing_wins(&expiring(0, 5, 3, 20, b"a"), &expiring(0, 5, 3, 20, b"b")));
+        assert!(Cell::existing_wins(
+            &expiring(0, 5, 9, 20, b"a"),
+            &expiring(0, 5, 1, 19, b"z")
+        ));
+        assert!(Cell::existing_wins(
+            &expiring(0, 5, 1, 20, b"a"),
+            &expiring(0, 5, 9, 20, b"z")
+        ));
+        assert!(!Cell::existing_wins(
+            &expiring(0, 5, 3, 20, b"a"),
+            &expiring(0, 5, 3, 20, b"b")
+        ));
     }
 
     #[test]
     fn same_timestamp_live_cells_compare_values_unsigned() {
-        assert!(Cell::existing_wins(&live(0, 1, &[0x80]), &live(0, 1, &[0x7f])));
-        assert!(!Cell::existing_wins(&live(0, 1, &[0x01]), &live(0, 1, &[0x01, 0x00])));
+        assert!(Cell::existing_wins(
+            &live(0, 1, &[0x80]),
+            &live(0, 1, &[0x7f])
+        ));
+        assert!(!Cell::existing_wins(
+            &live(0, 1, &[0x01]),
+            &live(0, 1, &[0x01, 0x00])
+        ));
     }
 
     #[test]
@@ -520,15 +587,21 @@ mod tests {
         // filters only the update side and keeps the stale cell, as
         // BTreeRow.merge does.
         let mut existing = row(deleted_at(10), vec![live(0, 5, b"stale")]);
-        existing.merge(row(RowDeletion::LIVE, vec![live(1, 7, b"x"), live(2, 11, b"y")]));
-        assert_eq!(existing.cells, vec![live(0, 5, b"stale"), live(2, 11, b"y")]);
+        existing.merge(row(
+            RowDeletion::LIVE,
+            vec![live(1, 7, b"x"), live(2, 11, b"y")],
+        ));
+        assert_eq!(
+            existing.cells,
+            vec![live(0, 5, b"stale"), live(2, 11, b"y")]
+        );
     }
 
     #[test]
     fn equal_deletions_go_to_the_update_and_filter_existing() {
         let mut existing = row(deleted_at(10), vec![live(0, 5, b"stale")]);
         existing.merge(row(deleted_at(10), vec![]));
-        assert!(existing.cells.is_empty());
+        assert_eq!(existing.cells, Vec::<Cell>::new());
     }
 
     #[test]
