@@ -106,7 +106,7 @@ def start_stress(spec, duration, out_path):
     prof = os.path.join(HERE, "profiles", spec["profile"] + ".yaml")
     rate = int(spec.get("rate", DEFAULT_RATE))
     threads = max(16, rate // 10)
-    cmd = [STRESS, "user", "profile=" + prof, spec["ops"], "cl=QUORUM", "duration=%ds" % duration,
+    cmd = [STRESS, "user", "profile=" + prof, spec["ops"], "cl=QUORUM", "no-warmup", "duration=%ds" % duration,
            "-rate", "threads=%d" % threads, "fixed=%d/s" % rate, "-errors", "ignore", "-log", "interval=5",
            "-node", "127.0.0.1,127.0.0.2,127.0.0.3"]
     env = dict(os.environ, CASSANDRA_HOME=HOME, JVM_OPTS="-Xmx256M -Xms64M")
