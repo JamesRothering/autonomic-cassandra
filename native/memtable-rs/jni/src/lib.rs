@@ -43,3 +43,4 @@ pub mod exports;
 #[cfg(feature = "ffm-probe")]
 mod ffm_probe;
 mod handles;
+mod store;

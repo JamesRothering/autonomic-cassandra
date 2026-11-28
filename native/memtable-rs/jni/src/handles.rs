@@ -21,7 +21,7 @@
 //! use-after-free. Objects are reference counted (`Arc`):
 //!
 //! * the memtable table holds one reference until Java calls `release`;
-//! * each flush iterator holds another, through its [`FlushIter`];
+//! * each flush iterator holds another, through its [`StoreFlush`];
 //!
 //! so a memtable's memory is freed only when Java has released it *and*
 //! closed every iterator over it, in either order.
@@ -30,18 +30,17 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use memtable_core::{FlushIter, Memtable};
-
 use crate::error::BoundaryError;
+use crate::store::{Store, StoreFlush};
 
 /// Handle tables. Shared by all JNI threads: `Sync` because every field is
 /// an atomic or behind a lock.
 pub struct Handles {
     next: AtomicI64,
-    memtables: RwLock<HashMap<i64, Arc<Memtable>>>,
+    memtables: RwLock<HashMap<i64, Store>>,
     /// Each iterator has its own mutex, so the table lock is held only for
     /// the lookup, not while a batch is encoded.
-    iterators: Mutex<HashMap<i64, Arc<Mutex<FlushIter>>>>,
+    iterators: Mutex<HashMap<i64, Arc<Mutex<StoreFlush>>>>,
 }
 
 pub static HANDLES: std::sync::LazyLock<Handles> = std::sync::LazyLock::new(|| Handles {
@@ -60,12 +59,12 @@ impl Handles {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn insert_memtable(&self, m: Memtable) -> i64 {
+    pub fn insert_memtable(&self, m: Store) -> i64 {
         let h = self.next_handle();
         self.memtables
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(h, Arc::new(m));
+            .insert(h, m);
         h
     }
 
@@ -74,7 +73,7 @@ impl Handles {
     pub fn with_memtable<R>(
         &self,
         h: i64,
-        f: impl FnOnce(&Arc<Memtable>) -> Result<R, BoundaryError>,
+        f: impl FnOnce(&Store) -> Result<R, BoundaryError>,
     ) -> Result<R, BoundaryError> {
         let table = self
             .memtables
@@ -96,7 +95,7 @@ impl Handles {
         removed.map(drop).ok_or(BoundaryError::BadHandle(h))
     }
 
-    pub fn insert_iterator(&self, it: FlushIter) -> i64 {
+    pub fn insert_iterator(&self, it: StoreFlush) -> i64 {
         let h = self.next_handle();
         self.iterators
             .lock()
@@ -105,7 +104,7 @@ impl Handles {
         h
     }
 
-    pub fn iterator(&self, h: i64) -> Result<Arc<Mutex<FlushIter>>, BoundaryError> {
+    pub fn iterator(&self, h: i64) -> Result<Arc<Mutex<StoreFlush>>, BoundaryError> {
         self.iterators
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -142,19 +141,18 @@ impl Handles {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{KIND_ARENA, KIND_BOXED};
 
-    fn frozen_memtable() -> Memtable {
-        let m = Memtable::new(vec![]).unwrap();
-        m.freeze().unwrap();
-        m
+    fn memtable(kind: u32) -> Store {
+        Store::new(kind, vec![]).unwrap().unwrap()
     }
 
     /// These tests use the process-wide table, so they check their own
     /// handles rather than global counts (tests run in parallel).
     #[test]
     fn handles_are_unique_and_stale_handles_fail() {
-        let a = HANDLES.insert_memtable(Memtable::new(vec![]).unwrap());
-        let b = HANDLES.insert_memtable(Memtable::new(vec![]).unwrap());
+        let a = HANDLES.insert_memtable(memtable(KIND_ARENA));
+        let b = HANDLES.insert_memtable(memtable(KIND_BOXED));
         assert_ne!(a, b);
         HANDLES.release_memtable(a).unwrap();
         assert!(matches!(HANDLES.release_memtable(a), Err(BoundaryError::BadHandle(h)) if h == a));
@@ -165,34 +163,59 @@ mod tests {
         assert!(HANDLES.close_iterator(0).is_err());
     }
 
+    /// Whether the memtable behind `h` is still allocated, as a closure over
+    /// a weak reference.
+    fn liveness_probe(h: i64) -> Box<dyn Fn() -> bool> {
+        HANDLES
+            .with_memtable(h, |m| {
+                Ok(match m {
+                    Store::Arena(a) => {
+                        let w = Arc::downgrade(a);
+                        Box::new(move || w.upgrade().is_some()) as Box<dyn Fn() -> bool>
+                    }
+                    Store::Boxed(b) => {
+                        let w = Arc::downgrade(b);
+                        Box::new(move || w.upgrade().is_some())
+                    }
+                })
+            })
+            .unwrap()
+    }
+
     #[test]
     fn iterator_keeps_memtable_alive_after_release() {
-        let h = HANDLES.insert_memtable(frozen_memtable());
-        let weak = HANDLES.with_memtable(h, |m| Ok(Arc::downgrade(m))).unwrap();
-        let it = HANDLES.with_memtable(h, |m| Ok(m.flush_iter()?)).unwrap();
-        let ih = HANDLES.insert_iterator(it);
-        HANDLES.release_memtable(h).unwrap();
-        assert!(weak.upgrade().is_some(), "freed while an iterator was open");
-        let mut out = Vec::new();
-        let n = HANDLES
-            .iterator(ih)
-            .unwrap()
-            .lock()
-            .unwrap()
-            .next_batch(&mut out, 1024)
-            .unwrap();
-        assert_eq!(n, 0);
-        HANDLES.close_iterator(ih).unwrap();
-        assert!(
-            weak.upgrade().is_none(),
-            "not freed after release and close"
-        );
+        for kind in [KIND_ARENA, KIND_BOXED] {
+            let m = memtable(kind);
+            m.freeze().unwrap();
+            let h = HANDLES.insert_memtable(m);
+            let alive = liveness_probe(h);
+            let it = HANDLES.with_memtable(h, |m| Ok(m.flush_iter()?)).unwrap();
+            let ih = HANDLES.insert_iterator(it);
+            HANDLES.release_memtable(h).unwrap();
+            assert!(alive(), "freed while an iterator was open");
+            let mut out = Vec::new();
+            let n = HANDLES
+                .iterator(ih)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .next_batch(&mut out, 1024)
+                .unwrap();
+            assert_eq!(n, 0);
+            HANDLES.close_iterator(ih).unwrap();
+            assert!(!alive(), "not freed after release and close");
+        }
+    }
+
+    #[test]
+    fn unknown_kind_is_rejected() {
+        assert!(Store::new(2, vec![]).is_none());
     }
 
     #[test]
     fn concurrent_lookups_and_releases() {
         let handles: Vec<i64> = (0..8)
-            .map(|_| HANDLES.insert_memtable(Memtable::new(vec![]).unwrap()))
+            .map(|i| HANDLES.insert_memtable(memtable(i % 2)))
             .collect();
         std::thread::scope(|s| {
             for &h in &handles {

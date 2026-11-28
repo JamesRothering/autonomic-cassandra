@@ -64,11 +64,23 @@ public class NativeMemtableFuzzTest
     }
 
     @Test
-    public void randomAndCorruptedInputNeverCrashes()
+    public void randomAndCorruptedInputNeverCrashesArena()
+    {
+        randomAndCorruptedInputNeverCrashes(RustMemtable.Kind.ARENA);
+    }
+
+    @Test
+    public void randomAndCorruptedInputNeverCrashesBoxed()
+    {
+        randomAndCorruptedInputNeverCrashes(RustMemtable.Kind.BOXED);
+    }
+
+    private static void randomAndCorruptedInputNeverCrashes(RustMemtable.Kind kind)
     {
         Random random = new Random(SpikeProperties.getLong("rust_memtable.seed", System.nanoTime()));
         long baseline = NativeMemtable.liveObjects();
-        long memtable = NativeMemtable.create(new byte[]{ 0, 0, 0, 1, 0, 0, 0, 1, (byte) 0x80 }, 9);
+        // kind, one boundary of one byte
+        long memtable = NativeMemtable.create(new byte[]{ 0, 0, 0, (byte) kind.code, 0, 0, 0, 1, 0, 0, 0, 1, (byte) 0x80 }, 13);
         long accepted = 0, rejected = 0;
         byte[] out = new byte[64];
         for (int i = 0; i < ITERATIONS; i++)
@@ -133,6 +145,6 @@ public class NativeMemtableFuzzTest
         NativeMemtable.release(memtable);
         assertEquals("native objects leaked", baseline, NativeMemtable.liveObjects());
         assertTrue("nothing was accepted; the generator is broken", accepted > 0 && bytes > 0);
-        System.out.println("NativeMemtableFuzzTest: " + ITERATIONS + " calls, " + accepted + " accepted, " + rejected + " rejected, " + bytes + " bytes flushed");
+        System.out.println("NativeMemtableFuzzTest " + kind + ": " + ITERATIONS + " calls, " + accepted + " accepted, " + rejected + " rejected, " + bytes + " bytes flushed");
     }
 }

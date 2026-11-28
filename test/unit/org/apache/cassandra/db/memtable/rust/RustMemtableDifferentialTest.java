@@ -76,6 +76,8 @@ public class RustMemtableDifferentialTest extends CQLTester
     private static final int SEQUENCES = SpikeProperties.getInt("rust_memtable.sequences", 40);
     private static final int OPS_PER_SEQUENCE = SpikeProperties.getInt("rust_memtable.ops", 400);
     private static final long BASE_SEED = SpikeProperties.getLong("rust_memtable.seed", System.nanoTime());
+    /** The Rust implementation under test: arena (default) or boxed (spike 1's). */
+    private static final RustMemtable.Kind RUST_KIND = RustMemtable.Kind.valueOf(SpikeProperties.get("rust_memtable.kind", "arena").toUpperCase());
     private static final String[] CK2 = { "", "a", "ab", "b" };
     private static final byte[][] VALUES = { {}, { 0 }, { 1 }, { 1, 0 }, { (byte) 0x80 }, { (byte) 0xff, 1 } };
     private static final long[] LDTS = { 10, 20, 30 };
@@ -110,7 +112,7 @@ public class RustMemtableDifferentialTest extends CQLTester
     {
         List<byte[]> boundaries = RustMemtable.tokenBoundaries(metadata.partitioner, 4);
         assertEquals("expected a Murmur3 table with 4 shards", 3, boundaries.size());
-        return RustMemtable.create(boundaries);
+        return RustMemtable.create(RUST_KIND, boundaries);
     }
 
     @Test
@@ -172,8 +174,8 @@ public class RustMemtableDifferentialTest extends CQLTester
             }
         }
         assertEquals("native objects leaked", baseline, NativeMemtable.liveObjects());
-        logger.info(String.format("RustMemtableDifferentialTest[%s] seed %d: %d sequences, %d puts, %d reads (%d hits), %d flushes, all identical",
-                                  memtableConfig, BASE_SEED, SEQUENCES, stats.puts, stats.reads, stats.hits, stats.flushes));
+        logger.info(String.format("RustMemtableDifferentialTest[%s vs Rust %s] seed %d: %d sequences, %d puts, %d reads (%d hits), %d flushes, all identical",
+                                  memtableConfig, RUST_KIND, BASE_SEED, SEQUENCES, stats.puts, stats.reads, stats.hits, stats.flushes));
     }
 
     private RustMemtable flushAndCompare(long seed, List<String> log, JavaMemtableHarness java, RustMemtable rust, TableMetadata metadata) throws Exception

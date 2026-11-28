@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use memtable_core::model::{EXPIRED_LIVENESS_TTL, NO_DELETION_TIME, NO_TTL};
 use memtable_core::{
-    Cell, DeletionTime, LivenessInfo, Memtable, PartitionUpdate, Row, RowDeletion,
+    Cell, DeletionTime, LivenessInfo, Memtable, PartitionUpdate, Row, RowDeletion, boxed,
     decode_partition, decode_partitions, encode_update,
 };
 use proptest::prelude::*;
@@ -236,6 +236,9 @@ proptest! {
         prop_assert_eq!(total, m.owned_bytes());
         prop_assert_eq!(m.recount_owned_bytes().unwrap(), m.owned_bytes());
         prop_assert_eq!(m.partition_count(), keys.len());
+        let space = m.space().unwrap();
+        prop_assert!(space.live <= space.used && space.used <= space.allocated, "{:?}", space);
+        prop_assert_eq!(i64::try_from(space.allocated).unwrap(), m.owned_bytes());
 
         let mut reads = Vec::new();
         for k in &keys {
@@ -270,6 +273,103 @@ proptest! {
             .collect();
         prop_assert_eq!(sliced.rows, expected);
         prop_assert_eq!(sliced.deletion, full.deletion);
+    }
+}
+
+/// Every byte a flush iterator returns, in batches of at most `batch` bytes.
+fn flush_bytes_boxed(m: &Arc<boxed::Memtable>, batch: usize) -> Vec<u8> {
+    m.freeze().unwrap();
+    let mut it = m.flush_iter().unwrap();
+    let mut all = Vec::new();
+    let mut limit = batch;
+    loop {
+        let mut out = Vec::new();
+        let n = it.next_batch(&mut out, limit).unwrap();
+        if n == 0 && !out.is_empty() {
+            limit = out.len();
+            continue;
+        }
+        if n == 0 {
+            return all;
+        }
+        all.extend(out);
+        limit = batch;
+    }
+}
+
+fn flush_bytes(m: &Arc<Memtable>, batch: usize) -> Vec<u8> {
+    m.freeze().unwrap();
+    let mut it = m.flush_iter().unwrap();
+    let mut all = Vec::new();
+    let mut limit = batch;
+    loop {
+        let mut out = Vec::new();
+        let n = it.next_batch(&mut out, limit).unwrap();
+        if n == 0 && !out.is_empty() {
+            limit = out.len();
+            continue;
+        }
+        if n == 0 {
+            return all;
+        }
+        all.extend(out);
+        limit = batch;
+    }
+}
+
+fn wide_update() -> impl Strategy<Value = PartitionUpdate> {
+    // Up to 40 rows, so partitions cross the boxed memtable's switch from a
+    // sorted Vec to a BTreeMap (16 rows) and fill several B-tree nodes.
+    (
+        key(),
+        deletion(),
+        prop::collection::btree_map(
+            prop::collection::vec(0u8..8, 1..3).prop_map(Vec::into_boxed_slice),
+            row(),
+            0..40,
+        ),
+    )
+        .prop_map(|(key, deletion, rows)| PartitionUpdate {
+            key,
+            deletion,
+            rows: rows.into_iter().collect(),
+        })
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// The arena memtable and the boxed one (spike 1, checked byte for byte
+    /// against Cassandra) return identical bytes for every whole read, slice
+    /// read and flush of the same updates.
+    #[test]
+    fn arena_and_boxed_agree(
+        updates in prop::collection::vec(prop_oneof![3 => update(), 1 => wide_update()], 1..60),
+        slices in prop::collection::vec((key(), key(), proptest::option::of(key())), 0..8),
+        batch in 1usize..2000,
+    ) {
+        let arena = Arc::new(Memtable::new(boundaries()).unwrap());
+        let boxed = Arc::new(boxed::Memtable::new(boundaries()).unwrap());
+        let mut keys = BTreeSet::new();
+        for u in updates {
+            keys.insert(u.key.clone());
+            arena.apply(u.clone()).unwrap();
+            boxed.apply(u).unwrap();
+        }
+        prop_assert_eq!(arena.partition_count(), boxed.partition_count());
+        for k in &keys {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            prop_assert!(arena.read(k, &[], None, &mut a).unwrap());
+            prop_assert!(boxed.read(k, &[], None, &mut b).unwrap());
+            prop_assert_eq!(a, b);
+        }
+        for (k, start, end) in &slices {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let found = arena.read(k, start, end.as_deref(), &mut a).unwrap();
+            prop_assert_eq!(found, boxed.read(k, start, end.as_deref(), &mut b).unwrap());
+            prop_assert_eq!(a, b);
+        }
+        prop_assert_eq!(flush_bytes(&arena, batch), flush_bytes_boxed(&boxed, batch));
     }
 }
 

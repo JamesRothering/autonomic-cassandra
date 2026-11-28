@@ -285,21 +285,79 @@ fn put_deletion(out: &mut Vec<u8>, d: DeletionTime) {
     out.extend_from_slice(&d.local_deletion_time.to_be_bytes());
 }
 
-fn put_row(out: &mut Vec<u8>, clustering: &[u8], row: &Row) -> Result<(), TooLarge> {
+/// Appends a row's header: everything but its cells, which must follow as
+/// exactly `cell_count` [`put_cell`]s in increasing column order.
+///
+/// # Errors
+/// Returns [`TooLarge`] if a length exceeds `u32::MAX`.
+pub fn put_row_header(
+    out: &mut Vec<u8>,
+    clustering: &[u8],
+    liveness: LivenessInfo,
+    deletion: RowDeletion,
+    cell_count: usize,
+) -> Result<(), TooLarge> {
     put_bytes(out, clustering)?;
-    out.extend_from_slice(&row.liveness.timestamp.to_be_bytes());
-    out.extend_from_slice(&row.liveness.ttl.to_be_bytes());
-    out.extend_from_slice(&row.liveness.local_expiration_time.to_be_bytes());
-    put_deletion(out, row.deletion.time);
-    out.push(u8::from(row.deletion.shadowable));
-    put_len(out, row.cells.len())?;
+    out.extend_from_slice(&liveness.timestamp.to_be_bytes());
+    out.extend_from_slice(&liveness.ttl.to_be_bytes());
+    out.extend_from_slice(&liveness.local_expiration_time.to_be_bytes());
+    put_deletion(out, deletion.time);
+    out.push(u8::from(deletion.shadowable));
+    put_len(out, cell_count)
+}
+
+/// Appends one cell of a row begun by [`put_row_header`].
+///
+/// # Errors
+/// Returns [`TooLarge`] if the value is longer than `u32::MAX`.
+pub fn put_cell<V>(out: &mut Vec<u8>, cell: &Cell<V>, value: &[u8]) -> Result<(), TooLarge> {
+    out.extend_from_slice(&cell.column.to_be_bytes());
+    out.extend_from_slice(&cell.timestamp.to_be_bytes());
+    out.extend_from_slice(&cell.ttl.to_be_bytes());
+    out.extend_from_slice(&cell.local_deletion_time.to_be_bytes());
+    put_bytes(out, value)
+}
+
+fn put_row(out: &mut Vec<u8>, clustering: &[u8], row: &Row) -> Result<(), TooLarge> {
+    put_row_header(out, clustering, row.liveness, row.deletion, row.cells.len())?;
     for c in &row.cells {
-        out.extend_from_slice(&c.column.to_be_bytes());
-        out.extend_from_slice(&c.timestamp.to_be_bytes());
-        out.extend_from_slice(&c.ttl.to_be_bytes());
-        out.extend_from_slice(&c.local_deletion_time.to_be_bytes());
-        put_bytes(out, &c.value)?;
+        put_cell(out, c, &c.value)?;
     }
+    Ok(())
+}
+
+/// Where [`begin_partition`] left the row-count placeholder.
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub struct PartitionStart {
+    count_at: usize,
+}
+
+/// Appends a partition record's key and deletion and a placeholder for its
+/// row count; rows follow ([`put_row_header`], [`put_cell`]) and
+/// [`end_partition`] writes the count.
+///
+/// # Errors
+/// Returns [`TooLarge`] if the key is longer than `u32::MAX`.
+pub fn begin_partition(
+    out: &mut Vec<u8>,
+    key: &[u8],
+    deletion: DeletionTime,
+) -> Result<PartitionStart, TooLarge> {
+    put_bytes(out, key)?;
+    put_deletion(out, deletion);
+    let count_at = out.len();
+    out.extend_from_slice(&[0; 4]);
+    Ok(PartitionStart { count_at })
+}
+
+/// Completes a record begun by [`begin_partition`] with `rows` rows.
+///
+/// # Errors
+/// Returns [`TooLarge`] if `rows` exceeds `u32::MAX`.
+pub fn end_partition(out: &mut [u8], start: PartitionStart, rows: usize) -> Result<(), TooLarge> {
+    let count = u32::try_from(rows).map_err(|_| TooLarge)?.to_be_bytes();
+    out[start.count_at..start.count_at + 4].copy_from_slice(&count);
     Ok(())
 }
 
@@ -315,18 +373,13 @@ pub fn encode_partition<'a, R: Borrow<Row>>(
     deletion: DeletionTime,
     rows: impl IntoIterator<Item = (&'a [u8], R)>,
 ) -> Result<(), TooLarge> {
-    put_bytes(out, key)?;
-    put_deletion(out, deletion);
-    let count_at = out.len();
-    out.extend_from_slice(&[0; 4]);
+    let start = begin_partition(out, key, deletion)?;
     let mut count = 0usize;
     for (clustering, row) in rows {
         put_row(out, clustering, row.borrow())?;
         count += 1;
     }
-    let count = u32::try_from(count).map_err(|_| TooLarge)?.to_be_bytes();
-    out[count_at..count_at + 4].copy_from_slice(&count);
-    Ok(())
+    end_partition(out, start, count)
 }
 
 /// Encodes a [`PartitionUpdate`] (used by tests and fuzzing).

@@ -51,16 +51,39 @@ public final class RustMemtable implements AutoCloseable
 
     private final long handle;
 
+    /** The Rust implementation behind a memtable ({@code native/memtable-rs/jni/src/store.rs}). */
+    public enum Kind
+    {
+        /** Each shard's data in a few large chunks, so discarding it is cheap (the default). */
+        ARENA(0),
+        /** Spike 1's implementation, one heap allocation per key, row and value; kept for comparison. */
+        BOXED(1);
+
+        final int code;
+
+        Kind(int code)
+        {
+            this.code = code;
+        }
+    }
+
     private RustMemtable(long handle)
     {
         this.handle = handle;
     }
 
-    /** Creates a memtable sharded at the given byte-comparable boundaries, which must be strictly increasing. */
+    /** Creates an arena memtable sharded at the given byte-comparable boundaries, which must be strictly increasing. */
     public static RustMemtable create(List<byte[]> boundaries)
+    {
+        return create(Kind.ARENA, boundaries);
+    }
+
+    /** Creates a memtable of the given kind sharded at the given byte-comparable boundaries. */
+    public static RustMemtable create(Kind kind, List<byte[]> boundaries)
     {
         try (DataOutputBuffer out = new DataOutputBuffer())
         {
+            out.writeInt(kind.code);
             out.writeInt(boundaries.size());
             for (byte[] b : boundaries)
             {

@@ -46,8 +46,11 @@ final class NativeMemtable
     {
     }
 
-    /** @param boundaries {@code count:u32 (len:u32 bytes)*}, strictly increasing byte-comparable keys */
-    static native long create(byte[] boundaries, int len);
+    /**
+     * @param request {@code kind:u32 count:u32 (len:u32 bytes)*}: the implementation ({@link RustMemtable.Kind}),
+     *                then strictly increasing byte-comparable shard boundaries
+     */
+    static native long create(byte[] request, int len);
 
     /** Drops Java's reference; memory is freed once every flush iterator over the memtable is closed too. */
     static native void release(long handle);

@@ -91,6 +91,8 @@ public final class RustMemtableBench
     private static final long FLUSH_EVERY = SpikeProperties.getLong("bench.flush_every", 1_000_000);
     /** Rust shards: 1024 by default, where the Rust-only benchmark showed shard-lock contention to vanish at 4 threads. */
     private static final int RUST_SHARDS = SpikeProperties.getInt("bench.rust_shards", 1024);
+    /** Rust implementation: arena (default) or boxed (spike 1's). */
+    private static final RustMemtable.Kind RUST_KIND = RustMemtable.Kind.valueOf(SpikeProperties.get("bench.rust_kind", "arena").toUpperCase());
 
     private static TableMetadata metadata;
     private static ColumnFamilyStore cfs;
@@ -142,8 +144,8 @@ public final class RustMemtableBench
                                                  .memtable(MemtableParams.get(memtable)));
         cfs = Keyspace.open("bench").getColumnFamilyStore("t");
         metadata = cfs.metadata();
-        System.out.println(String.format("setup: jdk=%s gc=%s heap=%dMiB memtable=%s allocation=%s flush_every=%d rust_shards=%d partitioner=%s",
-                          Runtime.version().toString(), gcNames(), heapMiB, memtable, allocation, FLUSH_EVERY, RUST_SHARDS,
+        System.out.println(String.format("setup: jdk=%s gc=%s heap=%dMiB memtable=%s allocation=%s flush_every=%d rust_shards=%d rust_kind=%s partitioner=%s",
+                          Runtime.version().toString(), gcNames(), heapMiB, memtable, allocation, FLUSH_EVERY, RUST_SHARDS, RUST_KIND,
                           metadata.partitioner.getClass().getSimpleName()));
     }
 
@@ -214,7 +216,7 @@ public final class RustMemtableBench
             print(report, "encode update to record (Java)", System.nanoTime() - t0, n);
             // 3. Rust put of fresh rows, including encoding
             List<byte[]> boundaries = RustMemtable.tokenBoundaries(metadata.partitioner, RUST_SHARDS);
-            try (RustMemtable rust = RustMemtable.create(boundaries))
+            try (RustMemtable rust = RustMemtable.create(RUST_KIND, boundaries))
             {
                 t0 = System.nanoTime();
                 for (PartitionUpdate u : updates)
@@ -341,7 +343,7 @@ public final class RustMemtableBench
     static final class RustTarget implements Target
     {
         private static final List<byte[]> BOUNDARIES = RustMemtable.tokenBoundaries(metadata.partitioner, RUST_SHARDS);
-        private volatile RustMemtable current = RustMemtable.create(BOUNDARIES);
+        private volatile RustMemtable current = RustMemtable.create(RUST_KIND, BOUNDARIES);
 
         public void put(PartitionUpdate update)
         {
@@ -365,7 +367,7 @@ public final class RustMemtableBench
         public Callable<Long> switchOut()
         {
             RustMemtable old = current;
-            current = RustMemtable.create(BOUNDARIES);
+            current = RustMemtable.create(RUST_KIND, BOUNDARIES);
             old.freeze();
             return () -> flush(old);
         }

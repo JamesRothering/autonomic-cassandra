@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use memtable_core::model::{NO_DELETION_TIME, NO_TTL};
 use memtable_core::{
-    Cell, DeletionTime, LivenessInfo, Memtable, PartitionUpdate, Row, RowDeletion,
+    Cell, DeletionTime, LivenessInfo, Memtable, PartitionUpdate, Row, RowDeletion, boxed,
 };
 
 struct Counting;
@@ -66,6 +66,16 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 fn update(key: u32, clustering: u32, cells: u32, value_len: usize) -> PartitionUpdate {
+    update_at(key, clustering, cells, value_len, 1)
+}
+
+fn update_at(
+    key: u32,
+    clustering: u32,
+    cells: u32,
+    value_len: usize,
+    timestamp: i64,
+) -> PartitionUpdate {
     PartitionUpdate {
         key: [&[0x40][..], &key.to_be_bytes(), &[0u8; 11][..]]
             .concat()
@@ -79,7 +89,7 @@ fn update(key: u32, clustering: u32, cells: u32, value_len: usize) -> PartitionU
                 cells: (0..cells)
                     .map(|column| Cell {
                         column,
-                        timestamp: 1,
+                        timestamp,
                         ttl: NO_TTL,
                         local_deletion_time: NO_DELETION_TIME,
                         value: vec![7; value_len].into(),
@@ -90,24 +100,61 @@ fn update(key: u32, clustering: u32, cells: u32, value_len: usize) -> PartitionU
     }
 }
 
-/// Returns (estimated, measured) bytes for the updates.
 type Workload = Box<dyn Fn() -> Box<dyn Iterator<Item = PartitionUpdate>>>;
 
-fn measure(updates: impl Iterator<Item = PartitionUpdate>) -> (i64, i64) {
-    let boundaries = (1..16u8).map(|i| vec![0x40, i * 16].into()).collect();
-    let m = Memtable::new(boundaries).expect("sorted boundaries");
-    let before = LIVE.load(Ordering::Relaxed);
+fn boundaries() -> Vec<Box<[u8]>> {
+    (1..16u8).map(|i| vec![0x40, i * 16].into()).collect()
+}
+
+fn live_bytes() -> i64 {
+    i64::try_from(LIVE.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
+}
+
+/// One measurement: what the memtable reports and what it really holds.
+struct Sample {
+    estimated: i64,
+    measured: i64,
+    /// Arena only: bytes written into the chunks, and of those still reachable.
+    used: usize,
+    live: usize,
+    chunks: usize,
+}
+
+fn measure_arena(updates: impl Iterator<Item = PartitionUpdate>) -> Sample {
+    let m = Memtable::new(boundaries()).expect("sorted boundaries");
+    let before = live_bytes();
     for u in updates {
         m.apply(u).expect("not frozen");
     }
-    let measured = LIVE.load(Ordering::Relaxed) - before;
-    (m.owned_bytes(), i64::try_from(measured).unwrap_or(i64::MAX))
+    let measured = live_bytes() - before;
+    let space = m.space().expect("not poisoned");
+    Sample {
+        estimated: m.owned_bytes(),
+        measured,
+        used: space.used,
+        live: space.live,
+        chunks: space.chunks,
+    }
 }
 
-#[test]
-#[cfg_attr(miri, ignore = "allocation-heavy; covered natively")]
-fn owned_bytes_estimate_is_close_to_real_allocation() {
-    let cases: Vec<(&str, Workload)> = vec![
+fn measure_boxed(updates: impl Iterator<Item = PartitionUpdate>) -> Sample {
+    let m = boxed::Memtable::new(boundaries()).expect("sorted boundaries");
+    let before = live_bytes();
+    for u in updates {
+        m.apply(u).expect("not frozen");
+    }
+    let measured = live_bytes() - before;
+    Sample {
+        estimated: m.owned_bytes(),
+        measured,
+        used: 0,
+        live: 0,
+        chunks: 0,
+    }
+}
+
+fn cases() -> Vec<(&'static str, Workload)> {
+    vec![
         (
             "100k one-row partitions, 3x32B cells",
             Box::new(|| {
@@ -134,7 +181,7 @@ fn owned_bytes_estimate_is_close_to_real_allocation() {
             }),
         ),
         (
-            "overwrites: 1k rows written 100 times",
+            "same cells rewritten: 1k rows x 100",
             Box::new(|| {
                 Box::new(
                     (0..100_000u32)
@@ -142,14 +189,80 @@ fn owned_bytes_estimate_is_close_to_real_allocation() {
                 )
             }),
         ),
-    ];
+        (
+            "overwrites, newer wins: 1k rows x 100",
+            Box::new(|| {
+                Box::new((0..100_000u32).map(|i| {
+                    update_at(
+                        (i % 1000).wrapping_mul(2_654_435_761),
+                        0,
+                        3,
+                        32,
+                        i64::from(i),
+                    )
+                }))
+            }),
+        ),
+        (
+            "overwrites, value grows 32->48->64B: 1k x 100",
+            Box::new(|| {
+                Box::new((0..100_000u32).map(|i| {
+                    update_at(
+                        (i % 1000).wrapping_mul(2_654_435_761),
+                        0,
+                        3,
+                        32 + 16 * ((i / 1000) % 3) as usize,
+                        i64::from(i),
+                    )
+                }))
+            }),
+        ),
+        (
+            "overwrites, newer wins: 10k rows x 10",
+            Box::new(|| {
+                Box::new((0..100_000u32).map(|i| {
+                    update_at(
+                        (i % 10_000).wrapping_mul(2_654_435_761),
+                        0,
+                        3,
+                        32,
+                        i64::from(i),
+                    )
+                }))
+            }),
+        ),
+    ]
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "allocation-heavy; covered natively")]
+#[allow(clippy::cast_precision_loss)] // byte counts far below 2^52
+fn owned_bytes_estimate_is_close_to_real_allocation() {
     let mut worst = 0.0f64;
-    for (name, make) in &cases {
-        let (estimated, measured) = measure(make());
-        #[allow(clippy::cast_precision_loss)] // byte counts far below 2^52
-        let ratio = estimated as f64 / measured as f64;
-        println!("{name:42} estimated {estimated:>11} measured {measured:>11} ratio {ratio:.2}");
-        worst = worst.max((ratio - 1.0).abs());
+    for (name, make) in &cases() {
+        for (kind, m) in [
+            ("boxed", measure_boxed(make())),
+            ("arena", measure_arena(make())),
+        ] {
+            let ratio = m.estimated as f64 / m.measured as f64;
+            print!(
+                "{kind} {name:42} estimated {:>11} measured {:>11} ratio {ratio:.2}",
+                m.estimated, m.measured
+            );
+            if kind == "arena" {
+                println!(
+                    "  used {:>11} live {:>11} chunks {:>5}  waste {:.0}% of used, slack {:.0}% of allocated",
+                    m.used,
+                    m.live,
+                    m.chunks,
+                    100.0 * (m.used - m.live) as f64 / m.used as f64,
+                    100.0 * (m.estimated as f64 - m.used as f64) / m.estimated as f64
+                );
+            } else {
+                println!();
+            }
+            worst = worst.max((ratio - 1.0).abs());
+        }
     }
     assert!(
         worst < 0.25,

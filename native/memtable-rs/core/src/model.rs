@@ -89,7 +89,7 @@ impl DeletionTime {
     /// `DeletionTime.deletes(Cell)` (`DeletionTime.java:195-199`): guarded
     /// against `LIVE`, whose `markedForDeleteAt` equals `NO_TIMESTAMP`.
     #[must_use]
-    pub fn deletes_cell(self, cell: &Cell) -> bool {
+    pub fn deletes_cell<V>(self, cell: &Cell<V>) -> bool {
         self.marked_for_delete_at != i64::MIN && cell.timestamp <= self.marked_for_delete_at
     }
 
@@ -215,15 +215,21 @@ impl RowDeletion {
 /// The three kinds are told apart as in Java: a live cell has neither a TTL
 /// nor a local deletion time, an expiring cell has both, and a tombstone has a
 /// local deletion time and no TTL (`rows/CellLivenessInfo.java:37-49`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Cell {
+///
+/// `V` is how the value is held: owned bytes in decoded updates (the
+/// default), a reference into a memtable's arena in [`crate::arena`]. The
+/// rules below never look at the value except through the comparator passed
+/// to [`Cell::existing_wins_by`], so both representations share one copy of
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Cell<V = Box<[u8]>> {
     /// The column's position in the table's column order. Java assigns these
     /// so that comparing ids gives the same order as comparing the columns.
     pub column: u32,
     pub timestamp: i64,
     pub ttl: i32,
     pub local_deletion_time: i64,
-    pub value: Box<[u8]>,
+    pub value: V,
 }
 
 /// The outcome of the non-counter cell tie-break,
@@ -235,7 +241,7 @@ enum Resolution {
     Compare,
 }
 
-impl Cell {
+impl<V> Cell<V> {
     /// Whether Java could build this cell (`BufferCell` asserts that an
     /// expiring cell has a deletion time, `rows/BufferCell.java`).
     #[must_use]
@@ -249,7 +255,7 @@ impl Cell {
 
     /// `CellLivenessInfo.resolve` (`rows/CellLivenessInfo.java:81-94`) and its
     /// same-timestamp tie-break (`rows/CellLivenessInfo.java:104-149`).
-    fn resolve(left: &Cell, right: &Cell) -> Resolution {
+    fn resolve(left: &Self, right: &Self) -> Resolution {
         if left.timestamp != right.timestamp {
             return if left.timestamp > right.timestamp {
                 Resolution::Left
@@ -306,27 +312,40 @@ impl Cell {
     /// true if `existing` wins over `update`.
     ///
     /// The final fallback compares the value bytes unsigned and keeps the left
-    /// (existing) cell on a tie (`rows/Cells.java:107`, `ValueAccessor.compare`).
+    /// (existing) cell on a tie (`rows/Cells.java:107`, `ValueAccessor.compare`);
+    /// `compare_values` must order the two values as their bytes do.
     /// The memtable calls `Cells.reconcile(existing, update)` in that order
     /// (`rows/ColumnData.java:120-121`).
-    #[must_use]
-    pub fn existing_wins(existing: &Cell, update: &Cell) -> bool {
+    pub fn existing_wins_by(
+        existing: &Self,
+        update: &Self,
+        compare_values: impl FnOnce(&V, &V) -> Ordering,
+    ) -> bool {
         match Self::resolve(existing, update) {
             Resolution::Left => true,
             Resolution::Right => false,
-            Resolution::Compare => existing.value.cmp(&update.value) != Ordering::Less,
+            Resolution::Compare => compare_values(&existing.value, &update.value) != Ordering::Less,
         }
     }
 }
 
+impl Cell {
+    /// [`Cell::existing_wins_by`] for owned values.
+    #[must_use]
+    pub fn existing_wins(existing: &Cell, update: &Cell) -> bool {
+        Self::existing_wins_by(existing, update, Ord::cmp)
+    }
+}
+
 /// A row: primary-key liveness, row deletion and cells sorted by column id.
-/// The clustering is the key of the map that holds the row.
+/// The clustering is the key of the map that holds the row. `V` is the cell
+/// value representation (see [`Cell`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Row {
+pub struct Row<V = Box<[u8]>> {
     pub liveness: LivenessInfo,
     pub deletion: RowDeletion,
     /// Strictly increasing by `column`.
-    pub cells: Vec<Cell>,
+    pub cells: Vec<Cell<V>>,
 }
 
 impl Row {
@@ -338,10 +357,28 @@ impl Row {
             + self.cells.iter().map(|c| c.value.len()).sum::<usize>()
     }
 
+    /// [`Row::merge_by`] for owned values.
+    pub fn merge(&mut self, update: Row) {
+        self.merge_by(update, Ord::cmp);
+    }
+}
+
+/// Whether the partition deletion `active` leaves a row with deletion
+/// `row_deletion` untouched on read and flush (`rows/BTreeRow.java:349`): it
+/// does if `active` is live or the row's own deletion supersedes it. See
+/// [`Row::visible_under`].
+#[must_use]
+pub fn row_unaffected_by(row_deletion: RowDeletion, active: DeletionTime) -> bool {
+    active.is_live() || row_deletion.time.supersedes(active)
+}
+
+impl<V> Row<V> {
     /// Merges `update` into `self` as `BTreeRow.merge(existing, update)` does
     /// (`rows/BTreeRow.java:645-697`), including its asymmetry: the shadowed
     /// cells are filtered only from the side whose deletion lost.
-    pub fn merge(&mut self, update: Row) {
+    /// `compare_values` orders two cell values as their bytes do (it is used
+    /// only for the last tie-break of [`Cell::existing_wins_by`]).
+    pub fn merge_by(&mut self, update: Row<V>, mut compare_values: impl FnMut(&V, &V) -> Ordering) {
         let Row {
             liveness: update_liveness,
             deletion: update_deletion,
@@ -387,13 +424,17 @@ impl Row {
         // `BTreeRow.java:687` (`BTree.update` with `ColumnData.Reconciler`,
         // `rows/ColumnData.java:116-124`): a sorted merge by column, keeping
         // the reconciled cell where both sides have one.
-        self.cells = merge_cells(std::mem::take(&mut self.cells), update_cells);
+        self.cells = merge_cells(
+            std::mem::take(&mut self.cells),
+            update_cells,
+            &mut compare_values,
+        );
         self.liveness = liveness;
         self.deletion = row_deletion;
     }
 }
 
-impl Row {
+impl<V: Clone> Row<V> {
     /// The row as a read or flush sees it under the partition deletion
     /// `active`, or `None` if nothing of it remains.
     ///
@@ -415,8 +456,8 @@ impl Row {
     /// * a row left with no liveness, no deletion and no cells disappears
     ///   (`BTreeRow.java:536-537`).
     #[must_use]
-    pub fn visible_under(&self, active: DeletionTime) -> Option<Cow<'_, Row>> {
-        if active.is_live() || self.deletion.time.supersedes(active) {
+    pub fn visible_under(&self, active: DeletionTime) -> Option<Cow<'_, Row<V>>> {
+        if row_unaffected_by(self.deletion, active) {
             return Some(Cow::Borrowed(self));
         }
         let liveness = if active.deletes_liveness(self.liveness) {
@@ -424,7 +465,7 @@ impl Row {
         } else {
             self.liveness
         };
-        let cells: Vec<Cell> = self
+        let cells: Vec<Cell<V>> = self
             .cells
             .iter()
             .filter(|c| !active.deletes_cell(c))
@@ -442,7 +483,11 @@ impl Row {
 }
 
 /// Sorted merge of two cell lists, each strictly increasing by column.
-fn merge_cells(existing: Vec<Cell>, update: Vec<Cell>) -> Vec<Cell> {
+fn merge_cells<V>(
+    existing: Vec<Cell<V>>,
+    update: Vec<Cell<V>>,
+    compare_values: &mut impl FnMut(&V, &V) -> Ordering,
+) -> Vec<Cell<V>> {
     if update.is_empty() {
         return existing;
     }
@@ -455,7 +500,11 @@ fn merge_cells(existing: Vec<Cell>, update: Vec<Cell>) -> Vec<Cell> {
             Ordering::Greater => out.extend(update.next()),
             Ordering::Equal => {
                 if let (Some(e), Some(u)) = (existing.next(), update.next()) {
-                    out.push(if Cell::existing_wins(&e, &u) { e } else { u });
+                    out.push(if Cell::existing_wins_by(&e, &u, &mut *compare_values) {
+                        e
+                    } else {
+                        u
+                    });
                 }
             }
         }

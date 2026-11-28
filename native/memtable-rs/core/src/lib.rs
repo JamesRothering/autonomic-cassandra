@@ -21,18 +21,29 @@
 //! comparison and needs no per-type comparators. It stores regular cells,
 //! cell tombstones, row deletions and partition deletions, and reconciles
 //! them by Cassandra's rules ([`model`]). Data enters and leaves in one
-//! binary format ([`codec`]). The concurrent store is [`memtable`].
+//! binary format ([`codec`]).
+//!
+//! Two concurrent stores implement the same operations: [`arena`] (the
+//! default, exported as [`Memtable`]), which keeps each shard's data in a few
+//! large chunks so that discarding it is cheap, and [`boxed`], the first
+//! version, with one heap allocation per key, row and value, kept for
+//! comparison and as an independent implementation for the tests.
 //!
 //! Not supported (see `docs/spike/rust-memtable.md`): range tombstones,
 //! static rows, complex (collection) columns, counters.
 
 #![forbid(unsafe_code)]
 
+pub mod arena;
+pub mod boxed;
+mod btree;
 pub mod codec;
-pub mod memtable;
+mod error;
 pub mod model;
+mod region;
 mod rows;
 
+pub use arena::{FlushIter, Memtable, Space};
 pub use codec::{DecodeError, PartitionUpdate, decode_partition, decode_partitions, encode_update};
-pub use memtable::{FlushIter, Memtable, MemtableError};
+pub use error::MemtableError;
 pub use model::{Cell, DeletionTime, LivenessInfo, Row, RowDeletion};

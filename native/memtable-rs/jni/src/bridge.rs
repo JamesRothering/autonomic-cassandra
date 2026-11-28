@@ -29,10 +29,11 @@
 use jni::Env;
 use jni::objects::JByteArray;
 use jni::sys::{jint, jlong};
-use memtable_core::{Memtable, decode_partition};
+use memtable_core::decode_partition;
 
 use crate::error::BoundaryError;
 use crate::handles::HANDLES;
+use crate::store::Store;
 
 type Result<T> = std::result::Result<T, BoundaryError>;
 
@@ -106,17 +107,22 @@ impl<'a> Request<'a> {
     }
 }
 
-/// `create(byte[] boundaries, int len)`: `count:u32 (len:u32 bytes)*`.
-pub fn create(env: &Env<'_>, boundaries: &JByteArray<'_>, len: jint) -> Result<jlong> {
-    let buf = copy_in(env, boundaries, len)?;
+/// `create(byte[] request, int len)`: `kind:u32 count:u32 (len:u32 bytes)*`,
+/// `kind` 0 for the arena memtable and 1 for the boxed one (see
+/// [`crate::store`]), then the shard boundaries.
+pub fn create(env: &Env<'_>, request: &JByteArray<'_>, len: jint) -> Result<jlong> {
+    let buf = copy_in(env, request, len)?;
     let mut req = Request(&buf);
+    let kind = req.u32()?;
     let count = req.u32()?;
     let mut list = Vec::new();
     for _ in 0..count {
         list.push(req.bytes()?.into());
     }
     req.finish()?;
-    Ok(HANDLES.insert_memtable(Memtable::new(list)?))
+    let store =
+        Store::new(kind, list).ok_or(BoundaryError::BadArgument("unknown memtable kind"))??;
+    Ok(HANDLES.insert_memtable(store))
 }
 
 pub fn release(handle: jlong) -> Result<()> {

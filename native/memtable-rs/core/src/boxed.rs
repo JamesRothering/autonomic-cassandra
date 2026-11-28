@@ -14,8 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The concurrent memtable: partitions sharded by key range, each shard a
-//! `BTreeMap` behind a `RwLock`.
+//! The first version of the concurrent memtable (spike 1): partitions
+//! sharded by key range, each shard a `BTreeMap` behind a `RwLock`, every key,
+//! row, cell array and value its own heap allocation.
+//!
+//! [`crate::arena`] replaced it as the default because discarding this one
+//! frees millions of small allocations. It is kept for the measurements that
+//! compare the two and as an independent implementation for the property
+//! tests, which check that both give the same results.
 //!
 //! # Concurrency design
 //!
@@ -50,49 +56,14 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::fmt;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::codec::{PartitionUpdate, TooLarge, encode_partition};
+use crate::codec::{PartitionUpdate, encode_partition};
+use crate::error::MemtableError;
 use crate::model::{DeletionTime, Row};
 use crate::rows::{Rows, map_entry_bytes, signed};
-
-/// Errors from memtable operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemtableError {
-    /// A write arrived after [`Memtable::freeze`].
-    Frozen,
-    /// A flush iterator was requested before [`Memtable::freeze`].
-    NotFrozen,
-    /// A thread panicked while holding a shard's write lock.
-    Poisoned,
-    /// Shard boundaries were not strictly increasing.
-    BadBoundaries,
-    /// A partition is too large for the wire format.
-    TooLarge,
-}
-
-impl fmt::Display for MemtableError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Frozen => "memtable is frozen for flush; writes are not accepted",
-            Self::NotFrozen => "memtable must be frozen before it is flushed",
-            Self::Poisoned => "a writer panicked; the memtable is unusable",
-            Self::BadBoundaries => "shard boundaries must be strictly increasing",
-            Self::TooLarge => "partition too large for the wire format",
-        })
-    }
-}
-
-impl std::error::Error for MemtableError {}
-
-impl From<TooLarge> for MemtableError {
-    fn from(_: TooLarge) -> Self {
-        Self::TooLarge
-    }
-}
 
 /// One partition: its deletion and its rows by clustering.
 #[derive(Debug, Default)]
