@@ -41,6 +41,6 @@ Started 2026-11-28 at the owner's request, so that sprint 2's assessment counts 
 | Thu 11-26 | 11:43 | 11:48 | 5 | housekeeping | GitHub graph, About box, rename | estimated from message times; not counted |
 | Thu 11-26 | 21:05 | 21:15 | 10 | housekeeping | detaching the fork | estimated; not counted (the Montecristo questions at 21:20 belong to another project and are not booked here, owner 2026-11-28) |
 | Fri 11-27 | 00:37 | 00:45 | 8 | review | graph check, status, approval of D7-verification, asked for the decisions | estimated; confirmed by the owner 2026-11-28 |
-| Fri 11-27 | 20:00 | 21:45 | 105 | design | read the overview and decision #46; correlator; first-principles premises; driver; Rust and Lean; garbage debt; R-1, R-14, R-20; user stories; this protocol; repair; asked for the evaluation harness | start estimated (20:00, reading before the first message at 20:14), confirmed by the owner; end: owner left to rest after the 21:43 message [05:45 UTC 11-28] |
+| Fri 11-27 | 20:00 | 21:52 | 112 | design | read the overview and decision #46; correlator; first-principles premises; driver; Rust and Lean; garbage debt; R-1, R-14, R-20; user stories; this protocol; repair; asked for the evaluation harness; Uncle Bob's metrics and the code-quality harness | start estimated (20:00, reading before the first message at 20:14), confirmed by the owner; end: owner left at 21:52 ("OK, I'll be back later") [05:52 UTC 11-28] |
 
-**Sprint 2 so far (counted):** about 1 h 53 min (8 min review, 105 min design).
+**Sprint 2 so far (counted):** about 2 h (8 min review, 112 min design).
