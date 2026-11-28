@@ -110,26 +110,36 @@ fn owned_bytes_estimate_is_close_to_real_allocation() {
     let cases: Vec<(&str, Workload)> = vec![
         (
             "100k one-row partitions, 3x32B cells",
-            Box::new(|| Box::new((0..100_000).map(|k| update(k * 2_654_435_761, 0, 3, 32)))),
+            Box::new(|| {
+                Box::new((0..100_000u32).map(|k| update(k.wrapping_mul(2_654_435_761), 0, 3, 32)))
+            }),
         ),
         (
             "1k partitions x 100 rows, 3x32B cells",
             Box::new(|| {
-                Box::new((0..100_000).map(|i| update((i % 1000) * 2_654_435_761, i / 1000, 3, 32)))
+                Box::new(
+                    (0..100_000u32)
+                        .map(|i| update((i % 1000).wrapping_mul(2_654_435_761), i / 1000, 3, 32)),
+                )
             }),
         ),
         (
             "10k partitions x 10 rows, 1x512B cell",
             Box::new(|| {
                 Box::new(
-                    (0..100_000).map(|i| update((i % 10_000) * 2_654_435_761, i / 10_000, 1, 512)),
+                    (0..100_000u32).map(|i| {
+                        update((i % 10_000).wrapping_mul(2_654_435_761), i / 10_000, 1, 512)
+                    }),
                 )
             }),
         ),
         (
             "overwrites: 1k rows written 100 times",
             Box::new(|| {
-                Box::new((0..100_000).map(|i| update((i % 1000) * 2_654_435_761, 0, 3, 32)))
+                Box::new(
+                    (0..100_000u32)
+                        .map(|i| update((i % 1000).wrapping_mul(2_654_435_761), 0, 3, 32)),
+                )
             }),
         ),
     ];
