@@ -82,12 +82,13 @@ def parse_gc(path):
             s['stalls'] += 1
             s['stall_ms'] += float(m.group(1))
             continue
-        m = re.search(r'\[gc\s*\] GC\(\d+\) Major Collection', line)
+        m = re.search(r'\[gc\s*\] GC\(\d+\) Major Collection .*->', line)
         if m:
             s['old'] += 1
             continue
-        # ZGC young collection summary: "y: Promoted: 123M ..." (format varies by JDK; best effort)
-        m = re.search(r'[yY]: Promoted:\s+(\d+)([BKMG])', line)
+        # Generational ZGC young-generation table: "Y:  Promoted:  -  -  17M (1%)  18M (1%)", whose last column
+        # is the total at Relocate End.
+        m = re.search(r'Y:\s+Promoted:.*?(\d+)([BKMG]) \(\d+%\)\s*$', line)
         if m:
             s['promoted'] += to_mib(*m.groups())
     return s

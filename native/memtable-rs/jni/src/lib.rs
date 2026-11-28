@@ -29,6 +29,14 @@
 
 #![deny(unsafe_code)]
 
+// With the default (glibc) allocator, freeing a flushed memtable on the flush
+// thread while writers allocate on theirs measured ~0.4 µs per free (each free
+// locks the arena of the thread that allocated the block). mimalloc frees
+// cross-thread blocks without that lock; it is optional so both can be measured.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod bridge;
 mod error;
 pub mod exports;

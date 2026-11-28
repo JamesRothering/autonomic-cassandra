@@ -28,6 +28,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -182,6 +186,15 @@ public final class RustMemtableBench
         for (int round = 0; round < 7; round++)
         {
             boolean report = round >= 2; // rounds 0-1 are JIT warm-up
+            // 0. bare JNI transitions
+            long t00 = System.nanoTime();
+            for (int i = 0; i < 5_000_000; i++)
+                sink += NativeMemtable.nopRaw(i);
+            print(report, "native call, empty body", System.nanoTime() - t00, 5_000_000);
+            t00 = System.nanoTime();
+            for (int i = 0; i < 5_000_000; i++)
+                sink += NativeMemtable.nop(i);
+            print(report, "native call, with_env + error policy", System.nanoTime() - t00, 5_000_000);
             // 1. a native call that does nothing but look up its handle
             try (RustMemtable empty = RustMemtable.create(List.of()))
             {
@@ -249,8 +262,11 @@ public final class RustMemtableBench
     {
         void put(PartitionUpdate update);
 
-        /** Replaces the current memtable, then flushes (iterates) and discards the old one; returns its size. */
-        long switchAndFlush();
+        /**
+         * Replaces the current memtable and waits until no write is in flight on the old one. Returns the old one's
+         * flush: iterate all of it, discard it, and return its size in bytes as it reports it.
+         */
+        Callable<Long> switchOut();
 
         void close();
     }
@@ -273,7 +289,7 @@ public final class RustMemtableBench
             }
         }
 
-        public long switchAndFlush()
+        public Callable<Long> switchOut()
         {
             Memtable old = current;
             current = newMemtable();
@@ -281,6 +297,11 @@ public final class RustMemtableBench
             old.switchOut(barrier, new AtomicReference<>(CommitLogPosition.NONE));
             barrier.issue();
             barrier.await();
+            return () -> flush(old);
+        }
+
+        private static long flush(Memtable old)
+        {
             Memtable.MemoryUsage usage = Memtable.getMemoryUsage(old);
             long cells = 0;
             try (UnfilteredPartitionIterator partitions = old.partitionIterator(ColumnFilter.all(metadata), DataRange.allData(metadata.partitioner),
@@ -306,7 +327,14 @@ public final class RustMemtableBench
 
         public void close()
         {
-            switchAndFlush();
+            try
+            {
+                switchOut().call();
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -334,11 +362,20 @@ public final class RustMemtableBench
             }
         }
 
-        public long switchAndFlush()
+        public Callable<Long> switchOut()
         {
             RustMemtable old = current;
             current = RustMemtable.create(BOUNDARIES);
             old.freeze();
+            return () -> flush(old);
+        }
+
+        static final LongAdder WALK_NANOS = new LongAdder();
+        static final LongAdder CLOSE_NANOS = new LongAdder();
+
+        private static long flush(RustMemtable old)
+        {
+            long started = System.nanoTime();
             long owned = old.ownedBytes();
             long bytes = 0;
             try (RustMemtable.FlushIterator it = old.openFlush())
@@ -347,9 +384,12 @@ public final class RustMemtableBench
                 while ((batch = it.nextBatch()) != null)
                     bytes += batch.remaining();
             }
+            long walked = System.nanoTime();
             old.close();
             if (bytes < 0)
                 throw new AssertionError();
+            CLOSE_NANOS.add(System.nanoTime() - walked);
+            WALK_NANOS.add(walked - started);
             return owned;
         }
 
@@ -365,7 +405,7 @@ public final class RustMemtableBench
         if (warmup)
         {
             measure(target, threads, 5, false);
-            target.switchAndFlush();
+            target.switchOut().call();
         }
         measure(target, threads, seconds, true);
         target.close();
@@ -394,27 +434,48 @@ public final class RustMemtableBench
         long[] gcBefore = gcTotals();
         writers.forEach(Thread::start);
         long deadline = start + TimeUnit.SECONDS.toNanos(seconds);
-        long nextFlushAt = FLUSH_EVERY;
-        int flushes = 0;
-        long lastSize = 0;
+        // Switch memtables every FLUSH_EVERY updates (polled each millisecond), and flush on a separate thread,
+        // as Cassandra does: a slow flush never delays the switch, so every memtable holds about FLUSH_EVERY
+        // updates in either implementation.
+        ExecutorService flusher = Executors.newSingleThreadExecutor();
+        List<Future<Long>> flushes = new ArrayList<>();
+        LongAdder flushNanos = new LongAdder();
+        long switchedAt = 0;
         while (System.nanoTime() < deadline)
         {
-            Thread.sleep(5);
-            if (ops.sum() >= nextFlushAt)
+            Thread.sleep(1);
+            long now = ops.sum();
+            if (now - switchedAt >= FLUSH_EVERY)
             {
-                lastSize = target.switchAndFlush();
-                flushes++;
-                nextFlushAt = ops.sum() + FLUSH_EVERY;
+                switchedAt = now;
+                Callable<Long> flush = target.switchOut();
+                flushes.add(flusher.submit(() -> {
+                    long t0 = System.nanoTime();
+                    long size = flush.call();
+                    flushNanos.add(System.nanoTime() - t0);
+                    return size;
+                }));
             }
         }
         stop.set(true);
         for (Thread w : writers)
             w.join();
         double elapsed = (System.nanoTime() - start) / 1e9;
+        long backlogStart = System.nanoTime();
+        long lastSize = 0;
+        for (Future<Long> f : flushes)
+            lastSize = f.get();
+        flusher.shutdown();
+        long backlogMs = (System.nanoTime() - backlogStart) / 1_000_000;
+        if (report && target instanceof RustTarget && !flushes.isEmpty())
+            System.out.println(String.format("rust flush split: walk %d ms, close (free) %d ms, per flush",
+                                             RustTarget.WALK_NANOS.sum() / flushes.size() / 1_000_000,
+                                             RustTarget.CLOSE_NANOS.sum() / flushes.size() / 1_000_000));
         long[] gcAfter = gcTotals();
         if (report)
-            System.out.println(String.format("result: impl=%s threads=%d seconds=%.1f ops=%d ops_per_sec=%.0f flushes=%d memtable_bytes_at_flush=%d gc_count=%d gc_ms=%d vm_hwm_kb=%s",
-                              target instanceof RustTarget ? "rust" : "java", threads, elapsed, ops.sum(), ops.sum() / elapsed, flushes,
+            System.out.println(String.format("result: impl=%s threads=%d seconds=%.1f ops=%d ops_per_sec=%.0f flushes=%d flush_ms_avg=%d flush_backlog_ms=%d memtable_bytes_at_flush=%d gc_count=%d gc_ms=%d vm_hwm_kb=%s",
+                              target instanceof RustTarget ? "rust" : "java", threads, elapsed, ops.sum(), ops.sum() / elapsed, flushes.size(),
+                              flushes.isEmpty() ? 0 : flushNanos.sum() / flushes.size() / 1_000_000, backlogMs,
                               lastSize, gcAfter[0] - gcBefore[0], gcAfter[1] - gcBefore[1], vmHwm()));
     }
 

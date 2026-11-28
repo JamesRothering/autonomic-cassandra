@@ -138,3 +138,74 @@ impl Handles {
         (m, i)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frozen_memtable() -> Memtable {
+        let m = Memtable::new(vec![]).unwrap();
+        m.freeze().unwrap();
+        m
+    }
+
+    /// These tests use the process-wide table, so they check their own
+    /// handles rather than global counts (tests run in parallel).
+    #[test]
+    fn handles_are_unique_and_stale_handles_fail() {
+        let a = HANDLES.insert_memtable(Memtable::new(vec![]).unwrap());
+        let b = HANDLES.insert_memtable(Memtable::new(vec![]).unwrap());
+        assert_ne!(a, b);
+        HANDLES.release_memtable(a).unwrap();
+        assert!(matches!(HANDLES.release_memtable(a), Err(BoundaryError::BadHandle(h)) if h == a));
+        assert!(HANDLES.with_memtable(a, |_| Ok(())).is_err());
+        assert!(HANDLES.with_memtable(b, |_| Ok(())).is_ok());
+        HANDLES.release_memtable(b).unwrap();
+        assert!(HANDLES.iterator(-1).is_err());
+        assert!(HANDLES.close_iterator(0).is_err());
+    }
+
+    #[test]
+    fn iterator_keeps_memtable_alive_after_release() {
+        let h = HANDLES.insert_memtable(frozen_memtable());
+        let weak = HANDLES.with_memtable(h, |m| Ok(Arc::downgrade(m))).unwrap();
+        let it = HANDLES.with_memtable(h, |m| Ok(m.flush_iter()?)).unwrap();
+        let ih = HANDLES.insert_iterator(it);
+        HANDLES.release_memtable(h).unwrap();
+        assert!(weak.upgrade().is_some(), "freed while an iterator was open");
+        let mut out = Vec::new();
+        let n = HANDLES
+            .iterator(ih)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .next_batch(&mut out, 1024)
+            .unwrap();
+        assert_eq!(n, 0);
+        HANDLES.close_iterator(ih).unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "not freed after release and close"
+        );
+    }
+
+    #[test]
+    fn concurrent_lookups_and_releases() {
+        let handles: Vec<i64> = (0..8)
+            .map(|_| HANDLES.insert_memtable(Memtable::new(vec![]).unwrap()))
+            .collect();
+        std::thread::scope(|s| {
+            for &h in &handles {
+                s.spawn(move || {
+                    for _ in 0..if cfg!(miri) { 10 } else { 1000 } {
+                        let _ = HANDLES.with_memtable(h, |m| Ok(m.owned_bytes()));
+                    }
+                    HANDLES.release_memtable(h).unwrap();
+                });
+            }
+        });
+        for h in handles {
+            assert!(HANDLES.with_memtable(h, |_| Ok(())).is_err());
+        }
+    }
+}

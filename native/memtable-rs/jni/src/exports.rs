@@ -187,3 +187,27 @@ pub extern "system" fn Java_org_apache_cassandra_db_memtable_rust_NativeMemtable
     env.with_env(|_| bridge::panic_for_test())
         .resolve::<ThrowJavaException>();
 }
+
+// SAFETY: signature contract (module docs); Java: `static native long nopRaw(long x)`.
+// For measuring the bare JNI transition: it does not upgrade the environment,
+// and its body (returning its argument) cannot panic.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_apache_cassandra_db_memtable_rust_NativeMemtable_nopRaw<'l>(
+    _env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    x: jlong,
+) -> jlong {
+    x
+}
+
+// SAFETY: signature contract (module docs); Java: `static native long nop(long x)`.
+// For measuring the transition plus `with_env` and the error policy.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_org_apache_cassandra_db_memtable_rust_NativeMemtable_nop<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    x: jlong,
+) -> jlong {
+    env.with_env(|_| Ok::<_, BoundaryError>(x))
+        .resolve::<ThrowJavaException>()
+}

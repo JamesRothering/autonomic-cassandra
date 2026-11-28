@@ -75,6 +75,12 @@ final class NativeMemtable
     /** Live memtables in the high 32 bits, live iterators in the low 32 bits; for leak checks. */
     static native long liveObjects();
 
+    /** Returns {@code x} without touching the JNI environment; measures the bare JNI transition. */
+    static native long nopRaw(long x);
+
+    /** Returns {@code x} through the same environment upgrade and error policy as every other method. */
+    static native long nop(long x);
+
     /** Panics in Rust; for tests of the panic-to-exception path. */
     static native void panicForTest();
 }

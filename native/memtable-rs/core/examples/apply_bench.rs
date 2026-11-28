@@ -93,6 +93,45 @@ fn boundaries(shards: u16) -> Vec<Box<[u8]>> {
         .collect()
 }
 
+/// Times a flush of `recs.len()` one-row partitions: the walk in 64 KiB
+/// batches, then the drop, on a different thread from the writer (as in
+/// Cassandra, and as in the Java benchmark).
+#[allow(clippy::cast_precision_loss)] // counts far below 2^52
+fn flush_cost(recs: &[Vec<u8>]) {
+    let m = Arc::new(Memtable::new(boundaries(1024)).expect("sorted boundaries"));
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            for r in recs {
+                m.apply(decode_partition(r).expect("valid record"))
+                    .expect("not frozen");
+            }
+        });
+    });
+    m.freeze().expect("not poisoned");
+    let t0 = Instant::now();
+    let mut it = m.flush_iter().expect("frozen");
+    let mut batch = Vec::with_capacity(1 << 16);
+    let mut bytes = 0;
+    loop {
+        batch.clear();
+        if it.next_batch(&mut batch, 1 << 16).expect("readable") == 0 {
+            break;
+        }
+        bytes += batch.len();
+    }
+    let walk = t0.elapsed();
+    drop(it);
+    let t0 = Instant::now();
+    drop(m);
+    let free = t0.elapsed();
+    println!(
+        "rust-only: flush {} partitions: walk {:.0} ms ({bytes} bytes), drop {:.0} ms",
+        recs.len(),
+        walk.as_secs_f64() * 1e3,
+        free.as_secs_f64() * 1e3
+    );
+}
+
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(f64::total_cmp);
     v[v.len() / 2]
@@ -131,6 +170,7 @@ fn main() {
         "rust-only: decode+apply new row      {:8.1} ns/op (median of 7)",
         median(apply)
     );
+    flush_cost(&recs);
     println!(
         "rust-only: read whole partition      {:8.1} ns/op (median of 7)",
         median(read)

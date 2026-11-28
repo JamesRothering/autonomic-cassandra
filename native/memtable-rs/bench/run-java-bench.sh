@@ -51,10 +51,10 @@ opens=(
 )
 
 cp="build/apache-cassandra-7.0-SNAPSHOT.jar:build/test/classes:test/conf:build/lib/jars/*:build/test/lib/jars/*"
-exec env MALLOC_ARENA_MAX=4 "$java_home/bin/java" -Xms"$heap" -Xmx"$heap" "${gc_opts[@]}" "${opens[@]}" \
+exec env MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-4} "$java_home/bin/java" -Xms"$heap" -Xmx"$heap" "${gc_opts[@]}" "${opens[@]}" \
   -javaagent:build/lib/jars/jamm-0.4.0.jar \
   -Dcassandra.storagedir=build/test/cassandra -Dcassandra.memtable_row_overhead_computation_step=100 \
-  -Dcassandra.rust_memtable.library="$PWD/native/memtable-rs/target/release/libmemtable_jni.so" \
+  -Dcassandra.rust_memtable.library="${RUST_LIB:-$PWD/native/memtable-rs/target/release/libmemtable_jni.so}" \
   -Djava.security.manager=allow -Djdk.attach.allowAttachSelf=true \
   ${BENCH_JVM_OPTS:-} "${props[@]}" \
   -cp "$cp" org.apache.cassandra.db.memtable.rust.RustMemtableBench "$@"

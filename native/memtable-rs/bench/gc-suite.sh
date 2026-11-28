@@ -23,21 +23,26 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-build/rust-gc}; REPEATS=${REPEATS:-3}; SECONDS_PER_RUN=${SECONDS_PER_RUN:-60}; HEAP=${HEAP:-2g}
 JDK17=${JDK17:-$HOME/.local/opt/jdk-17}; JDK21=${JDK21:-$HOME/.local/opt/jdk-21}
-FLUSH_EVERY=${FLUSH_EVERY:-500000}
+FLUSH_EVERY=${FLUSH_EVERY:-300000}
 cd "$here/../../.."
 mkdir -p "$OUT"
-variants=("java skiplist heap_buffers" "java skiplist offheap_objects" "java trie offheap_objects" "rust skiplist heap_buffers")
+variants=("java skiplist heap_buffers" "java skiplist offheap_objects" "java trie offheap_objects" "rust - -" "rust-mimalloc - -")
 for r in $(seq 1 "$REPEATS"); do
   for jvm in "17 g1 $JDK17" "21 zgc $JDK21"; do
     read -r jdk gc home <<< "$jvm"
     for v in "${variants[@]}"; do
       read -r impl memtable alloc <<< "$v"
       name="jdk${jdk}-${gc}-${impl}-${memtable}-${alloc}-r${r}"
-      [[ $impl == rust ]] && name="jdk${jdk}-${gc}-rust-r${r}"
+      lib=$PWD/native/memtable-rs/target/release/libmemtable_jni.so
+      if [[ $impl == rust* ]]; then
+        name="jdk${jdk}-${gc}-${impl}-r${r}"
+        [[ $impl == rust-mimalloc ]] && lib=$PWD/native/memtable-rs/target/mimalloc/release/libmemtable_jni.so
+        memtable=skiplist; alloc=heap_buffers   # unused by the Rust side
+      fi
       echo "== $name"
-      BENCH_JVM_OPTS="-Xlog:gc*,safepoint:file=$OUT/$name.gc.log:uptime,level,tags" \
+      RUST_LIB=$lib BENCH_JVM_OPTS="-Xlog:gc*,safepoint:file=$OUT/$name.gc.log:uptime,level,tags" \
         "$here/run-java-bench.sh" "$home" "$gc" "$HEAP" -Dbench.memtable="$memtable" -Dbench.allocation="$alloc" \
-        -Dbench.flush_every="$FLUSH_EVERY" gc "$impl" "$SECONDS_PER_RUN" > "$OUT/$name.out" 2>&1 || echo "FAILED: $name"
+        -Dbench.flush_every="$FLUSH_EVERY" gc "${impl%-mimalloc}" "$SECONDS_PER_RUN" > "$OUT/$name.out" 2>&1 || echo "FAILED: $name"
       grep -E '(setup|result): ' "$OUT/$name.out" | sed 's/.* - //' || true
     done
   done
