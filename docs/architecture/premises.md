@@ -20,10 +20,10 @@
 
 # Premises review
 
-- **Status:** proposed, 2026-11-28, revision 1, for the owner to rule on each premise. Not yet independently reviewed.
+- **Status:** proposed, 2026-11-28, revision 2, for the owner to rule on each premise. Not yet independently reviewed. Ruled so far: R-1 (rolling in-place upgrade) and R-14 (Java driver first, Python later). Still under discussion with the owner before the remaining rulings: how the JVM is replaced (PRE-3).
 - **Commit:** branch `deliverable/D7.1` at `a0aa7c6`. Every `file:line` below refers to that commit.
 - **Why it exists:** the owner's brief is to re-engineer Cassandra **from first principles**. Sprint 1 instead took Cassandra's architecture as given and added a control loop that tunes it. That choice was never examined. This document examines it, and every other premise found so far, **before** the 52 decisions of the failure-mode catalogue ([`failure-modes.md`](failure-modes.md)), because those decisions sit downstream of these premises.
-- **Owner direction so far (2026-11-28):** the only thing that must be kept is backward compatibility, so that this is a drop-in replacement for Cassandra; prevention may be better than healing; STW GC pauses are among Cassandra's worst problems; replace the JVM with Rust, or a formal specification proven in Lean; the driver is an overlooked, first-line observer of failures; a new protocol between drivers and nodes is allowed next to the native protocol, which is kept only for compatibility; drivers may keep their own history. Java and Python drivers first; Go deferred.
+- **Owner direction so far (2026-11-28):** the only thing that must be kept is backward compatibility, so that this is a drop-in replacement for Cassandra; prevention may be better than healing; STW GC pauses are among Cassandra's worst problems; replace the JVM with Rust, or a formal specification proven in Lean; the driver is an overlooked, first-line observer of failures; a new protocol between drivers and nodes is allowed next to the native protocol, which is kept only for compatibility; drivers may keep their own history; Java driver first, Python later, Go deferred; rolling in-place upgrade, because it is the meaning of drop-in (a client was lost by ScyllaDB for lacking it); pay cleanup as a debt, with more repayment in historically quiet periods.
 
 ## How to read it
 
@@ -76,7 +76,7 @@ The failure-mode catalogue places almost every row at level 4 or 5. Revision 3 o
 - **(a) Rolling in-place upgrade.** Stock Cassandra nodes are replaced one at a time in a live cluster. The new node must speak Cassandra's internode messaging, the cluster metadata service and schema exchange to old nodes, version by version. This is the strongest promise and the largest compatibility surface.
 - **(b) Same drivers, same CQL, same sstables, new cluster.** Applications switch by configuration. Data moves by loading existing sstables or by streaming from the old cluster. Much smaller surface. (a) can be added later without redoing (b).
 
-**Recommendation:** (b) first, (a) as a later goal. Reason: (b) carries everything users touch; (a) adds the internode surface, which is large and versioned, before the engine is proven.
+**Ruled (owner, 2026-11-28): (a).** Reason given: it is the meaning of drop-in, and at least one client the owner knows of did not choose ScyllaDB for lacking it. The recommendation had been (b) first. Consequence: the internode protocol, cluster metadata and schema exchange with stock Cassandra nodes are part of the contract from the start, and the replacement of the JVM must keep a node able to join a stock cluster at every step (PRE-3).
 
 ---
 
@@ -143,11 +143,13 @@ Options considered and their place:
 **Alternative**, in four parts that check each other:
 
 1. **Lean** specifies and proves the algorithms: replication and consistency levels, membership, hinted handoff and repair, the read and write paths' guarantees, compaction's preservation of data, and the layer's safety rules (for example: every action is reversible; no node action while transports are stopped; actions per hour are bounded).
-2. **Verified Rust** for the most critical modules, with a tool that checks Rust against a specification (Verus) or translates Rust into Lean (Aeneas). Both are **unverified** here as to fitness; a spike decides.
+2. **Verified Rust** for the most critical modules, with a tool that checks Rust against a specification (Verus) or translates Rust into Lean (Aeneas). Aeneas is in production use for Rust cryptography at Microsoft (SymCrypt); it does not support `unsafe` Rust or interior mutability ([Aeneas](https://github.com/AeneasVerif/aeneas), [SymCrypt](https://microsoft.com/en-us/research/blog/verifying-rust-cryptography-in-symcrypt-from-standards-to-code)), so it fits pure logic (merge and reconciliation rules, tombstone purge conditions, partitioner arithmetic, the governor's rules), not I/O or concurrent code. Fitness for this code is **unverified**; a spike decides.
 3. **Deterministic simulation testing** of the whole Rust cluster: one seed fixes the clock, the scheduler, the network and the disk faults, so any failure replays exactly. Checked against the Lean and TLA+ models.
 4. **Cassandra as the oracle (differential testing):** run the same workloads against the Java fork and the Rust engine, and compare results, errors and sstables on disk. Any difference is a bug in one of them. This is how "drop-in" is proven.
 
-Proving a whole database correct line by line is beyond the current state of the art: the largest comparable proofs (seL4, CompCert, IronFleet) cover much smaller systems (**unverified** comparison). The combination above is the practical form.
+Proving a whole database correct line by line is beyond the current state of the art: the largest comparable proofs (seL4, CompCert, IronFleet) cover much smaller systems (**unverified** comparison). The combination above is the practical form, and it has a production precedent: AWS's Cedar authorization language is built from an executable Lean model with proofs, a Rust implementation, and differential random testing of the two, and a release ships only when model, proofs and tests are current ([How We Built Cedar, FSE 2024](https://arxiv.org/pdf/2407.01688); [AWS blog](https://aws.amazon.com/blogs/opensource/lean-into-verified-software-development)).
+
+Lean is for the specification and the proofs, not the code that runs. Lean 4 compiles to native code but manages memory by reference counting ([Lean reference, reference counting](https://lean-lang.org/doc/reference/4.36.0/Run-Time-Code/Reference-Counting/); [Counting Immutable Beans, IFL 2019](https://arxiv.org/pdf/1908.05647v2.pdf)), so a database written in Lean would bring back the freeing cascades of PRE-19.
 
 **Compatibility:** part 4 is the proof of the contract.
 
@@ -282,6 +284,43 @@ Proving a whole database correct line by line is beyond the current state of the
 
 **Ruling R-13:** detect and report client clock skew; refusal as an opt-in.
 
+### PRE-19. Cleanup is deferred and paid in bursts
+
+**Cassandra assumes:** cleanup happens later, when something triggers it: the garbage collector when the heap fills, compaction when sstables pile up, tombstone purging after `gc_grace_seconds`, hint replay when a node returns, cleanup after a topology change when an operator runs it.
+
+**Why doubt it:** deferred cleanup builds up silently and is then paid all at once, and that burst is what cascades. A GC pause is one case. Rust removes the garbage collector (PRE-3) but not the rest:
+
+- **Freeing memory in Rust** happens at known points, but a known point can be expensive: dropping a memtable of ten million rows frees each row on the thread that drops it, which in a thread-per-core engine stalls a whole shard; the last holder of a reference-counted structure pays for freeing all of it; lock-free structures with deferred reclamation hold all garbage back behind one slow reader and then free it in a burst (the shape of a GC cycle); the allocator returns memory to the OS in batches (**assumption** for the engine; all are known Rust patterns).
+- **The storage engine is itself a garbage collector for data**, whatever the language: every overwrite, delete and expiring TTL creates garbage on disk.
+
+| Deferred cleanup | How it cascades |
+|---|---|
+| Compaction | falls behind, so more sstables per read, slower reads and more CPU, so it falls further behind; one large merge floods the disk |
+| Tombstones, kept until `gc_grace_seconds` so repair stays correct | reads scan dead data, time out, are retried |
+| Memtable flush, which alone frees memtable memory | writes block when flush lags; commit log segments cannot be recycled and the disk fills |
+| Hints for a down node | build up during the outage, replay in a storm when it returns |
+| Streaming and repair | leave many small sstables, then a compaction storm |
+| TTL expiry | data written together expires together, then a burst of compaction |
+| Cleanup after a topology change | rewrites every sstable on the node |
+
+**Alternative: garbage debt.** Cleanup is charged when the garbage is created and paid off at a bounded rate:
+
+1. **Every operation records the debt it creates:** a write adds compaction debt, a delete adds tombstone debt, a write for a down replica adds hint debt, a flush adds the debt of its sstable.
+2. **The scheduler pays the debt continuously** from a guaranteed share of CPU and disk (PRE-7). The share has a **floor**, so cleanup never stops, and a **ceiling** under load, so it never floods client work; between them it rises with the debt.
+3. **More is paid in quiet periods.** The engine keeps a history of demand (by hour of day and day of week) and raises the share when demand is predicted to be low (level 3 of the order of preference), so most of the debt is paid off-peak. Prediction only moves the share between the floor and the ceiling; a wrong prediction costs efficiency, never safety.
+4. **Debt has limits and due dates.** Some debt cannot wait for a quiet period: disk headroom, commit log segments, memory, and tombstones that must be purged in time. Each kind has a hard limit and, where it applies, a deadline; nearing either raises the floor regardless of the time of day.
+5. **Admission control refuses work whose debt cannot be paid** (PRE-9): at the limit, new work gets `OVERLOADED` before anything is allocated.
+6. **Data is laid out so that cleanup is cheap.** In memory: **arenas**, one block of memory per lifetime (a memtable, a request), handed back whole in one step at constant cost instead of freeing each object. On disk, the same idea: data that expires together is stored together, so its cleanup deletes a whole file instead of rewriting it (Cassandra's time-window compaction does this for one workload). Large structures that must be freed piece by piece are freed a slice per event-loop tick.
+7. **Recovery work is debt too:** hint replay, streaming and catch-up after a slow period draw from the same budget, which breaks the "recovery causes the next failure" loop of PRE-3.
+
+The result is a bound, set by design, on how far cleanup can fall behind and on how much cleanup any tick does, instead of a burst whose size depends on history. These bounds are properties to prove in Lean (PRE-4): for example, debt never exceeds its limit under admission control, and no tick does more than a fixed amount of cleanup.
+
+**Compatibility:** none affected. `gc_grace_seconds`, TTLs and compaction settings keep their meaning; the scheduler decides *when* work is done, not *whether*.
+
+**Effect on the catalogue:** FM-CMP-01 to -03, FM-WRT-02 to -04, FM-DSK-01 and -02, FM-DAT-03, FM-CLU hint and streaming rows move from heal to bound; a new row for the cascade itself (recovery causing the next failure).
+
+**Ruling R-19:** garbage debt with floor, ceiling, quiet-period repayment, limits and deadlines.
+
 ---
 
 ## Part 3. The driver
@@ -307,7 +346,7 @@ Failures the driver **causes**, which the catalogue lacks: retry storms; specula
 
 **Effect on the catalogue:** a new family **FM-DRV**, failures seen or caused by drivers, about 12 rows (revision 3); FM-CLI-01 (spike or a peer's failure, which client reports can tell apart) and FM-CLI-05 (client-observed errors) change.
 
-**Ruling R-14:** observation starts at the client; Java and Python drivers first, Go deferred (owner, 2026-11-28).
+**Ruling R-14 (ruled, owner, 2026-11-28):** observation starts at the client; Java driver first, Python later, Go deferred.
 
 ### PRE-15. The native protocol is the only channel
 
@@ -371,7 +410,7 @@ Whether the extension rides in custom payloads at first or is a protocol of its 
 
 | Ruling | Premise | Recommendation |
 |---|---|---|
-| R-1 | Upgrade path | (b) new cluster with same drivers, CQL and sstables first; (a) rolling upgrade later |
+| R-1 | Upgrade path | **ruled: (a) rolling in-place upgrade** |
 | R-2 | Prevent before healing | adopt the order of preference; allow prediction for slow resources |
 | R-3 | Runtime | Rust engine |
 | R-4 | Verification | Lean, verified Rust for critical modules, deterministic simulation, Cassandra as oracle |
@@ -384,11 +423,12 @@ Whether the extension rides in custom payloads at first or is a protocol of its 
 | R-11 | Placement of hot ranges | splittable ranges, after the core |
 | R-12 | Repair | continuous, on by default |
 | R-13 | Client timestamps | detect skew; refusal opt-in |
-| R-14 | Observation | starts at the client; Java and Python first (ruled) |
+| R-14 | Observation | **ruled:** starts at the client; Java driver first, Python later |
 | R-15 | Driver channel | negotiated extension; reports through responding nodes |
 | R-16 | Driver history | flight recorder, values off by default |
 | R-17 | Layer shape | local controllers plus a supervisor |
 | R-18 | Cluster decisions | through the metadata service |
+| R-19 | Cleanup | garbage debt: floor, ceiling, quiet-period repayment, limits and deadlines |
 
 ## What follows the rulings
 
