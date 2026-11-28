@@ -53,7 +53,8 @@ Code: https://github.com/JamesRothering/Cassandra-autonomic/tree/spike/rust-memt
   `catch_unwind`) and a custom `ErrorPolicy` that maps errors to `IllegalArgumentException` /
   `IllegalStateException` and panics to `RuntimeException`.
 
-The only `unsafe` in non-test code is `#[unsafe(no_mangle)]` on the 14 exported functions (`jni/src/exports.rs`).
+The only `unsafe` in the library is `#[unsafe(no_mangle)]` on the 14 exported functions (`jni/src/exports.rs`),
+plus one `unsafe` block in an optional, off-by-default benchmark probe for the FFM API (`jni/src/ffm_probe.rs`).
 
 **What I'd most like reviewed**
 

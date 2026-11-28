@@ -502,8 +502,9 @@ with writes; and other workload shapes (wide partitions, large values, overwrite
 
 ## 10. What it would take to become a real memtable
 
-Item 7 of the brief (a `Memtable.Factory` so a node can run with it) was **not attempted**: items 1-6 took the
-session, and a partial factory would be worse than none. What it would take, in order:
+Item 7 of the brief (a `Memtable.Factory` so a node can run with it) was **not attempted**. The brief allowed a
+written plan instead; the time went to making items 1-6 solid (several measurements had to be redone after
+method errors), and a partial factory would be worse than none. What it would take, in order:
 
 1. **`RustMemtable extends AbstractAllocatorMemtable`** (or `AbstractMemtableWithCommitlog` plus own accounting)
    with a `FACTORY`/`factory(Map)` so `memtable: configurations: rust: class_name: ...` works
