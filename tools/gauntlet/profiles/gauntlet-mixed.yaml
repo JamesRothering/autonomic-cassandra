@@ -1,0 +1,52 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Gauntlet stress profile: a uniform read/write mix over many small partitions, RF 3 in datacenter1.
+#
+# Used by the gauntlet at a fixed rate:
+#   cassandra-stress user profile=profiles/gauntlet-mixed.yaml "ops(write=1,read=1)" cl=QUORUM duration=60s -rate threads=32 fixed=500/s -node 127.0.0.1
+
+keyspace: gauntlet_stress
+
+keyspace_definition: |
+  CREATE KEYSPACE gauntlet_stress WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': 3};
+
+table: mixed
+
+table_definition: |
+  CREATE TABLE mixed (
+        id int,
+        seq int,
+        v blob,
+        PRIMARY KEY (id, seq)
+  )
+
+columnspec:
+  - name: id
+    population: uniform(1..200000)
+  - name: seq
+    population: uniform(1..20)
+  - name: v
+    size: fixed(200)
+
+queries:
+   read:
+      cql: select v from mixed where id = ? and seq = ?
+      fields: samerow
+   write:
+      cql: insert into mixed (id, seq, v) values (?, ?, ?)
+      fields: samerow
