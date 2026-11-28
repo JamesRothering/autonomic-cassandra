@@ -320,7 +320,7 @@ the decoding of records into Java rows, which is not built) is not included. Med
 | `SkipListMemtable.put` of a new row (`heap_buffers`) | 7,488 [6,839-8,066] | 6,806 |
 | `SkipListMemtable` whole-partition read (iterate the rows) | 4,881 [3,990-5,577] | 6,183 |
 
-Raw output: `docs/spike/data/rust-memtable-overhead-*.txt`.
+Raw output: `docs/spike/rust-memtable-data/rust-memtable-overhead-*.txt`.
 
 Reading the table: the bare JNI transition is about 12 ns; `jni` 0.22's `with_env` plus the error policy adds about
 58 ns; the handle lookup (an `RwLock` read and a `HashMap` probe with the default SipHash hasher) about 30 ns more. A whole put through Rust costs
@@ -371,7 +371,7 @@ measures a saturated machine.
 
 `bench/gc-suite.sh`: 2 writer threads for 60 s, 2 GB heap, flush every 300,000 updates, GC logged with
 `-Xlog:gc*,safepoint`; JDK 17 with G1 and JDK 21 with generational ZGC (`-XX:+UseZGC -XX:+ZGenerational`, as in
-`conf/jvm21-server.options`). Summary by `bench/gc-summary.py`; per-run lines in `docs/spike/data/rust-memtable-gc.txt`.
+`conf/jvm21-server.options`). Summary by `bench/gc-summary.py`; per-run lines in `docs/spike/rust-memtable-data/rust-memtable-gc.txt`.
 
 **JDK 17, G1:**
 

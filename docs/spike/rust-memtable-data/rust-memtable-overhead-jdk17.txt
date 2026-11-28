@@ -1,0 +1,123 @@
+Estimated SkipListMemtable row overhead: 180
+overhead: native call, empty body                                          12.8 ns/op
+overhead: native call, with_env + error policy                             71.3 ns/op
+overhead: native call (handle lookup only)                                100.8 ns/op
+overhead: encode update to record (Java)                                  924.6 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3396.1 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3476.6 ns/op
+overhead: Java put, new rows (skiplist)                                  8066.2 ns/op
+overhead: Java read, whole partition (iterate rows)                      3989.5 ns/op
+overhead: native call, empty body                                          12.4 ns/op
+overhead: native call, with_env + error policy                             70.2 ns/op
+overhead: native call (handle lookup only)                                 99.4 ns/op
+overhead: encode update to record (Java)                                  956.5 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3490.5 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3503.0 ns/op
+overhead: Java put, new rows (skiplist)                                  7488.0 ns/op
+overhead: Java read, whole partition (iterate rows)                      4044.7 ns/op
+overhead: native call, empty body                                          11.8 ns/op
+overhead: native call, with_env + error policy                             68.9 ns/op
+overhead: native call (handle lookup only)                                100.4 ns/op
+overhead: encode update to record (Java)                                 1320.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3842.4 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3651.6 ns/op
+overhead: Java put, new rows (skiplist)                                  7442.4 ns/op
+overhead: Java read, whole partition (iterate rows)                      4995.4 ns/op
+overhead: native call, empty body                                          12.2 ns/op
+overhead: native call, with_env + error policy                             70.0 ns/op
+overhead: native call (handle lookup only)                                 99.9 ns/op
+overhead: encode update to record (Java)                                  811.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3348.4 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3496.2 ns/op
+overhead: Java put, new rows (skiplist)                                  7514.2 ns/op
+overhead: Java read, whole partition (iterate rows)                      4913.9 ns/op
+overhead: native call, empty body                                          12.0 ns/op
+overhead: native call, with_env + error policy                             69.6 ns/op
+overhead: native call (handle lookup only)                                 99.6 ns/op
+overhead: encode update to record (Java)                                  991.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3631.8 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3655.7 ns/op
+overhead: Java put, new rows (skiplist)                                  7902.4 ns/op
+overhead: Java read, whole partition (iterate rows)                      5170.0 ns/op
+Estimated SkipListMemtable row overhead: 183
+overhead: native call, empty body                                          12.4 ns/op
+overhead: native call, with_env + error policy                             70.3 ns/op
+overhead: native call (handle lookup only)                                 99.5 ns/op
+overhead: encode update to record (Java)                                  889.7 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3511.0 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3546.8 ns/op
+overhead: Java put, new rows (skiplist)                                  7524.2 ns/op
+overhead: Java read, whole partition (iterate rows)                      4054.6 ns/op
+overhead: native call, empty body                                          12.2 ns/op
+overhead: native call, with_env + error policy                             70.5 ns/op
+overhead: native call (handle lookup only)                                102.8 ns/op
+overhead: encode update to record (Java)                                 1342.4 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3766.0 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3655.2 ns/op
+overhead: Java put, new rows (skiplist)                                  7418.8 ns/op
+overhead: Java read, whole partition (iterate rows)                      4435.5 ns/op
+overhead: native call, empty body                                          12.2 ns/op
+overhead: native call, with_env + error policy                             69.6 ns/op
+overhead: native call (handle lookup only)                                100.3 ns/op
+overhead: encode update to record (Java)                                 1299.1 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3816.0 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3593.6 ns/op
+overhead: Java put, new rows (skiplist)                                  7419.8 ns/op
+overhead: Java read, whole partition (iterate rows)                      4881.2 ns/op
+overhead: native call, empty body                                          12.2 ns/op
+overhead: native call, with_env + error policy                             68.6 ns/op
+overhead: native call (handle lookup only)                                100.3 ns/op
+overhead: encode update to record (Java)                                  838.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3640.2 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3508.3 ns/op
+overhead: Java put, new rows (skiplist)                                  7761.7 ns/op
+overhead: Java read, whole partition (iterate rows)                      4253.2 ns/op
+overhead: native call, empty body                                          11.9 ns/op
+overhead: native call, with_env + error policy                             68.7 ns/op
+overhead: native call (handle lookup only)                                 99.2 ns/op
+overhead: encode update to record (Java)                                 1290.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3532.2 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3614.7 ns/op
+overhead: Java put, new rows (skiplist)                                  7266.3 ns/op
+overhead: Java read, whole partition (iterate rows)                      5036.3 ns/op
+Estimated SkipListMemtable row overhead: 189
+overhead: native call, empty body                                          12.3 ns/op
+overhead: native call, with_env + error policy                             69.7 ns/op
+overhead: native call (handle lookup only)                                101.0 ns/op
+overhead: encode update to record (Java)                                 1019.4 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3418.1 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3681.1 ns/op
+overhead: Java put, new rows (skiplist)                                  7205.4 ns/op
+overhead: Java read, whole partition (iterate rows)                      5082.1 ns/op
+overhead: native call, empty body                                          11.9 ns/op
+overhead: native call, with_env + error policy                             69.9 ns/op
+overhead: native call (handle lookup only)                                100.2 ns/op
+overhead: encode update to record (Java)                                 1047.8 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3493.6 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3531.7 ns/op
+overhead: Java put, new rows (skiplist)                                  7383.6 ns/op
+overhead: Java read, whole partition (iterate rows)                      4824.3 ns/op
+overhead: native call, empty body                                          12.2 ns/op
+overhead: native call, with_env + error policy                             70.3 ns/op
+overhead: native call (handle lookup only)                                100.0 ns/op
+overhead: encode update to record (Java)                                 1069.2 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3760.6 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3666.8 ns/op
+overhead: Java put, new rows (skiplist)                                  8044.8 ns/op
+overhead: Java read, whole partition (iterate rows)                      5054.2 ns/op
+overhead: native call, empty body                                          12.1 ns/op
+overhead: native call, with_env + error policy                             69.2 ns/op
+overhead: native call (handle lookup only)                                100.1 ns/op
+overhead: encode update to record (Java)                                 1057.5 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3850.0 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3699.3 ns/op
+overhead: Java put, new rows (skiplist)                                  7624.4 ns/op
+overhead: Java read, whole partition (iterate rows)                      5576.6 ns/op
+overhead: native call, empty body                                          12.1 ns/op
+overhead: native call, with_env + error policy                             68.6 ns/op
+overhead: native call (handle lookup only)                                 98.6 ns/op
+overhead: encode update to record (Java)                                  818.9 ns/op
+overhead: Rust put, new rows (encode + JNI + decode + insert)            3379.1 ns/op
+overhead: Rust read, whole partition (encode key + JNI + copy out)       3282.1 ns/op
+overhead: Java put, new rows (skiplist)                                  6838.8 ns/op
+overhead: Java read, whole partition (iterate rows)                      4586.9 ns/op

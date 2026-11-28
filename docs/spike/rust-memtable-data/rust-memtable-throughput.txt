@@ -1,0 +1,50 @@
+java-skiplist-heap_buffers-t1-r1 impl=java threads=1 seconds=10.1 ops=1215383 ops_per_sec=120714 flushes=4 flush_ms_avg=176 flush_backlog_ms=33 memtable_bytes_at_flush=251274062 gc_count=12 gc_ms=1443 vm_hwm_kb=1811240
+java-skiplist-heap_buffers-t2-r1 impl=java threads=2 seconds=10.0 ops=2001874 ops_per_sec=200176 flushes=6 flush_ms_avg=176 flush_backlog_ms=0 memtable_bytes_at_flush=250522526 gc_count=18 gc_ms=2281 vm_hwm_kb=1783348
+java-skiplist-heap_buffers-t4-r1 impl=java threads=4 seconds=10.1 ops=1870812 ops_per_sec=184925 flushes=6 flush_ms_avg=297 flush_backlog_ms=0 memtable_bytes_at_flush=251027828 gc_count=20 gc_ms=2785 vm_hwm_kb=1884312
+java-trie-offheap_objects-t1-r1 impl=java threads=1 seconds=10.1 ops=2840009 ops_per_sec=281283 flushes=9 flush_ms_avg=811 flush_backlog_ms=296 memtable_bytes_at_flush=151205359 gc_count=18 gc_ms=2103 vm_hwm_kb=2600612
+java-trie-offheap_objects-t2-r1 impl=java threads=2 seconds=10.0 ops=2021404 ops_per_sec=202121 flushes=6 flush_ms_avg=777 flush_backlog_ms=0 memtable_bytes_at_flush=151116372 gc_count=8 gc_ms=1082 vm_hwm_kb=2452264
+java-trie-offheap_objects-t4-r1 impl=java threads=4 seconds=10.0 ops=2119313 ops_per_sec=211857 flushes=7 flush_ms_avg=738 flush_backlog_ms=658 memtable_bytes_at_flush=151011534 gc_count=9 gc_ms=1214 vm_hwm_kb=2438236
+rust-t1-r1 impl=rust threads=1 seconds=10.0 ops=1543850 ops_per_sec=154369 flushes=5 flush_ms_avg=1168 flush_backlog_ms=1147 memtable_bytes_at_flush=122712464 gc_count=2 gc_ms=213 vm_hwm_kb=1995320
+rust-t2-r1 impl=rust threads=2 seconds=10.0 ops=3431565 ops_per_sec=343146 flushes=11 flush_ms_avg=1140 flush_backlog_ms=3414 memtable_bytes_at_flush=122887372 gc_count=4 gc_ms=215 vm_hwm_kb=2227360
+rust-t4-r1 impl=rust threads=4 seconds=10.0 ops=3931654 ops_per_sec=393063 flushes=13 flush_ms_avg=1235 flush_backlog_ms=6606 memtable_bytes_at_flush=122809106 gc_count=5 gc_ms=306 vm_hwm_kb=2520912
+rust-mimalloc-t1-r1 impl=rust threads=1 seconds=10.0 ops=1640920 ops_per_sec=164063 flushes=5 flush_ms_avg=547 flush_backlog_ms=0 memtable_bytes_at_flush=122777656 gc_count=2 gc_ms=90 vm_hwm_kb=1818636
+rust-mimalloc-t2-r1 impl=rust threads=2 seconds=10.0 ops=3813710 ops_per_sec=381305 flushes=12 flush_ms_avg=632 flush_backlog_ms=126 memtable_bytes_at_flush=122758444 gc_count=5 gc_ms=246 vm_hwm_kb=1872320
+rust-mimalloc-t4-r1 impl=rust threads=4 seconds=10.0 ops=5071072 ops_per_sec=506940 flushes=16 flush_ms_avg=684 flush_backlog_ms=1315 memtable_bytes_at_flush=122842509 gc_count=6 gc_ms=296 vm_hwm_kb=2125076
+java-skiplist-heap_buffers-t1-r2 impl=java threads=1 seconds=10.0 ops=1291279 ops_per_sec=129115 flushes=4 flush_ms_avg=150 flush_backlog_ms=0 memtable_bytes_at_flush=251340406 gc_count=12 gc_ms=1408 vm_hwm_kb=1650988
+java-skiplist-heap_buffers-t2-r2 impl=java threads=2 seconds=10.0 ops=1701073 ops_per_sec=170005 flushes=5 flush_ms_avg=249 flush_backlog_ms=0 memtable_bytes_at_flush=251899997 gc_count=14 gc_ms=1818 vm_hwm_kb=1742668
+java-skiplist-heap_buffers-t4-r2 impl=java threads=4 seconds=10.0 ops=2148506 ops_per_sec=214741 flushes=7 flush_ms_avg=417 flush_backlog_ms=96 memtable_bytes_at_flush=251197770 gc_count=23 gc_ms=2989 vm_hwm_kb=1945456
+java-trie-offheap_objects-t1-r2 impl=java threads=1 seconds=10.1 ops=3332124 ops_per_sec=329059 flushes=11 flush_ms_avg=733 flush_backlog_ms=519 memtable_bytes_at_flush=150958010 gc_count=15 gc_ms=1877 vm_hwm_kb=2613648
+java-trie-offheap_objects-t2-r2 impl=java threads=2 seconds=10.0 ops=2220476 ops_per_sec=222027 flushes=7 flush_ms_avg=729 flush_backlog_ms=117 memtable_bytes_at_flush=151054735 gc_count=9 gc_ms=1220 vm_hwm_kb=2505740
+java-trie-offheap_objects-t4-r2 impl=java threads=4 seconds=10.0 ops=2094762 ops_per_sec=209446 flushes=6 flush_ms_avg=726 flush_backlog_ms=0 memtable_bytes_at_flush=150863038 gc_count=9 gc_ms=1091 vm_hwm_kb=2452940
+rust-t1-r2 impl=rust threads=1 seconds=10.0 ops=1622521 ops_per_sec=162236 flushes=5 flush_ms_avg=1126 flush_backlog_ms=639 memtable_bytes_at_flush=122735432 gc_count=2 gc_ms=94 vm_hwm_kb=1995936
+rust-t2-r2 impl=rust threads=2 seconds=10.0 ops=3280531 ops_per_sec=328030 flushes=10 flush_ms_avg=1190 flush_backlog_ms=2835 memtable_bytes_at_flush=122645147 gc_count=4 gc_ms=227 vm_hwm_kb=2224492
+rust-t4-r2 impl=rust threads=4 seconds=10.0 ops=4786863 ops_per_sec=478570 flushes=15 flush_ms_avg=1129 flush_backlog_ms=7352 memtable_bytes_at_flush=122754304 gc_count=5 gc_ms=271 vm_hwm_kb=2821608
+rust-mimalloc-t1-r2 impl=rust threads=1 seconds=10.0 ops=1705170 ops_per_sec=170494 flushes=5 flush_ms_avg=553 flush_backlog_ms=0 memtable_bytes_at_flush=122783160 gc_count=2 gc_ms=96 vm_hwm_kb=1824380
+rust-mimalloc-t2-r2 impl=rust threads=2 seconds=10.0 ops=3562307 ops_per_sec=356169 flushes=11 flush_ms_avg=583 flush_backlog_ms=0 memtable_bytes_at_flush=122860144 gc_count=5 gc_ms=250 vm_hwm_kb=1867968
+rust-mimalloc-t4-r2 impl=rust threads=4 seconds=10.0 ops=4863732 ops_per_sec=486284 flushes=16 flush_ms_avg=698 flush_backlog_ms=1754 memtable_bytes_at_flush=122012699 gc_count=6 gc_ms=318 vm_hwm_kb=2138536
+java-skiplist-heap_buffers-t1-r3 impl=java threads=1 seconds=10.0 ops=885507 ops_per_sec=88175 flushes=2 flush_ms_avg=107 flush_backlog_ms=0 memtable_bytes_at_flush=250804016 gc_count=11 gc_ms=1252 vm_hwm_kb=1477508
+java-skiplist-heap_buffers-t2-r3 impl=java threads=2 seconds=10.0 ops=1788635 ops_per_sec=178841 flushes=5 flush_ms_avg=106 flush_backlog_ms=0 memtable_bytes_at_flush=251814468 gc_count=18 gc_ms=2251 vm_hwm_kb=1758988
+java-skiplist-heap_buffers-t4-r3 impl=java threads=4 seconds=10.0 ops=1966855 ops_per_sec=196680 flushes=6 flush_ms_avg=447 flush_backlog_ms=0 memtable_bytes_at_flush=252260345 gc_count=21 gc_ms=2813 vm_hwm_kb=1812024
+java-trie-offheap_objects-t1-r3 impl=java threads=1 seconds=10.0 ops=2491168 ops_per_sec=249107 flushes=8 flush_ms_avg=867 flush_backlog_ms=319 memtable_bytes_at_flush=150965394 gc_count=16 gc_ms=2375 vm_hwm_kb=2426608
+java-trie-offheap_objects-t2-r3 impl=java threads=2 seconds=10.0 ops=2203536 ops_per_sec=220312 flushes=7 flush_ms_avg=663 flush_backlog_ms=279 memtable_bytes_at_flush=151030774 gc_count=9 gc_ms=1110 vm_hwm_kb=2446488
+java-trie-offheap_objects-t4-r3 impl=java threads=4 seconds=10.0 ops=1428535 ops_per_sec=142835 flushes=4 flush_ms_avg=1103 flush_backlog_ms=0 memtable_bytes_at_flush=150886212 gc_count=9 gc_ms=1067 vm_hwm_kb=2266204
+rust-t1-r3 impl=rust threads=1 seconds=10.0 ops=1395381 ops_per_sec=139526 flushes=4 flush_ms_avg=1110 flush_backlog_ms=0 memtable_bytes_at_flush=122743590 gc_count=2 gc_ms=436 vm_hwm_kb=1981360
+rust-t2-r3 impl=rust threads=2 seconds=10.0 ops=3089175 ops_per_sec=308876 flushes=10 flush_ms_avg=1186 flush_backlog_ms=2894 memtable_bytes_at_flush=122812820 gc_count=4 gc_ms=193 vm_hwm_kb=2021656
+rust-t4-r3 impl=rust threads=4 seconds=10.0 ops=4146393 ops_per_sec=414617 flushes=13 flush_ms_avg=1189 flush_backlog_ms=5862 memtable_bytes_at_flush=123338496 gc_count=5 gc_ms=279 vm_hwm_kb=2635632
+rust-mimalloc-t1-r3 impl=rust threads=1 seconds=10.0 ops=1659843 ops_per_sec=165967 flushes=5 flush_ms_avg=544 flush_backlog_ms=0 memtable_bytes_at_flush=122827924 gc_count=2 gc_ms=91 vm_hwm_kb=1808076
+rust-mimalloc-t2-r3 impl=rust threads=2 seconds=10.0 ops=3818199 ops_per_sec=381766 flushes=12 flush_ms_avg=549 flush_backlog_ms=34 memtable_bytes_at_flush=122890414 gc_count=5 gc_ms=229 vm_hwm_kb=1855972
+rust-mimalloc-t4-r3 impl=rust threads=4 seconds=10.0 ops=4804129 ops_per_sec=480378 flushes=15 flush_ms_avg=683 flush_backlog_ms=698 memtable_bytes_at_flush=123027181 gc_count=5 gc_ms=225 vm_hwm_kb=2035228
+
+median ops/s [min-max], memtable MiB at flush (median)
+java-skiplist-heap_buffers-t1               120714 [88175-129115]      240 MiB  n=3
+java-skiplist-heap_buffers-t2               178841 [170005-200176]      240 MiB  n=3
+java-skiplist-heap_buffers-t4               196680 [184925-214741]      240 MiB  n=3
+java-trie-offheap_objects-t1                281283 [249107-329059]      144 MiB  n=3
+java-trie-offheap_objects-t2                220312 [202121-222027]      144 MiB  n=3
+java-trie-offheap_objects-t4                209446 [142835-211857]      144 MiB  n=3
+rust-mimalloc-t1                            165967 [164063-170494]      117 MiB  n=3
+rust-mimalloc-t2                            381305 [356169-381766]      117 MiB  n=3
+rust-mimalloc-t4                            486284 [480378-506940]      117 MiB  n=3
+rust-t1                                     154369 [139526-162236]      117 MiB  n=3
+rust-t2                                     328030 [308876-343146]      117 MiB  n=3
+rust-t4                                     414617 [393063-478570]      117 MiB  n=3
