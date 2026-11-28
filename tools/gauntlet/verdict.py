@@ -64,10 +64,10 @@ def evaluate(rows, tl, ledger, end_state, misconfig, recovery_deadline_s, tail_s
         intervals.append({"start": t, "end": t + INTERVAL_S, "ops": len(rs), "p99_ms": round(p99, 1),
                           "errors": len(errs), "error_rate": round(rate, 4), "error_kinds": kinds,
                           "outside": bool(p99 > threshold or rate >= ERROR_LIMIT or not rs),
-                          "phase": "baseline" if t < fault_start else ("fault" if t < fault_end else "recovery")})
+                          "phase": "baseline" if t + INTERVAL_S <= fault_start else ("fault" if t + INTERVAL_S <= fault_end else "recovery")})
         t += INTERVAL_S
 
-    after = [iv for iv in intervals if iv["start"] >= fault_start]
+    after = [iv for iv in intervals if iv["end"] > fault_start]   # an interval straddling the fault start counts as fault
     viol = [iv for iv in after if iv["outside"]]
     reasons = []
     if ledger.get("lost_writes"):
