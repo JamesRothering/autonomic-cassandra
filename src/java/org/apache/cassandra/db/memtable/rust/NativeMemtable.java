@@ -35,7 +35,8 @@ final class NativeMemtable
 
     static
     {
-        String path = System.getProperty(LIBRARY_PROPERTY);
+        // A spike-only property, deliberately not in CassandraRelevantProperties so that no core file changes.
+        String path = System.getProperty(LIBRARY_PROPERTY); // checkstyle: suppress nearby 'blockSystemPropertyUsage'
         if (path == null)
             throw new IllegalStateException("Set -D" + LIBRARY_PROPERTY + " to the absolute path of libmemtable_jni.so");
         System.load(path);

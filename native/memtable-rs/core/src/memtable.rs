@@ -51,13 +51,13 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
-use std::mem::size_of;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::codec::{PartitionUpdate, TooLarge, encode_partition};
 use crate::model::{DeletionTime, Row};
+use crate::rows::{Rows, map_entry_bytes, signed};
 
 /// Errors from memtable operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,18 +98,22 @@ impl From<TooLarge> for MemtableError {
 #[derive(Debug, Default)]
 struct Partition {
     deletion: DeletionTime,
-    rows: BTreeMap<Box<[u8]>, Row>,
+    rows: Rows,
 }
 
 impl Partition {
-    /// The rows as reads and flushes see them: filtered by the partition
-    /// deletion, as Java's memtable does on read (see [`Row::visible_under`]).
+    /// The rows with `start <= clustering < end` as reads and flushes see
+    /// them: filtered by the partition deletion, as Java's memtable does on
+    /// read (see [`Row::visible_under`]).
     fn visible<'a>(
-        &self,
-        rows: impl Iterator<Item = (&'a Box<[u8]>, &'a Row)>,
+        &'a self,
+        start: &[u8],
+        end: Option<&[u8]>,
     ) -> impl Iterator<Item = (&'a [u8], Cow<'a, Row>)> {
         let deletion = self.deletion;
-        rows.filter_map(move |(c, r)| r.visible_under(deletion).map(|r| (&**c, r)))
+        self.rows
+            .range(start, end)
+            .filter_map(move |(c, r)| r.visible_under(deletion).map(|r| (c, r)))
     }
 }
 
@@ -119,27 +123,9 @@ struct Shard {
     partitions: BTreeMap<Box<[u8]>, Partition>,
 }
 
-/// Estimated bytes one `BTreeMap` entry costs beyond its key's and value's
-/// heap data. std's B-tree nodes hold up to 11 key/value slots and, under
-/// random inserts, run about two thirds full, so each entry pays roughly 1.5
-/// times its inline size. This is an estimate; the `accounting` integration
-/// test measures it against a counting allocator.
-const fn map_entry_bytes<K, V>() -> usize {
-    (size_of::<K>() + size_of::<V>()) * 3 / 2
-}
-
-fn row_entry_bytes(clustering: &[u8], row: &Row) -> usize {
-    map_entry_bytes::<Box<[u8]>, Row>() + clustering.len() + row.heap_bytes()
-}
-
+/// Bytes a partition's entry in its shard's map costs, excluding its rows.
 fn partition_entry_bytes(key: &[u8]) -> usize {
     map_entry_bytes::<Box<[u8]>, Partition>() + key.len()
-}
-
-/// Converts a byte count to a signed delta. Counts are bounded by the
-/// address space, far below `i64::MAX`.
-fn signed(n: usize) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// A concurrent memtable. `Send + Sync`: all shared state is behind
@@ -148,7 +134,18 @@ fn signed(n: usize) -> i64 {
 pub struct Memtable {
     /// `boundaries[i]` is the first key of shard `i + 1`.
     boundaries: Box<[Box<[u8]>]>,
-    shards: Box<[RwLock<Shard>]>,
+    shards: Box<[ShardSlot]>,
+}
+
+/// A shard and its counters, aligned so that no two shards share a cache
+/// line (128 bytes also covers adjacent-line prefetch). Writers to different
+/// shards then touch no common memory. The counters are atomics only so that
+/// [`Memtable::owned_bytes`] can sum them without taking the locks; they are
+/// written only under the shard's write lock.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct ShardSlot {
+    lock: RwLock<Shard>,
     owned_bytes: AtomicI64,
     partition_count: AtomicUsize,
 }
@@ -164,12 +161,12 @@ impl Memtable {
         if boundaries.windows(2).any(|w| w[0] >= w[1]) {
             return Err(MemtableError::BadBoundaries);
         }
-        let shards = (0..=boundaries.len()).map(|_| RwLock::default()).collect();
+        let shards = (0..=boundaries.len())
+            .map(|_| ShardSlot::default())
+            .collect();
         Ok(Self {
             boundaries: boundaries.into_boxed_slice(),
             shards,
-            owned_bytes: AtomicI64::new(0),
-            partition_count: AtomicUsize::new(0),
         })
     }
 
@@ -184,25 +181,37 @@ impl Memtable {
     }
 
     fn read_shard(&self, i: usize) -> Result<RwLockReadGuard<'_, Shard>, MemtableError> {
-        self.shards[i].read().map_err(|_| MemtableError::Poisoned)
+        self.shards[i]
+            .lock
+            .read()
+            .map_err(|_| MemtableError::Poisoned)
     }
 
     fn write_shard(&self, i: usize) -> Result<RwLockWriteGuard<'_, Shard>, MemtableError> {
-        self.shards[i].write().map_err(|_| MemtableError::Poisoned)
+        self.shards[i]
+            .lock
+            .write()
+            .map_err(|_| MemtableError::Poisoned)
     }
 
-    /// Estimated heap bytes owned by this memtable's data. Updated after each
-    /// write, so concurrent readers see a value at most one write behind per
-    /// writer.
+    /// Estimated heap bytes owned by this memtable's data: the sum of the
+    /// per-shard counts, each updated at the end of a write. Concurrent
+    /// writes may or may not be included. O(shards).
     #[must_use]
     pub fn owned_bytes(&self) -> i64 {
-        self.owned_bytes.load(Ordering::Relaxed)
+        self.shards
+            .iter()
+            .map(|s| s.owned_bytes.load(Ordering::Relaxed))
+            .sum()
     }
 
-    /// Number of distinct partitions.
+    /// Number of distinct partitions. O(shards), like [`Memtable::owned_bytes`].
     #[must_use]
     pub fn partition_count(&self) -> usize {
-        self.partition_count.load(Ordering::Relaxed)
+        self.shards
+            .iter()
+            .map(|s| s.partition_count.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Applies one partition update, merging it as
@@ -227,7 +236,9 @@ impl Memtable {
             deletion,
             rows,
         } = update;
-        let mut shard = self.write_shard(self.shard_of(&key))?;
+        let index = self.shard_of(&key);
+        let slot = &self.shards[index];
+        let mut shard = self.write_shard(index)?;
         if shard.frozen {
             return Err(MemtableError::Frozen);
         }
@@ -235,7 +246,7 @@ impl Memtable {
         let partition = match shard.partitions.entry(key) {
             Entry::Vacant(v) => {
                 delta += signed(partition_entry_bytes(v.key()));
-                self.partition_count.fetch_add(1, Ordering::Relaxed);
+                slot.partition_count.fetch_add(1, Ordering::Relaxed);
                 v.insert(Partition::default())
             }
             Entry::Occupied(o) => o.into_mut(),
@@ -244,19 +255,9 @@ impl Memtable {
             partition.deletion = deletion;
         }
         for (clustering, row) in rows {
-            match partition.rows.entry(clustering) {
-                Entry::Vacant(v) => {
-                    delta += signed(row_entry_bytes(v.key(), &row));
-                    v.insert(row);
-                }
-                Entry::Occupied(mut o) => {
-                    let before = o.get().heap_bytes();
-                    o.get_mut().merge(row);
-                    delta += signed(o.get().heap_bytes()) - signed(before);
-                }
-            }
+            delta += partition.rows.upsert(clustering, row);
         }
-        self.owned_bytes.fetch_add(delta, Ordering::Relaxed);
+        slot.owned_bytes.fetch_add(delta, Ordering::Relaxed);
         Ok(delta)
     }
 
@@ -280,18 +281,7 @@ impl Memtable {
             return Ok(false);
         };
         let mark = out.len();
-        let result = match end {
-            // `BTreeMap::range` panics on an inverted range; such a slice is
-            // simply empty.
-            Some(end) if end <= start => encode_partition::<&Row>(out, key, partition.deletion, []),
-            _ => {
-                let upper = end.map_or(Bound::Unbounded, Bound::Excluded);
-                let rows = partition
-                    .rows
-                    .range::<[u8], _>((Bound::Included(start), upper));
-                encode_partition(out, key, partition.deletion, partition.visible(rows))
-            }
-        };
+        let result = encode_partition(out, key, partition.deletion, partition.visible(start, end));
         if result.is_err() {
             out.truncate(mark);
         }
@@ -340,12 +330,7 @@ impl Memtable {
         for i in 0..self.shards.len() {
             let shard = self.read_shard(i)?;
             for (key, p) in &shard.partitions {
-                total += partition_entry_bytes(key);
-                total += p
-                    .rows
-                    .iter()
-                    .map(|(c, r)| row_entry_bytes(c, r))
-                    .sum::<usize>();
+                total += partition_entry_bytes(key) + p.rows.heap_bytes();
             }
         }
         Ok(signed(total))
@@ -393,7 +378,7 @@ impl FlushIter {
                     break;
                 };
                 let mark = out.len();
-                if let Err(e) = encode_partition(out, key, p.deletion, p.visible(p.rows.iter())) {
+                if let Err(e) = encode_partition(out, key, p.deletion, p.visible(&[], None)) {
                     out.truncate(mark);
                     return Err(e.into());
                 }

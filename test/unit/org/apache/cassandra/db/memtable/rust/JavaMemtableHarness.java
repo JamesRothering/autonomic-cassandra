@@ -59,9 +59,8 @@ final class JavaMemtableHarness
     /** Points the Rust spike at the library built by {@code cargo build --release}, unless already set. */
     static void setLibraryPathIfUnset()
     {
-        if (System.getProperty(NativeMemtable.LIBRARY_PROPERTY) == null)
-            System.setProperty(NativeMemtable.LIBRARY_PROPERTY,
-                               new File("native/memtable-rs/target/release/libmemtable_jni.so").getAbsolutePath());
+        SpikeProperties.setIfUnset(NativeMemtable.LIBRARY_PROPERTY,
+                                   new File("native/memtable-rs/target/release/libmemtable_jni.so").getAbsolutePath());
     }
 
     private Memtable newMemtable()

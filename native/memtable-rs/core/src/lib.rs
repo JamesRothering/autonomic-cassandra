@@ -31,6 +31,7 @@
 pub mod codec;
 pub mod memtable;
 pub mod model;
+mod rows;
 
 pub use codec::{DecodeError, PartitionUpdate, decode_partition, decode_partitions, encode_update};
 pub use memtable::{FlushIter, Memtable, MemtableError};

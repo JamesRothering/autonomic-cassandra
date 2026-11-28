@@ -32,6 +32,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import org.apache.cassandra.ServerTestUtils;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.ClusteringBound;
@@ -48,8 +49,10 @@ import org.apache.cassandra.db.rows.BTreeRow;
 import org.apache.cassandra.db.rows.BufferCell;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.service.StorageService;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -70,9 +73,9 @@ import static org.junit.Assert.fail;
 @RunWith(Parameterized.class)
 public class RustMemtableDifferentialTest extends CQLTester
 {
-    private static final int SEQUENCES = Integer.getInteger("rust_memtable.sequences", 40);
-    private static final int OPS_PER_SEQUENCE = Integer.getInteger("rust_memtable.ops", 400);
-    private static final long BASE_SEED = Long.getLong("rust_memtable.seed", System.nanoTime());
+    private static final int SEQUENCES = SpikeProperties.getInt("rust_memtable.sequences", 40);
+    private static final int OPS_PER_SEQUENCE = SpikeProperties.getInt("rust_memtable.ops", 400);
+    private static final long BASE_SEED = SpikeProperties.getLong("rust_memtable.seed", System.nanoTime());
     private static final String[] CK2 = { "", "a", "ab", "b" };
     private static final byte[][] VALUES = { {}, { 0 }, { 1 }, { 1, 0 }, { (byte) 0x80 }, { (byte) 0xff, 1 } };
     private static final long[] LDTS = { 10, 20, 30 };
@@ -86,10 +89,14 @@ public class RustMemtableDifferentialTest extends CQLTester
         return List.of("skiplist", "trie");
     }
 
+    /** Replaces CQLTester's: the production partitioner, so keys carry Murmur3 tokens and the Rust side has 4 shards. */
     @BeforeClass
-    public static void setUpLibrary()
+    public static void setUpClass()
     {
         JavaMemtableHarness.setLibraryPathIfUnset();
+        ServerTestUtils.daemonInitialization();
+        StorageService.instance.setPartitionerUnsafe(Murmur3Partitioner.instance);
+        CQLTester.prepareServer();
     }
 
     private JavaMemtableHarness createTable()
@@ -101,7 +108,9 @@ public class RustMemtableDifferentialTest extends CQLTester
 
     private static RustMemtable createRust(TableMetadata metadata)
     {
-        return RustMemtable.create(RustMemtable.tokenBoundaries(metadata.partitioner, 4));
+        List<byte[]> boundaries = RustMemtable.tokenBoundaries(metadata.partitioner, 4);
+        assertEquals("expected a Murmur3 table with 4 shards", 3, boundaries.size());
+        return RustMemtable.create(boundaries);
     }
 
     @Test
@@ -114,7 +123,10 @@ public class RustMemtableDifferentialTest extends CQLTester
         for (int s = 0; s < SEQUENCES; s++)
         {
             long seed = BASE_SEED + s;
-            Generator gen = new Generator(new Random(seed), metadata);
+            // Profiles: 0 = wide domains; 1 = tiny domains (two keys, four rows, three timestamps) with many
+            // deletions; 2 = tiny domains, two timestamps, mostly row liveness and shadowable deletions. Profiles 1
+            // and 2 make rare ties common; each was added after a mutant of one tie rule survived without it.
+            Generator gen = new Generator(new Random(seed), metadata, s % 3);
             RustMemtable rust = createRust(metadata);
             List<String> log = new ArrayList<>();
             try
@@ -198,7 +210,7 @@ public class RustMemtableDifferentialTest extends CQLTester
         List<List<PartitionUpdate>> work = new ArrayList<>();
         for (int t = 0; t < threads; t++)
         {
-            Generator gen = new Generator(new Random(BASE_SEED * 31 + t), metadata);
+            Generator gen = new Generator(new Random(BASE_SEED * 31 + t), metadata, 0);
             List<PartitionUpdate> updates = new ArrayList<>();
             for (int i = 0; i < perThread; i++)
                 updates.add(gen.cellOnlyUpdate());
@@ -232,7 +244,7 @@ public class RustMemtableDifferentialTest extends CQLTester
         JavaMemtableHarness java = createTable();
         TableMetadata metadata = java.metadata();
         long baseline = NativeMemtable.liveObjects();
-        Generator gen = new Generator(new Random(BASE_SEED), metadata);
+        Generator gen = new Generator(new Random(BASE_SEED), metadata, 0);
 
         try
         {
@@ -295,10 +307,14 @@ public class RustMemtableDifferentialTest extends CQLTester
         final TableMetadata metadata;
         final ClusteringComparator comparator;
         final List<ColumnMetadata> columns = new ArrayList<>();
+        final boolean dense;
+        final boolean livenessHeavy;
 
-        Generator(Random random, TableMetadata metadata)
+        Generator(Random random, TableMetadata metadata, int profile)
         {
             this.random = random;
+            this.dense = profile > 0;
+            this.livenessHeavy = profile == 2;
             this.metadata = metadata;
             this.comparator = metadata.comparator;
             metadata.regularColumns().forEach(columns::add);
@@ -306,25 +322,25 @@ public class RustMemtableDifferentialTest extends CQLTester
 
         DecoratedKey key()
         {
-            int k = random.nextInt(10);
+            int k = random.nextInt(dense ? 2 : 10);
             byte[] bytes = k < 8 ? new byte[]{ (byte) k } : new byte[]{ (byte) k, (byte) random.nextInt(2) };
             return metadata.partitioner.decorateKey(ByteBuffer.wrap(bytes));
         }
 
         Clustering<?> clustering()
         {
-            return Clustering.make(Int32Type.instance.decompose(random.nextInt(5) - 2),
-                                   UTF8Type.instance.decompose(CK2[random.nextInt(CK2.length)]));
+            return Clustering.make(Int32Type.instance.decompose(random.nextInt(dense ? 2 : 5) - (dense ? 0 : 2)),
+                                   UTF8Type.instance.decompose(CK2[random.nextInt(dense ? 2 : CK2.length)]));
         }
 
         long timestamp()
         {
-            return random.nextInt(4);
+            return random.nextInt(livenessHeavy ? 2 : dense ? 3 : 4);
         }
 
         long ldt()
         {
-            return LDTS[random.nextInt(LDTS.length)];
+            return LDTS[random.nextInt(dense ? 2 : LDTS.length)];
         }
 
         DeletionTime deletion()
@@ -346,7 +362,7 @@ public class RustMemtableDifferentialTest extends CQLTester
         LivenessInfo liveness()
         {
             int kind = random.nextInt(10);
-            if (kind < 7)
+            if (kind < (livenessHeavy ? 4 : 7))
                 return LivenessInfo.create(timestamp());
             if (kind < 9)
                 return LivenessInfo.withExpirationTime(timestamp(), 1 + random.nextInt(2), ldt());
@@ -360,12 +376,13 @@ public class RustMemtableDifferentialTest extends CQLTester
             {
                 Row.Builder builder = BTreeRow.sortedBuilder();
                 builder.newRow(clustering);
-                if (!cellsOnly && random.nextInt(10) < 3)
+                if (!cellsOnly && random.nextInt(10) < (livenessHeavy ? 8 : 3))
                     builder.addPrimaryKeyLivenessInfo(liveness());
-                if (!cellsOnly && random.nextInt(100) < 15)
+                if (!cellsOnly && random.nextInt(100) < (livenessHeavy ? 20 : dense ? 30 : 15))
                 {
                     DeletionTime dt = deletion();
-                    builder.addRowDeletion(random.nextInt(5) == 0 ? Row.Deletion.shadowable(dt) : Row.Deletion.regular(dt));
+                    boolean shadowable = random.nextInt(10) < (livenessHeavy ? 6 : 2);
+                    builder.addRowDeletion(shadowable ? Row.Deletion.shadowable(dt) : Row.Deletion.regular(dt));
                 }
                 for (ColumnMetadata column : columns)
                     if (random.nextBoolean())
