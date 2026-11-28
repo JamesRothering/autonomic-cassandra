@@ -20,7 +20,7 @@
 
 # Premises review
 
-- **Status:** proposed, 2026-11-28, revision 2, for the owner to rule on each premise. Not yet independently reviewed. Ruled so far: R-1 (rolling in-place upgrade) and R-14 (Java driver first, Python later). Still under discussion with the owner before the remaining rulings: how the JVM is replaced (PRE-3).
+- **Status:** proposed, 2026-11-28, revision 2, for the owner to rule on each premise. Not yet independently reviewed. Revision 3 adds PRE-20 (Accord at the core) and the version targets. Ruled so far: R-1 (rolling in-place upgrade from 5.0.x, then 6.0), R-14 (Java driver first, Python later), R-20 (Accord at the core). Still under discussion with the owner before the remaining rulings: how the JVM is replaced (PRE-3).
 - **Commit:** branch `deliverable/D7.1` at `a0aa7c6`. Every `file:line` below refers to that commit.
 - **Why it exists:** the owner's brief is to re-engineer Cassandra **from first principles**. Sprint 1 instead took Cassandra's architecture as given and added a control loop that tunes it. That choice was never examined. This document examines it, and every other premise found so far, **before** the 52 decisions of the failure-mode catalogue ([`failure-modes.md`](failure-modes.md)), because those decisions sit downstream of these premises.
 - **Owner direction so far (2026-11-28):** the only thing that must be kept is backward compatibility, so that this is a drop-in replacement for Cassandra; prevention may be better than healing; STW GC pauses are among Cassandra's worst problems; replace the JVM with Rust, or a formal specification proven in Lean; the driver is an overlooked, first-line observer of failures; a new protocol between drivers and nodes is allowed next to the native protocol, which is kept only for compatibility; drivers may keep their own history; Java driver first, Python later, Go deferred; rolling in-place upgrade, because it is the meaning of drop-in (a client was lost by ScyllaDB for lacking it); pay cleanup as a debt, with more repayment in historically quiet periods.
@@ -63,13 +63,15 @@ The failure-mode catalogue places almost every row at level 4 or 5. Revision 3 o
 
 | Surface | Kept because | Status |
 |---|---|---|
-| CQL: grammar, types, semantics, error codes | applications | required |
-| Native protocol v4 and v5, unmodified drivers | applications | required |
-| Reading Cassandra sstables (BIG and BTI formats) | moving existing data without export | required |
+| CQL: grammar, types, semantics, error codes, including lightweight transactions, `BEGIN TRANSACTION` (`src/antlr/Parser.g:757-774`), vector columns (`C/db/marshal/VectorType.java`) and SAI queries with vector search | applications | required |
+| Native protocol v3, v4 and v5 (`C/transport/ProtocolVersion.java:48-50`; specifications in `doc/native_protocol_v*.spec`), unmodified drivers | applications | required |
+| Reading Cassandra sstables: BIG from `ma` to `pa` (`C/io/sstable/format/big/BigFormat.java:404-406`), BTI `da` and `ea` (`C/io/sstable/format/bti/BtiFormat.java:262-263`); 5.0.9 writes `nb` by default (`storage_compatibility_mode: CASSANDRA_4` in its shipped `conf/cassandra.yaml`) | moving existing data without export | required |
 | `cassandra.yaml` settings accepted (unknown or meaningless ones warned, not rejected) | operators | required |
 | nodetool commands and JMX metric names used by dashboards | operators | required for the common set; full list to be drawn up |
 | Internode protocol, cluster metadata (TCM) and schema exchange with stock Cassandra nodes | rolling in-place upgrade | **open: ruling R-1** |
 | Language and runtime (JVM) | nothing; users never see it | **not part of the contract** |
+
+**Version targets (owner, 2026-11-28):** rolling upgrade from **Cassandra 5.0.x** (latest stable: `cassandra-5.0.9`) first, then **6.0** once released (latest tag: `cassandra-6.0-alpha2`). The fork's base is trunk, which already calls itself 7.0 (`build.xml:36`). This matters: 5.0 has no cluster metadata service (no `C/tcm/` at `cassandra-5.0.9`); it arrives in 6.0 (`MessagingService.VERSION_60`, "TCM", `C/net/MessagingService.java:268`). In a cluster with 5.0 nodes, our node must speak gossip-based metadata and schema; it changes to the metadata service only after every node is upgraded and an operator runs `nodetool cms initialize` (`C/tools/nodetool/CMSAdmin.java:104`).
 
 **Ruling R-1, the upgrade path:**
 
@@ -321,6 +323,20 @@ The result is a bound, set by design, on how far cleanup can fall behind and on 
 
 **Ruling R-19:** garbage debt with floor, ceiling, quiet-period repayment, limits and deadlines.
 
+### PRE-20. Transactions are an opt-in extra
+
+**Cassandra assumes:** reads and writes are single-partition and last-write-wins; transactions are a later, optional addition. Lightweight transactions use Paxos, still v1 by default even in trunk (`C/config/Config.java:1215`); Accord, general transactions across partitions, is off by default (`C/config/AccordConfig.java:44`). The catalogue proposed Accord out of scope for that reason (FM-OPT-01).
+
+**Why doubt it:** the owner's goal includes atomic transactions with linear scalability. The usual way to get them (a leader per range with Raft or Paxos, row locks, as in CockroachDB, YugabyteDB or Spanner) cannot be used: in a mixed cluster our node shares replica sets with stock nodes (R-1), and CQL exposes the cell model (`WRITETIME()`, `USING TIMESTAMP`, per-cell TTL, blind writes). Accord gives serializable transactions across partitions with a **leaderless** consensus protocol, which fits Cassandra's replication, has no leader bottleneck, and orders conflicting transactions instead of locking rows, so there are no distributed deadlocks. Upstream has proved part of it in Lean (`formalise/accord/execution/lean/AccordAcyclic.lean`).
+
+**Alternative:** Accord at the core of the Rust engine, not an add-on: transactional tables are a first-class mode, designed with the storage engine, the scheduler and the budget (PRE-9, PRE-19) from the start; lightweight transactions run on Accord where the table's mode allows (upstream already has a Paxos-to-Accord migration path: `C/service/consensus/migration/`, `C/service/consensus/TransactionalMode.java`).
+
+**Compatibility:** `BEGIN TRANSACTION` exists in trunk's grammar but not in 5.0, so transactions can be enabled only after every node runs 6.0 or our engine, like the metadata service. In a cluster with 6.0 nodes, our node must speak Accord's messages.
+
+**Effect on the catalogue:** FM-OPT-01 moves from out of scope to the core; FM-WRT-08 (Paxos and LWT) changes; a new family of rows for Accord's own failure modes (coordinator recovery, dependency build-up, journal growth).
+
+**Ruling R-20 (ruled, owner, 2026-11-28):** Accord at the core.
+
 ---
 
 ## Part 3. The driver
@@ -410,7 +426,7 @@ Whether the extension rides in custom payloads at first or is a protocol of its 
 
 | Ruling | Premise | Recommendation |
 |---|---|---|
-| R-1 | Upgrade path | **ruled: (a) rolling in-place upgrade** |
+| R-1 | Upgrade path | **ruled: (a) rolling in-place upgrade**, from 5.0.x, then 6.0 |
 | R-2 | Prevent before healing | adopt the order of preference; allow prediction for slow resources |
 | R-3 | Runtime | Rust engine |
 | R-4 | Verification | Lean, verified Rust for critical modules, deterministic simulation, Cassandra as oracle |
@@ -429,12 +445,11 @@ Whether the extension rides in custom payloads at first or is a protocol of its 
 | R-17 | Layer shape | local controllers plus a supervisor |
 | R-18 | Cluster decisions | through the metadata service |
 | R-19 | Cleanup | garbage debt: floor, ceiling, quiet-period repayment, limits and deadlines |
+| R-20 | Transactions | **ruled:** Accord at the core |
 
 ## What follows the rulings
 
-1. Revision 3 of the failure-mode catalogue: the **prevent** disposition, rows moved by each accepted premise, the FM-DRV family, rows removed by the Rust engine. The 52 decisions are then re-derived; many disappear.
-2. A replacement for `docs/NEXT-STEPS.md`: increment 2 as planned (more sensors and actuators on the Java layer) is superseded for everything the Rust engine designs out. What remains useful on the Java fork is what makes it a good oracle and what proves the design (the correlator and governor rules, carried into the new design).
-3. Architecture decision records for R-1, R-3, R-4, R-9, R-15, and a first plan for the Rust engine.
+The work is planned as user stories in [`docs/plan/user-stories.md`](../plan/user-stories.md), taken a few at a time. Revision 3 of the failure-mode catalogue (the **prevent** disposition, the FM-DRV family, cleanup-cascade and Accord rows, rows removed by the Rust engine) comes with story 8; the 52 decisions are then re-derived.
 
 ## Not verified
 
