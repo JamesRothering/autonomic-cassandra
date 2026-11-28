@@ -61,6 +61,16 @@ TIMELINES = {
 SUBJECT_AUTONOMIC = {
     "stock": {"enabled": False},
     "autonomic": {"enabled": True, "dry_run": False, "startup_grace": "30s", "safety": {"cluster_approval": "manual"}},
+    # The layer with its in-node actuators on (all are off by default, AutonomicConfig.defaultActuators); option values
+    # repeat the defaults because a YAML map replaces the whole default map. Scale-out stays off: cluster actions
+    # wait for manual approval, which nobody gives during a run.
+    "autonomic-armed": {"enabled": True, "dry_run": False, "startup_grace": "30s", "safety": {"cluster_approval": "manual"},
+                        "actuators": {"compaction_throughput": {"enabled": True, "min_factor": 0.25, "max_factor": 4.0},
+                                      "request_pools": {"enabled": True, "min_factor": 0.5, "max_factor": 2.0},
+                                      "request_throttle": {"enabled": True, "min_requests_per_second": 1000},
+                                      "scale_out": {"enabled": False},
+                                      "partition_split": {"enabled": True},
+                                      "partition_unsplit": {"enabled": True}}},
 }
 
 _live = {"clusters": [], "stress": []}
@@ -309,7 +319,7 @@ def run_one(subject, scenario_path, out, quick=False, probe_rate=40, heap="512M"
 
         result["stress"] = {nm: parse_stress(path, int(sp_spec.get("rate", DEFAULT_RATE))) for nm, _, path, sp_spec in stress_procs}
 
-        if subject == "autonomic":
+        if subject.startswith("autonomic"):
             result["layer"] = collect_layer(c, out)
         result["resources"] = {"peak_machine_used_mb": sampler.peak_used, "peak_node_rss_total_mb": sampler.peak_node_rss}
         log("%s/%s verdict: %s %s" % (subject, name, result["verdict"], "; ".join(v["reasons"])))
