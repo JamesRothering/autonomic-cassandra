@@ -160,6 +160,35 @@ public class LoadSpikePolicyTest
     }
 
     @Test
+    public void aCacheMissDiagnosisDoesNotTakeTheLeadFromAPoolSaturation()
+    {
+        // cache_miss_pressure is a cause of the latency breach only, so the saturated pool has no root cause and leads
+        Diagnosis pool = saturated("ReadStage", Severity.CRITICAL, NOW - 60_000);
+        Diagnosis cache = diagnosis("cache_miss_pressure", NODE, Severity.WARN, NOW - 60_000, null, Map.of());
+        Diagnosis latency = breach(Severity.CRITICAL, cache.id);
+        view.setActiveDiagnoses(List.of(pool, cache, latency));
+        assertEquals("compaction_throughput", next(pool));
+    }
+
+    @Test
+    public void aLatencyBreachCausedByCacheMissesStillLeadsBecauseNothingActsOnTheCache()
+    {
+        Diagnosis cache = diagnosis("cache_miss_pressure", NODE, Severity.WARN, NOW - 60_000, null, Map.of());
+        Diagnosis latency = breach(Severity.CRITICAL, cache.id);
+        view.setActiveDiagnoses(List.of(cache, latency));
+        assertEquals("compaction_throughput", next(latency));
+    }
+
+    @Test
+    public void aLatencyBreachCausedByGcDoesNotLead()
+    {
+        Diagnosis gc = diagnosis("gc_pressure", NODE, Severity.WARN, NOW - 60_000, null, Map.of());
+        Diagnosis latency = breach(Severity.CRITICAL, gc.id);
+        view.setActiveDiagnoses(List.of(gc, latency));
+        assertEquals(null, next(latency));
+    }
+
+    @Test
     public void stepsAreProposedInTheFixedOrderYieldPoolsThrottleThenScaleOut()
     {
         Diagnosis pool = saturated("ReadStage", Severity.CRITICAL, NOW - 60_000);

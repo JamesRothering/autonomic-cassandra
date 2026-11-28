@@ -3095,6 +3095,8 @@ storage_compatibility_mode: NONE
 #     interval: 60s
 #     min_ops_per_sec: 100
 #     capacity: 256
+#   cache:
+#     min_requests_per_sec: 10   # no hit rate for an interval with fewer requests per second
 #   safety:
 #     max_actions_per_hour: 6
 #     node_approval: auto          # auto | manual
@@ -3111,6 +3113,10 @@ storage_compatibility_mode: NONE
 #     disk_pressure: { enabled: true, used_fraction: 0.85 }   # clear defaults to 95% of raise
 #     gc_pressure: { enabled: true, time_fraction: 0.1 }
 #     pool_saturation: { enabled: true, pending_tasks: 50 }   # per thread pool
+#     # drop: points of hit rate below the cache's own mean over reference_window_ms (1 hour) before the drop;
+#     # after relearn_after_ms (24 hours) of continuous drop the new level is taken as normal and the diagnosis clears.
+#     # The key cache may be unused (no requests) on the BTI sstable format.
+#     cache_miss_pressure: { enabled: true, drop: 0.2, reference_window_ms: 3600000, relearn_after_ms: 86400000 }
 #     # The next three compare peers using gossip and dynamic snitch data, which can be seconds to a minute old
 #     # (gossiped load refreshes about once a minute); treat them as slow, approximate signals.
 #     node_imbalance: { enabled: true, load_ratio: 1.5, min_peers: 3, min_load_bytes: 1073741824 }

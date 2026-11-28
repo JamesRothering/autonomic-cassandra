@@ -17,6 +17,7 @@
  */
 package org.apache.cassandra.autonomic.plan.policies;
 
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -25,6 +26,7 @@ import org.apache.cassandra.autonomic.execute.actuators.CompactionThroughputActu
 import org.apache.cassandra.autonomic.execute.actuators.ConcurrentCompactorsActuator;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator.Direction;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
 
@@ -42,6 +44,13 @@ public class CompactionBacklogPolicy extends KnobPolicy
         super(NAME, "compaction_backlog",
               steps(CompactionThroughputActuator.NAME, Direction.UP, ConcurrentCompactorsActuator.NAME, Direction.UP),
               actuators, windows);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.COMPACTION_PENDING_TASKS, Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_READ_OPS_PER_SEC,
+                      Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_OPS_PER_SEC);
     }
 
     @Override

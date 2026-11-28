@@ -18,6 +18,7 @@
 package org.apache.cassandra.autonomic.plan.policies;
 
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -72,6 +73,13 @@ public class YieldBackgroundPolicy extends KnobPolicy
     public static List<String> yieldActuators()
     {
         return List.of(CompactionThroughputActuator.NAME, StreamThroughputActuator.NAME, HintThrottleActuator.NAME);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.POOL_PENDING_TASKS, Signals.CLIENT_READ_LATENCY_P99_MICROS, Signals.CLIENT_READ_OPS_PER_SEC,
+                      Signals.CLIENT_WRITE_LATENCY_P99_MICROS, Signals.CLIENT_WRITE_OPS_PER_SEC);
     }
 
     @Override

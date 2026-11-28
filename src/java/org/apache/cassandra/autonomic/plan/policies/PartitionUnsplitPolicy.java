@@ -36,6 +36,7 @@ import org.apache.cassandra.autonomic.execute.Actuator;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionSplitActuator;
 import org.apache.cassandra.autonomic.execute.actuators.PartitionUnsplitActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
@@ -112,6 +113,18 @@ public class PartitionUnsplitPolicy implements Policy
     public Set<String> handles()
     {
         return Set.of(PartitionUnsplitActuator.SPLIT_NOT_EFFECTIVE, PartitionUnsplitActuator.UNSPLIT_PENDING, PartitionUnsplitActuator.UNSPLIT_ORPHANED);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS);
+    }
+
+    @Override
+    public Set<String> actuations()
+    {
+        return Set.of(Policy.actuation(PartitionUnsplitActuator.NAME, Policy.APPLY));
     }
 
     @Override

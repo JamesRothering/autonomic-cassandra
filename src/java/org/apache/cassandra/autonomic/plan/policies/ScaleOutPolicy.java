@@ -81,6 +81,18 @@ public class ScaleOutPolicy implements Policy
     }
 
     @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.DISK_USED_FRACTION, Signals.POOL_PENDING_TASKS);
+    }
+
+    @Override
+    public Set<String> actuations()
+    {
+        return Set.of(Policy.actuation(ScaleOutActuator.NAME, Policy.APPLY));
+    }
+
+    @Override
     public Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge)
     {
         if (!CapacityExhaustedDetector.TRIGGER_DISK.equals(diagnosis.evidence.get(CapacityExhaustedDetector.EVIDENCE_TRIGGER)))
@@ -101,6 +113,16 @@ public class ScaleOutPolicy implements Policy
             public Set<String> actuators()
             {
                 return Set.of(ScaleOutActuator.NAME);
+            }
+
+            public Set<SignalId> inputs()
+            {
+                return ScaleOutPolicy.this.inputs();
+            }
+
+            public Set<String> actuations()
+            {
+                return ScaleOutPolicy.this.actuations();
             }
 
             public Optional<Plan> plan(Diagnosis lead, KnowledgeView knowledge)

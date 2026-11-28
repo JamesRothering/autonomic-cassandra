@@ -57,7 +57,7 @@ public class DegradedPeerDetector extends PeerDetector
     @Override
     public Set<SignalId> requires()
     {
-        return Set.of(Signals.PEER_SNITCH_SCORE, Signals.PEER_ALIVE);
+        return Set.of(Signals.PEER_SNITCH_SCORE, Signals.PEER_ALIVE, Signals.PEER_SEVERITY);
     }
 
     @Override

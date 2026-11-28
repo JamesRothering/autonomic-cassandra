@@ -18,10 +18,12 @@
 package org.apache.cassandra.autonomic.analyze.detectors;
 
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cassandra.autonomic.analyze.Severity;
 import org.apache.cassandra.autonomic.analyze.ThresholdDetector;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 
@@ -40,6 +42,12 @@ public class CompactionBacklogDetector extends ThresholdDetector
     public static CompactionBacklogDetector fromConfig(Map<String, Object> options)
     {
         return new CompactionBacklogDetector(Settings.fromConfig(options, THRESHOLD_KEY, DEFAULT_THRESHOLD));
+    }
+
+    @Override
+    public Set<SignalId> requires()
+    {
+        return Set.of(Signals.COMPACTION_PENDING_TASKS, Signals.COMPACTION_BYTES_PER_SEC);
     }
 
     @Override

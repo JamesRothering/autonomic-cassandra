@@ -96,6 +96,8 @@ public class RuleCorrelator implements Correlator
                  "garbage collection pauses stop stage threads and let queues grow"),
         new Rule("gc_pressure", "degraded_self", Scope.LOCAL, null,
                  "garbage collection pauses slow this node's own requests"),
+        new Rule("cache_miss_pressure", "latency_slo_breach", Scope.LOCAL, null,
+                 "reads that miss the cache go to disk"),
         new Rule("pool_saturation", "latency_slo_breach", Scope.LOCAL, null,
                  "requests wait in a saturated thread pool queue"),
         new Rule("pool_saturation", "degraded_self", Scope.LOCAL, null,

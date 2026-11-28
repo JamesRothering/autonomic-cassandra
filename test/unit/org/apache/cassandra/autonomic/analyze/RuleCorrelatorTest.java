@@ -75,6 +75,8 @@ public class RuleCorrelatorTest
           "pool_saturation summary [likely caused by gc_pressure on NODE: garbage collection pauses stop stage threads and let queues grow]" },
         { "gc_pressure", NODE, "degraded_self", NODE,
           "degraded_self summary [likely caused by gc_pressure on NODE: garbage collection pauses slow this node's own requests]" },
+        { "cache_miss_pressure", NODE, "latency_slo_breach", T1,
+          "latency_slo_breach summary [likely caused by cache_miss_pressure on NODE: reads that miss the cache go to disk]" },
         { "pool_saturation", Subject.threadPool("ReadStage"), "latency_slo_breach", T1,
           "latency_slo_breach summary [likely caused by pool_saturation on THREAD_POOL:ReadStage: requests wait in a saturated thread pool queue]" },
         { "pool_saturation", Subject.threadPool("ReadStage"), "degraded_self", NODE,
@@ -107,6 +109,18 @@ public class RuleCorrelatorTest
             assertEquals(effect.firstSeenMillis, e.firstSeenMillis);
             assertNull(find(out, cause.id).rootCause);
         }
+    }
+
+    @Test
+    public void cacheMissPressureCausesLatencyButNotPoolSaturation()
+    {
+        Diagnosis cache = diag("cache_miss_pressure", NODE, Severity.CRITICAL, 1);
+        Diagnosis pool = diag("pool_saturation", Subject.threadPool("ReadStage"));
+        Diagnosis lat = diag("latency_slo_breach", T1);
+        List<Diagnosis> out = run(lat, pool, cache);
+        assertEquals(cache.id, find(out, lat.id).rootCause);
+        assertNull(find(out, pool.id).rootCause);
+        assertNull(find(out, cache.id).rootCause);
     }
 
     @Test

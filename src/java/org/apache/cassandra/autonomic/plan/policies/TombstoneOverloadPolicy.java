@@ -17,9 +17,11 @@
  */
 package org.apache.cassandra.autonomic.plan.policies;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
@@ -31,11 +33,13 @@ import org.apache.cassandra.autonomic.execute.actuators.CompactionThroughputActu
 import org.apache.cassandra.autonomic.execute.actuators.GarbageCollectActuator;
 import org.apache.cassandra.autonomic.execute.actuators.KnobActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
+import org.apache.cassandra.autonomic.plan.Policy;
 import org.apache.cassandra.autonomic.plan.VerifySpec;
 import org.apache.cassandra.utils.TimeUUID;
 
@@ -57,6 +61,21 @@ public class TombstoneOverloadPolicy extends KnobPolicy
         super(NAME, "tombstone_overload", steps(CompactionThroughputActuator.NAME, KnobActuator.Direction.UP), actuators, windows);
         this.actuators = actuators;
         this.windows = windows;
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.TABLE_TOMBSTONES_SCANNED_P99, Signals.TABLE_READ_LATENCY_P99_MICROS, Signals.TABLE_READ_OPS_PER_SEC);
+    }
+
+    /** The compaction throughput step, and at CRITICAL the garbage-collecting compaction. */
+    @Override
+    public Set<String> actuations()
+    {
+        Set<String> out = new LinkedHashSet<>(super.actuations());
+        out.add(Policy.actuation(GarbageCollectActuator.NAME, Policy.APPLY));
+        return out;
     }
 
     @Override

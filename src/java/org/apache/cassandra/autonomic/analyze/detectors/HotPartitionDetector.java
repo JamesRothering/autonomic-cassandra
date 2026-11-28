@@ -58,7 +58,8 @@ public class HotPartitionDetector extends ThresholdDetector
     @Override
     public Set<SignalId> requires()
     {
-        return Set.of(Signals.PARTITION_READ_SHARE, Signals.PARTITION_WRITE_SHARE);
+        return Set.of(Signals.PARTITION_READ_SHARE, Signals.PARTITION_WRITE_SHARE, Signals.PARTITION_READ_OPS_PER_SEC,
+                      Signals.PARTITION_WRITE_OPS_PER_SEC, Signals.PARTITION_SIZE_BYTES);
     }
 
     @Override

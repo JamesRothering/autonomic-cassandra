@@ -57,6 +57,7 @@ import org.apache.cassandra.autonomic.layout.PartitionProbe;
 import org.apache.cassandra.autonomic.layout.Phase;
 import org.apache.cassandra.autonomic.layout.SplitEvaluation;
 import org.apache.cassandra.autonomic.layout.TableLayout;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.monitor.sensors.Signals;
 import org.apache.cassandra.autonomic.plan.Action;
@@ -199,6 +200,20 @@ public class PartitionSplitPolicy implements Policy
     public Set<String> handles()
     {
         return Set.of(HotPartitionDetector.NAME, PartitionSplitActuator.ORPHANED, PartitionSplitActuator.RECLAIM_DUE);
+    }
+
+    @Override
+    public Set<SignalId> inputs()
+    {
+        return Set.of(Signals.PARTITION_READ_SHARE, Signals.PARTITION_WRITE_SHARE, Signals.PARTITION_SIZE_BYTES,
+                      Signals.DISK_FREE_BYTES, Signals.TABLE_COORDINATOR_READ_LATENCY_P99_MICROS);
+    }
+
+    /** Split, resume and reclaim are all actions of the split actuator. */
+    @Override
+    public Set<String> actuations()
+    {
+        return Set.of(Policy.actuation(PartitionSplitActuator.NAME, Policy.APPLY));
     }
 
     /** The number of buckets of design 7.2 step 4: {@code clamp(nextPowerOfTwo(ceil(share / target_share)), 4, 32)}. */

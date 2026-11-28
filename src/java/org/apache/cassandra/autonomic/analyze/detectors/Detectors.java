@@ -47,6 +47,8 @@ public final class Detectors
             out.add(DiskPressureDetector.fromConfig(options(config, DiskPressureDetector.NAME)));
         if (enabled(config, GcPressureDetector.NAME))
             out.add(GcPressureDetector.fromConfig(options(config, GcPressureDetector.NAME)));
+        if (enabled(config, CacheMissPressureDetector.NAME))
+            out.add(CacheMissPressureDetector.fromConfig(options(config, CacheMissPressureDetector.NAME)));
         if (enabled(config, PoolSaturationDetector.NAME))
             out.add(PoolSaturationDetector.fromConfig(options(config, PoolSaturationDetector.NAME)));
         if (enabled(config, NodeImbalanceDetector.NAME))

@@ -38,6 +38,7 @@ import org.apache.cassandra.autonomic.execute.actuators.AdvertisedSeverityActuat
 import org.apache.cassandra.autonomic.execute.actuators.RequestPoolActuator;
 import org.apache.cassandra.autonomic.execute.actuators.RequestThrottleActuator;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 import org.apache.cassandra.autonomic.monitor.Subject;
 import org.apache.cassandra.autonomic.plan.ActionScope;
 import org.apache.cassandra.autonomic.plan.Plan;
@@ -67,6 +68,20 @@ import org.apache.cassandra.autonomic.plan.Policy;
 public class LoadSpikePolicy implements Policy
 {
     public static final String NAME = "load_spike";
+    /**
+     * Causes no policy acts on (ADR-046): naming one never removes an action the layer took before it was named, so a
+     * lead whose root cause is of one of these types is treated as having no root cause.
+     */
+    static final Set<String> DIAGNOSE_ONLY_CAUSES = Set.of("cache_miss_pressure");
+
+    private static boolean isDiagnoseOnly(java.util.UUID rootCause, KnowledgeView knowledge)
+    {
+        for (Diagnosis d : knowledge.activeDiagnoses())
+            if (d.id.equals(rootCause))
+                return DIAGNOSE_ONLY_CAUSES.contains(d.type);
+        return false;
+    }
+
     static final Set<String> LEADS = Set.of(PoolSaturationDetector.NAME, LatencySloBreachDetector.NAME, "degraded_self");
     static final long LOOKBACK_MILLIS = TimeUnit.HOURS.toMillis(6);
 
@@ -80,6 +95,18 @@ public class LoadSpikePolicy implements Policy
 
         /** The next action for the lead, or empty if the step does not apply or is exhausted. Must not look at actuator gates. */
         Optional<Plan> plan(Diagnosis lead, KnowledgeView knowledge);
+
+        /** As {@link Policy#inputs}, of the policy the step wraps. */
+        default Set<SignalId> inputs()
+        {
+            return Set.of();
+        }
+
+        /** As {@link Policy#actuations}, of the policy the step wraps. */
+        default Set<String> actuations()
+        {
+            return Set.of();
+        }
     }
 
     /** The extension point of scale-out: no step. */
@@ -110,16 +137,16 @@ public class LoadSpikePolicy implements Policy
         RequestPoolPolicy pools = new RequestPoolPolicy(actuators, windows, RequestPoolPolicy.Mode.SATURATION);
         RequestThrottlePolicy throttle = new RequestThrottlePolicy(actuators, windows, RequestThrottlePolicy.Mode.BREACH);
         List<Step> steps = List.of(
-            step("yield_background", Set.copyOf(YieldBackgroundPolicy.yieldActuators()), (lead, k) -> yield.plan(lead, k)),
+            step("yield_background", Set.copyOf(YieldBackgroundPolicy.yieldActuators()), yield, (lead, k) -> yield.plan(lead, k)),
             // only a node that is slow itself advertises it
-            step("advertise_severity", Set.of(AdvertisedSeverityActuator.NAME),
+            step("advertise_severity", Set.of(AdvertisedSeverityActuator.NAME), advertise,
                  (lead, k) -> lead.type.equals("degraded_self") ? advertise.plan(lead, k) : Optional.empty()),
-            step("resize_request_pools", Set.copyOf(RequestPoolActuator.STAGES.keySet()), (lead, k) -> {
+            step("resize_request_pools", Set.copyOf(RequestPoolActuator.STAGES.keySet()), pools, (lead, k) -> {
                 String actuator = RequestPoolPolicy.actuatorOf(String.valueOf(lead.subject.detail));
                 return lead.type.equals(PoolSaturationDetector.NAME) && actuator != null && enabled.test(actuator)
                        ? pools.plan(lead, k) : Optional.empty();
             }),
-            step("shed_load", Set.of(RequestThrottleActuator.NAME), (lead, k) -> {
+            step("shed_load", Set.of(RequestThrottleActuator.NAME), throttle, (lead, k) -> {
                 // the breach may be an effect of the lead: effects are not leads but are still active
                 Diagnosis latency = lead.type.equals(LatencySloBreachDetector.NAME) ? lead : nodeBreach(k);
                 return latency == null ? Optional.empty() : throttle.breach(latency, k);
@@ -127,13 +154,15 @@ public class LoadSpikePolicy implements Policy
         return new LoadSpikePolicy(steps, enabled, scaleOut == null ? NO_SCALE_OUT : scaleOut);
     }
 
-    private static Step step(String name, Set<String> actuators, java.util.function.BiFunction<Diagnosis, KnowledgeView, Optional<Plan>> plan)
+    private static Step step(String name, Set<String> actuators, Policy wrapped, java.util.function.BiFunction<Diagnosis, KnowledgeView, Optional<Plan>> plan)
     {
         return new Step()
         {
             public String name() { return name; }
             public Set<String> actuators() { return actuators; }
             public Optional<Plan> plan(Diagnosis lead, KnowledgeView knowledge) { return plan.apply(lead, knowledge); }
+            public Set<SignalId> inputs() { return wrapped.inputs(); }
+            public Set<String> actuations() { return wrapped.actuations(); }
         };
     }
 
@@ -155,6 +184,26 @@ public class LoadSpikePolicy implements Policy
     public Set<String> handles()
     {
         return LEADS;
+    }
+
+    /** Those of its steps. */
+    @Override
+    public Set<SignalId> inputs()
+    {
+        Set<SignalId> out = new LinkedHashSet<>();
+        for (Step s : all())
+            out.addAll(s.inputs());
+        return out;
+    }
+
+    /** Those of its steps. */
+    @Override
+    public Set<String> actuations()
+    {
+        Set<String> out = new LinkedHashSet<>();
+        for (Step s : all())
+            out.addAll(s.actuations());
+        return out;
     }
 
     private List<Step> all()
@@ -181,7 +230,7 @@ public class LoadSpikePolicy implements Policy
             return Optional.empty();
         List<Diagnosis> leads = new ArrayList<>();
         for (Diagnosis d : knowledge.activeDiagnoses())
-            if (LEADS.contains(d.type) && d.rootCause == null)
+            if (LEADS.contains(d.type) && (d.rootCause == null || isDiagnoseOnly(d.rootCause, knowledge)))
                 leads.add(d);
         leads.sort(LEAD_ORDER);
         for (Diagnosis lead : leads)

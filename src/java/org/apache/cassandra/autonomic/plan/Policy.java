@@ -22,6 +22,7 @@ import java.util.Set;
 
 import org.apache.cassandra.autonomic.analyze.Diagnosis;
 import org.apache.cassandra.autonomic.knowledge.KnowledgeView;
+import org.apache.cassandra.autonomic.monitor.SignalId;
 
 /** Plan. Pure function. Returns empty if no action is appropriate. */
 public interface Policy
@@ -32,4 +33,31 @@ public interface Policy
     Set<String> handles();
 
     Optional<Plan> plan(Diagnosis diagnosis, KnowledgeView knowledge);
+
+    /** Direction of an actuation of an actuator that is not a knob. */
+    String APPLY = "APPLY";
+
+    /**
+     * Every signal this policy reads from knowledge, reads as diagnosis evidence, or names in the verify specs it
+     * builds. {@code InputCoverageTest} checks that a sensor emits each one and that the code reads no other.
+     */
+    default Set<SignalId> inputs()
+    {
+        return Set.of();
+    }
+
+    /**
+     * Every actuator move this policy may propose, each from {@link #actuation}. {@code InputCoverageTest} checks
+     * that every direction of every actuator is proposed by some policy, or recorded as not used.
+     */
+    default Set<String> actuations()
+    {
+        return Set.of();
+    }
+
+    /** @param direction {@code UP} or {@code DOWN} for a knob, {@link #APPLY} otherwise */
+    static String actuation(String actuator, String direction)
+    {
+        return actuator + '/' + direction;
+    }
 }
