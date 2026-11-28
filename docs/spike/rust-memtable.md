@@ -26,7 +26,8 @@ to the owner (section 12).
 
 ## 1. Short answer
 
-- **The premise held in this experiment.** With the memtable's data in Rust, G1 spent 1.3 s per minute in GC
+- **The premise held in this experiment** (one machine, one synthetic insert-only workload, no real flush to
+  disk; section 7 lists the caveats). With the memtable's data in Rust, G1 spent 1.3 s per minute in GC
   pauses instead of 13.9 s (default `SkipListMemtable`) or 7.3 s (`TrieMemtable` with `offheap_objects`), promoted
   57 MiB to the old generation instead of 3.5-7.5 GB, and needed no mixed collections. Under generational ZGC the
   Java memtables caused hundreds of allocation stalls a minute; the Rust one caused none. Write throughput with
@@ -411,8 +412,10 @@ What these say, at face value:
 Caveats (read before quoting these numbers):
 
 - Each GC log covers the whole JVM, including about 10 s of identical Cassandra test setup before the measured
-  60 s. The Rust runs' longest G1 pause (123 ms) is a young pause during that setup (`GC(10)` at 14 s in run 1),
-  not during writing.
+  60 s. The Rust runs' longest G1 pauses (83-124 ms) are young collections in the first seconds of writing
+  (11-14 s after JVM start, when G1 has sized a large young generation: e.g. `1291M->73M` in 123 ms in run 1);
+  after that, no Rust-run pause exceeded 75 ms. I first wrote that these pauses were in the setup phase; the
+  timestamps say otherwise.
 - "Promoted" for G1 is the sum of old-region growth across young pauses times the region size (an approximation:
   it ignores humongous regions and counts promotion that a concurrent cycle later reclaims); for ZGC it is the
   young collections' reported promoted bytes.
