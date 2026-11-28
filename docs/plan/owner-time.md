@@ -43,6 +43,6 @@ Started 2026-11-28 at the owner's request, so that sprint 2's assessment counts 
 | Fri 11-27 | 00:37 | 00:45 | 8 | review | graph check, status, approval of D7-verification, asked for the decisions | estimated; confirmed by the owner 2026-11-28 |
 | Fri 11-27 | 20:00 | 21:52 | 112 | design | read the overview and decision #46; correlator; first-principles premises; driver; Rust and Lean; garbage debt; R-1, R-14, R-20; user stories; this protocol; repair; asked for the evaluation harness; Uncle Bob's metrics and the code-quality harness | start estimated (20:00, reading before the first message at 20:14), confirmed by the owner; end: owner left at 21:52 ("OK, I'll be back later") [05:52 UTC 11-28] |
 | Sat 11-28 | 00:04 | 00:27 | 23 | design | token use; why the layer never acts (actuators off), degraded_peer blind at 3 nodes; Rust spike: memtable vs sstable reader, JNI boundary risk; approved the overnight memtable spike | logged on arrival and departure ("I'm off to bed now") [08:04-08:27 UTC 11-28] |
-| Sat 11-28 | 03:40 | 03:46 | 6 | review | spike result summary; chose next work: spike 2 (memtable memory regions) then the pluggable memtable, and the sieve cleanup | logged on arrival and departure ("I'm back to bed") [11:40-11:46 UTC 11-28] |
+| Sat 11-28 | 03:40 | 03:43 | 3 | review | spike result summary; chose next work: spike 2 (memtable memory regions) then the pluggable memtable, and the sieve cleanup | logged on arrival and departure ("I'm back to bed") [11:40-11:43 UTC 11-28] |
 
-**Sprint 2 so far (counted):** about 2 h 29 min (14 min review, 135 min design).
+**Sprint 2 so far (counted):** about 2 h 26 min (11 min review, 135 min design).
