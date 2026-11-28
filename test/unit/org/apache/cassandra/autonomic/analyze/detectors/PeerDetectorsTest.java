@@ -216,8 +216,9 @@ public class PeerDetectorsTest
         AutonomicConfig c = new AutonomicConfig();
         c.detectors.put("node_imbalance", opts("enabled", false));
         List<Detector> built = Detectors.build(c);
-        assertEquals(10, built.size());
+        assertEquals(11, built.size());
         assertTrue(built.stream().noneMatch(x -> x.name().equals("node_imbalance")));
+        assertTrue(built.stream().anyMatch(x -> x.name().equals("cache_miss_pressure")));
         assertTrue(built.stream().anyMatch(x -> x.name().equals("degraded_peer")));
         assertTrue(built.stream().anyMatch(x -> x.name().equals("degraded_self")));
     }
